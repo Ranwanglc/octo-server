@@ -1189,7 +1189,7 @@ func (u *User) register(c *wkhttp.Context) {
 	}
 
 	if u.ctx.GetConfig().Register.Off {
-		c.ResponseError(errors.New("注册通道暂不开放，请使用官网上演示账号登录"))
+		c.ResponseError(errors.New("注册通道暂不开放，请长按标题使用官网上演示账号登录"))
 		return
 	}
 	appConfig, err := u.commonService.GetAppConfig()
@@ -1904,6 +1904,10 @@ func (u *User) blacklists(c *wkhttp.Context) {
 
 // sendRegisterCode 发送注册短信
 func (u *User) sendRegisterCode(c *wkhttp.Context) {
+	if u.ctx.GetConfig().Register.Off {
+		c.ResponseError(errors.New("注册通道暂不开放，请长按标题使用官网上演示账号登录"))
+		return
+	}
 	var req codeReq
 	if err := c.BindJSON(&req); err != nil {
 		c.ResponseError(errors.New("请求数据格式有误！"))

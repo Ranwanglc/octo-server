@@ -25,21 +25,28 @@ const (
 )
 
 func (u *User) thirdAuthcode(c *wkhttp.Context) {
-	c.ResponseError(errors.New("不支持注册，请使用官网上演示账号登录！"))
-	// authcode := util.GenerUUID()
-	// err := u.ctx.GetRedisConn().SetAndExpire(fmt.Sprintf("%s%s", ThirdAuthcodePrefix, authcode), "1", time.Minute*5)
-	// if err != nil {
-	// 	u.Error("redis set error", zap.Error(err))
-	// 	c.ResponseError(errors.New("redis set error"))
-	// 	return
-	// }
+	if u.ctx.GetConfig().Register.Off {
+		c.ResponseError(errors.New("注册通道暂不开放，请长按标题使用官网上演示账号登录"))
+		return
+	}
+	authcode := util.GenerUUID()
+	err := u.ctx.GetRedisConn().SetAndExpire(fmt.Sprintf("%s%s", ThirdAuthcodePrefix, authcode), "1", time.Minute*5)
+	if err != nil {
+		u.Error("redis set error", zap.Error(err))
+		c.ResponseError(errors.New("redis set error"))
+		return
+	}
 
-	// c.Response(gin.H{
-	// 	"authcode": authcode,
-	// })
+	c.Response(gin.H{
+		"authcode": authcode,
+	})
 }
 
 func (u *User) thirdAuthStatus(c *wkhttp.Context) {
+	if u.ctx.GetConfig().Register.Off {
+		c.ResponseError(errors.New("注册通道暂不开放，请长按标题使用官网上演示账号登录"))
+		return
+	}
 	authcode := c.Query("authcode")
 	key := fmt.Sprintf("%s%s", ThirdAuthcodePrefix, authcode)
 	result, err := u.ctx.GetRedisConn().GetString(key)

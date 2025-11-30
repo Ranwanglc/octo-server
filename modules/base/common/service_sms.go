@@ -2,9 +2,12 @@ package common
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
 	"errors"
 	"fmt"
-	"math/rand"
+	"math/big"
+	"strconv"
 	"time"
 
 	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/config"
@@ -41,17 +44,27 @@ func NewSMSService(ctx *config.Context) *SMSService {
 // SendVerifyCode 发送验证码
 func (s *SMSService) SendVerifyCode(ctx context.Context, zone, phone string, codeType CodeType) error {
 	var smsProvider ISMSProvider
+	// 检查发送频率限制
+	rateLimitKey := fmt.Sprintf("sms_rate_limit:%s@%s", zone, phone)
+	exists, err := s.ctx.GetRedisConn().GetString(rateLimitKey)
+	if err != nil {
+		return err
+	}
+	if exists != "" {
+		return errors.New("发送过于频繁，请1分钟后再试")
+	}
 
 	smsProviderName := s.ctx.GetConfig().SMSProvider
-	if smsProviderName == config.SMSProviderAliyun {
+	switch smsProviderName {
+	case config.SMSProviderAliyun:
 		if zone != "0086" && s.ctx.GetConfig().AliyunInternationalSMS.AccessKeyID != "" {
 			smsProvider = NewAliyunInternationalProvider(s.ctx)
 		} else {
 			smsProvider = NewAliyunProvider(s.ctx)
 		}
-	} else if smsProviderName == config.SMSProviderUnisms {
+	case config.SMSProviderUnisms:
 		smsProvider = NewUnismsProvider(s.ctx)
-	} else if smsProviderName == config.SMSProviderSmsbao {
+	case config.SMSProviderSmsbao:
 		smsProvider = NewSmsbaoProvider(s.ctx)
 	}
 
@@ -60,18 +73,45 @@ func (s *SMSService) SendVerifyCode(ctx context.Context, zone, phone string, cod
 	}
 
 	verifyCode := ""
-	rand.Seed(int64(time.Now().Nanosecond()))
-	for i := 0; i < 4; i++ {
-		verifyCode += fmt.Sprintf("%v", rand.Intn(10))
+	// rand.Seed(int64(time.Now().Nanosecond()))
+	// for i := 0; i < 4; i++ {
+	// 	verifyCode += fmt.Sprintf("%v", rand.Intn(10))
+	// }
+	// 使用 crypto/rand 生成安全的验证码
+	verifyCode, err = generateSecureVerifyCode(4)
+	if err != nil {
+		s.Error("生成验证码失败", zap.Error(err))
+		return errors.New("系统错误，请稍后重试")
 	}
 	s.Info("发送验证码", zap.String("code", verifyCode))
 	cacheKey := fmt.Sprintf("%s%d@%s@%s", CacheKeySMSCode, codeType, zone, phone)
-	err := s.ctx.GetRedisConn().SetAndExpire(cacheKey, verifyCode, time.Minute*5)
+	err = s.ctx.GetRedisConn().SetAndExpire(cacheKey, verifyCode, time.Minute*5)
 	if err != nil {
 		return err
 	}
+
+	// 设置发送频率限制
+	err = s.ctx.GetRedisConn().SetAndExpire(rateLimitKey, "1", time.Minute)
+	if err != nil {
+		return err
+	}
+
 	err = smsProvider.SendSMS(ctx, zone, phone, verifyCode)
 	return err
+}
+
+// generateSecureVerifyCode 生成密码学安全的验证码
+func generateSecureVerifyCode(length int) (string, error) {
+	const digits = "0123456789"
+	result := make([]byte, length)
+	for i := 0; i < length; i++ {
+		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(digits))))
+		if err != nil {
+			return "", err
+		}
+		result[i] = digits[num.Int64()]
+	}
+	return string(result), nil
 }
 
 // Verify 验证验证码
@@ -79,15 +119,51 @@ func (s *SMSService) Verify(ctx context.Context, zone, phone, code string, codeT
 	span, _ := s.ctx.Tracer().StartSpanFromContext(ctx, "smsService.Verify")
 	defer span.Finish()
 
+	// 检查是否被锁定
+	lockKey := fmt.Sprintf("sms_verify_lock:%s@%s", zone, phone)
+	locked, err := s.ctx.GetRedisConn().GetString(lockKey)
+	if err != nil {
+		return err
+	}
+	if locked != "" {
+		return errors.New("验证失败次数过多，请10分钟后再试")
+	}
+
 	cacheKey := fmt.Sprintf("%s%d@%s@%s", CacheKeySMSCode, codeType, zone, phone)
 	sysCode, err := s.ctx.GetRedisConn().GetString(cacheKey)
 	if err != nil {
 		return err
 	}
-	if sysCode != "" && sysCode == code {
+	if sysCode != "" && subtle.ConstantTimeCompare([]byte(sysCode), []byte(code)) == 1 {
 		s.ctx.GetRedisConn().Del(cacheKey)
+		// 验证成功，清除失败计数
+		failCountKey := fmt.Sprintf("sms_verify_fail:%s@%s", zone, phone)
+		s.ctx.GetRedisConn().Del(failCountKey)
+		s.ctx.GetRedisConn().Del(lockKey)
 		return nil
 	}
-	s.Info("验证码错误:"+code+", 真code:"+sysCode+", phone:"+phone, zap.String("code", code))
+
+	// 验证失败，增加失败计数
+	failCountKey := fmt.Sprintf("sms_verify_fail:%s@%s", zone, phone)
+	failCountStr, _ := s.ctx.GetRedisConn().GetString(failCountKey)
+	failCount := 0
+	if failCountStr != "" {
+		if count, err := strconv.Atoi(failCountStr); err == nil {
+			failCount = count
+		}
+	}
+	failCount++
+
+	if failCount >= 3 {
+		// 锁定10分钟
+		s.ctx.GetRedisConn().SetAndExpire(lockKey, "1", time.Minute*10)
+		//s.ctx.GetRedisConn().Del(failCountKey)
+		return errors.New("验证失败次数过多，已锁定10分钟")
+	} else {
+		// 设置失败计数，10分钟过期
+		s.ctx.GetRedisConn().SetAndExpire(failCountKey, fmt.Sprintf("%d", failCount), time.Minute*10)
+	}
+
+	s.Info("验证码错误:"+code+", phone:"+phone, zap.String("code", code))
 	return errors.New("验证码无效！")
 }
