@@ -51,9 +51,9 @@ type BotStreamEndReq struct {
 
 // BotReadReceiptReq Bot阅读回执请求
 type BotReadReceiptReq struct {
-	ChannelID   string  `json:"channel_id"`
-	ChannelType uint8   `json:"channel_type"`
-	MessageIDs  []int64 `json:"message_ids"`
+	ChannelID   string   `json:"channel_id"`
+	ChannelType uint8    `json:"channel_type"`
+	MessageIDs  []string `json:"message_ids"`
 }
 
 // BotHeartbeatReq Bot心跳请求（REST模式）

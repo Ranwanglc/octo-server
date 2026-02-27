@@ -1,6 +1,7 @@
 package botfather
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -388,7 +389,23 @@ func (bf *BotFather) typing(c *wkhttp.Context) {
 	}
 
 	robotID := getRobotIDFromContext(c)
-	err := bf.ctx.SendTyping(req.ChannelID, req.ChannelType, robotID)
+	// DM 场景：param.channel_id 必须是 bot 自身 UID（与正常客户端一致），
+	// 因为客户端用 param.channel_id 匹配会话，用户与 bot 的会话 channel_id = robotID
+	paramChannelID := req.ChannelID
+	if req.ChannelType == uint8(common.ChannelTypePerson) {
+		paramChannelID = robotID
+	}
+	err := bf.ctx.SendCMD(config.MsgCMDReq{
+		NoPersist:   true,
+		CMD:         common.CMDTyping,
+		ChannelID:   req.ChannelID,
+		ChannelType: req.ChannelType,
+		Param: map[string]interface{}{
+			"from_uid":     robotID,
+			"channel_id":   paramChannelID,
+			"channel_type": req.ChannelType,
+		},
+	})
 	if err != nil {
 		bf.Error("发送typing失败", zap.Error(err))
 		c.ResponseError(errors.New("发送typing失败"))
@@ -417,24 +434,102 @@ func (bf *BotFather) readReceipt(c *wkhttp.Context) {
 		channelType = req.ChannelType
 	}
 
-	// 发送unreadClear CMD通知对方已读
-	err := bf.ctx.SendCMD(config.MsgCMDReq{
-		NoPersist:   true,
-		FromUID:     robotID,
+	// 1. 清除会话未读角标
+	err := bf.ctx.IMClearConversationUnread(config.ClearConversationUnreadReq{
+		UID:         robotID,
 		ChannelID:   channelID,
 		ChannelType: channelType,
-		CMD:         common.CMDConversationUnreadClear,
-		Param: map[string]interface{}{
-			"channel_id":   channelID,
-			"channel_type": channelType,
-			"uid":          robotID,
-		},
+		Unread:      0,
 	})
 	if err != nil {
-		bf.Error("发送已读回执失败", zap.Error(err))
-		c.ResponseError(errors.New("发送已读回执失败"))
-		return
+		bf.Warn("清除未读计数失败", zap.Error(err))
 	}
+
+	// 2. 消息级已读回执：写入 member_readed + Redis 缓存，触发发送者看到"已读"
+	if len(req.MessageIDs) > 0 {
+		// 解析字符串消息 ID 为 int64（避免 JS 大数精度丢失）
+		messageIDs := make([]int64, 0, len(req.MessageIDs))
+		for _, idStr := range req.MessageIDs {
+			mid, parseErr := strconv.ParseInt(idStr, 10, 64)
+			if parseErr != nil {
+				bf.Warn("解析消息ID失败", zap.String("id", idStr), zap.Error(parseErr))
+				continue
+			}
+			messageIDs = append(messageIDs, mid)
+		}
+		if len(messageIDs) == 0 {
+			c.ResponseOK()
+			return
+		}
+
+		fakeChannelID := channelID
+		if channelType == common.ChannelTypePerson.Uint8() {
+			fakeChannelID = common.GetFakeChannelIDWith(channelID, robotID)
+		}
+
+		// 查询消息详情（需要 FromUID、MessageSeq）
+		// DM 场景：用户发给 bot 的消息存储在 channel_id=robotID，
+		// 但 adapter 传入的 channel_id 是用户 UID（回复目标），需要交换为 robotID 来搜索
+		searchChannelID := channelID
+		if channelType == common.ChannelTypePerson.Uint8() {
+			searchChannelID = robotID
+		}
+		syncMsg, err := bf.ctx.IMSearchMessages(&config.MsgSearchReq{
+			ChannelID:   searchChannelID,
+			ChannelType: channelType,
+			MessageIds:  messageIDs,
+			LoginUID:    robotID,
+		})
+		if err != nil {
+			bf.Warn("查询消息失败", zap.Error(err))
+		} else if syncMsg != nil && len(syncMsg.Messages) > 0 {
+			// 批量插入 member_readed
+			valueStrings := make([]string, 0, len(syncMsg.Messages))
+			valueArgs := make([]interface{}, 0, len(syncMsg.Messages)*4)
+			for _, msg := range syncMsg.Messages {
+				valueStrings = append(valueStrings, "(?, ?, ?, ?)")
+				valueArgs = append(valueArgs, msg.MessageID, fakeChannelID, channelType, robotID)
+			}
+			stmt := fmt.Sprintf(`INSERT INTO member_readed (message_id, channel_id, channel_type, uid) VALUES %s ON DUPLICATE KEY UPDATE message_id=VALUES(message_id)`,
+				strings.Join(valueStrings, ","))
+			_, err = bf.db.session.InsertBySql(stmt, valueArgs...).Exec()
+			if err != nil {
+				bf.Warn("插入已读记录失败", zap.Error(err))
+			}
+
+			// 写入 Redis 缓存，定时任务会聚合并通知发送者
+			go func() {
+				for _, msg := range syncMsg.Messages {
+					messageIDStr := strconv.FormatInt(msg.MessageID, 10)
+					cacheData := map[string]interface{}{
+						"MessageID":      msg.MessageID,
+						"MessageIDStr":   messageIDStr,
+						"MessageSeq":     msg.MessageSeq,
+						"FromUID":        msg.FromUID,
+						"ChannelID":      fakeChannelID,
+						"ChannelType":    channelType,
+						"LoginUID":       robotID,
+						"ReqChannelID":   channelID,
+						"ReqChannelType": channelType,
+					}
+					jsonStr, err := json.Marshal(cacheData)
+					if err != nil {
+						bf.Error("序列化消息已读缓存失败", zap.Error(err))
+						continue
+					}
+					err = bf.ctx.GetRedisConn().SetAndExpire(
+						fmt.Sprintf("readedCount:%s", messageIDStr),
+						string(jsonStr),
+						time.Hour*24*7,
+					)
+					if err != nil {
+						bf.Error("写入已读缓存失败", zap.Error(err), zap.Int64("messageID", msg.MessageID))
+					}
+				}
+			}()
+		}
+	}
+
 	c.ResponseOK()
 }
 
