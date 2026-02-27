@@ -29,3 +29,15 @@
 logs/
 
 wukongimdata/
+
+# Docker 数据目录
+docker/tsdd/mysqldata/
+docker/tsdd/miniodata/
+docker/tsdd/logs/
+
+# 环境配置（含密码）
+docker/tsdd/.env
+
+# IDE
+.vscode/
+*.swp
