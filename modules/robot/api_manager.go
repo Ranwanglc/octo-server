@@ -4,11 +4,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strconv"
 
 	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/common"
 	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/config"
 	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/log"
+	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/util"
 	"github.com/TangSengDaoDao/TangSengDaoDaoServerLib/pkg/wkhttp"
 	"go.uber.org/zap"
 )
@@ -194,6 +196,9 @@ func (m *Manager) robotList(c *wkhttp.Context) {
 	if pageSize <= 0 || pageSize > 100 {
 		pageSize = 20
 	}
+	if pageIndex < 0 {
+		pageIndex = 0
+	}
 
 	list, err := m.db.queryRobotListPaged(pageIndex, pageSize)
 	if err != nil {
@@ -228,7 +233,7 @@ func (m *Manager) robotList(c *wkhttp.Context) {
 
 // 机器人详情
 func (m *Manager) robotDetail(c *wkhttp.Context) {
-	err := c.CheckLoginRole()
+	err := c.CheckLoginRoleIsSuperAdmin()
 	if err != nil {
 		c.ResponseError(err)
 		return
@@ -314,6 +319,14 @@ func (m *Manager) robotDelete(c *wkhttp.Context) {
 		c.ResponseError(errors.New("机器人ID不能为空"))
 		return
 	}
+
+	// 先清理 IM 连接和缓存，再做软删除
+	if err := m.cleanupBotConnection(robotID); err != nil {
+		m.Error("清理机器人连接失败", zap.Error(err))
+		c.ResponseError(errors.New("清理机器人连接失败"))
+		return
+	}
+
 	err = m.db.deleteRobotSoft(robotID)
 	if err != nil {
 		m.Error("删除机器人失败", zap.Error(err))
@@ -321,6 +334,34 @@ func (m *Manager) robotDelete(c *wkhttp.Context) {
 		return
 	}
 	c.ResponseOK()
+}
+
+// cleanupBotConnection 清理机器人的IM连接、缓存和事件队列
+func (m *Manager) cleanupBotConnection(robotID string) error {
+	// 1. 更新 IM Token，旧连接立即失效
+	newIMToken := util.GenerUUID()
+	_, err := m.ctx.UpdateIMToken(config.UpdateIMTokenReq{
+		UID:         robotID,
+		Token:       newIMToken,
+		DeviceFlag:  config.APP,
+		DeviceLevel: config.DeviceLevelMaster,
+	})
+	if err != nil {
+		return fmt.Errorf("更新IM Token失败: %w", err)
+	}
+
+	// 2. 清空缓存的 IM Token
+	m.db.updateRobotIMTokenCache(robotID, "")
+
+	// 3. 清除心跳 Redis key
+	heartbeatKey := fmt.Sprintf("bot:heartbeat:%s", robotID)
+	m.ctx.GetRedisConn().Del(heartbeatKey)
+
+	// 4. 清除事件队列 Redis key
+	eventKey := fmt.Sprintf("robotEvent:%s", robotID)
+	m.ctx.GetRedisConn().Del(eventKey)
+
+	return nil
 }
 
 // 重置机器人Token
@@ -336,13 +377,25 @@ func (m *Manager) robotRevokeToken(c *wkhttp.Context) {
 		return
 	}
 
-	newToken := "bf_" + randomHexStr(16)
+	newToken, err := m.generateUniqueBotToken()
+	if err != nil {
+		m.Error("生成Token失败", zap.Error(err))
+		c.ResponseError(errors.New("生成Token失败，请重试"))
+		return
+	}
 	err = m.db.updateRobotBotToken(robotID, newToken)
 	if err != nil {
 		m.Error("重置Token失败", zap.Error(err))
 		c.ResponseError(errors.New("重置Token失败"))
 		return
 	}
+
+	// 撤销旧 IM Token，踢掉现有连接
+	if err := m.cleanupBotConnection(robotID); err != nil {
+		m.Error("清理机器人连接失败", zap.Error(err))
+		// bot_token 已更新，连接清理失败不阻塞返回，但记录错误
+	}
+
 	c.Response(map[string]interface{}{
 		"bot_token": newToken,
 	})
@@ -352,6 +405,21 @@ func randomHexStr(n int) string {
 	b := make([]byte, n)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// generateUniqueBotToken 生成唯一的Bot Token（最多重试3次）
+func (m *Manager) generateUniqueBotToken() (string, error) {
+	for i := 0; i < 3; i++ {
+		token := "bf_" + randomHexStr(16)
+		existing, err := m.db.queryRobotByBotToken(token)
+		if err != nil {
+			return "", fmt.Errorf("检查Token唯一性失败: %w", err)
+		}
+		if existing == nil {
+			return token, nil
+		}
+	}
+	return "", fmt.Errorf("生成唯一Token失败，已重试3次")
 }
 
 type robotListResp struct {

@@ -395,6 +395,10 @@ func (s *Service) AddUser(user *AddUserReq) error {
 	if strings.TrimSpace(username) == "" {
 		username = fmt.Sprintf("%s%s", user.Zone, user.Phone)
 	}
+	shortNo := user.ShortNo
+	if strings.TrimSpace(shortNo) == "" {
+		shortNo = util.Ten2Hex(time.Now().UnixNano())
+	}
 	userM := &Model{
 		Name:     user.Name,
 		UID:      uid,
@@ -402,7 +406,7 @@ func (s *Service) AddUser(user *AddUserReq) error {
 		Phone:    user.Phone,
 		Username: username,
 		Email:    user.Email,
-		ShortNo:  util.Ten2Hex(time.Now().UnixNano()),
+		ShortNo:  shortNo,
 		Status:   1,
 	}
 	if user.Password != "" {
@@ -802,6 +806,7 @@ type AddUserReq struct {
 	Name     string
 	UID      string // 如果无值，则随机生成
 	Username string
+	ShortNo  string // 如果无值，则自动生成
 	Zone     string
 	Phone    string
 	Email    string

@@ -345,9 +345,15 @@ func (h *commandHandler) onBotUsernameInput(fromUID string, input string) {
 		return
 	}
 
-	// 生成 bot token 并创建
-	botToken := generateBotToken()
-	err := h.createBot(fromUID, name, username, botToken)
+	// 生成 bot token 并创建（含碰撞检测）
+	botToken, err := h.generateUniqueBotToken()
+	if err != nil {
+		h.Error("生成Bot Token失败", zap.Error(err))
+		h.reply(fromUID, "创建失败，请稍后重试。")
+		h.sm.Clear(fromUID)
+		return
+	}
+	err = h.createBot(fromUID, name, username, botToken)
 	if err != nil {
 		h.Error("创建机器人失败", zap.Error(err))
 		h.reply(fromUID, "创建失败，请稍后重试。")
@@ -491,7 +497,30 @@ func (h *commandHandler) onDeleteConfirm(fromUID string, input string) {
 		return
 	}
 
-	err := h.db.deleteRobot(botID)
+	// 先清理 IM 连接和缓存，再做软删除
+	newIMToken := util.GenerUUID()
+	_, err := h.ctx.UpdateIMToken(config.UpdateIMTokenReq{
+		UID:         botID,
+		Token:       newIMToken,
+		DeviceFlag:  config.APP,
+		DeviceLevel: config.DeviceLevelMaster,
+	})
+	if err != nil {
+		h.Error("撤销IM Token失败", zap.Error(err))
+	}
+
+	// 清空缓存的 IM Token
+	h.db.updateRobotIMTokenCache(botID, "")
+
+	// 清除心跳
+	heartbeatKey := fmt.Sprintf("%s%s", heartbeatKeyPrefix, botID)
+	h.ctx.GetRedisConn().Del(heartbeatKey)
+
+	// 清除事件队列
+	eventKey := fmt.Sprintf("robotEvent:%s", botID)
+	h.ctx.GetRedisConn().Del(eventKey)
+
+	err = h.db.deleteRobot(botID)
 	if err != nil {
 		h.Error("删除机器人失败", zap.Error(err))
 		h.reply(fromUID, "删除失败，请稍后重试。")
@@ -517,8 +546,14 @@ func (h *commandHandler) onRevokeConfirm(fromUID string, input string) {
 		return
 	}
 
-	newToken := generateBotToken()
-	err := h.db.updateRobotBotToken(botID, newToken)
+	newToken, err := h.generateUniqueBotToken()
+	if err != nil {
+		h.Error("生成Bot Token失败", zap.Error(err))
+		h.reply(fromUID, "重置失败，请稍后重试。")
+		h.sm.Clear(fromUID)
+		return
+	}
+	err = h.db.updateRobotBotToken(botID, newToken)
 	if err != nil {
 		h.Error("重置Token失败", zap.Error(err))
 		h.reply(fromUID, "重置失败，请稍后重试。")
@@ -526,8 +561,31 @@ func (h *commandHandler) onRevokeConfirm(fromUID string, input string) {
 		return
 	}
 
+	// 撤销旧 IM Token，踢掉现有连接
+	newIMToken := util.GenerUUID()
+	_, err = h.ctx.UpdateIMToken(config.UpdateIMTokenReq{
+		UID:         botID,
+		Token:       newIMToken,
+		DeviceFlag:  config.APP,
+		DeviceLevel: config.DeviceLevelMaster,
+	})
+	if err != nil {
+		h.Error("撤销IM Token失败", zap.Error(err))
+	}
+
+	// 清空缓存的 IM Token
+	h.db.updateRobotIMTokenCache(botID, "")
+
+	// 清除心跳
+	heartbeatKey := fmt.Sprintf("%s%s", heartbeatKeyPrefix, botID)
+	h.ctx.GetRedisConn().Del(heartbeatKey)
+
+	// 清除事件队列
+	eventKey := fmt.Sprintf("robotEvent:%s", botID)
+	h.ctx.GetRedisConn().Del(eventKey)
+
 	h.sm.Clear(fromUID)
-	h.reply(fromUID, fmt.Sprintf("Token 已重置。新 Token：\n\n%s\n\n旧 Token 已失效。", newToken))
+	h.reply(fromUID, fmt.Sprintf("Token 已重置。新 Token：\n\n%s\n\n旧 Token 已失效，已连接的 Agent 已被踢下线。", newToken))
 }
 
 // disconnectBot 断开机器人的 Agent 连接
@@ -576,6 +634,7 @@ func (h *commandHandler) createBot(creatorUID, name, username, botToken string) 
 		UID:      robotID,
 		Username: username,
 		Name:     name,
+		ShortNo:  username,
 	})
 	if err != nil {
 		return fmt.Errorf("创建用户失败: %w", err)
@@ -716,6 +775,21 @@ DM me on DMWork when you're ready.
 // generateBotToken 生成Bot Token
 func generateBotToken() string {
 	return BotTokenPrefix + randomHex(16)
+}
+
+// generateUniqueBotToken 生成唯一的Bot Token（最多重试3次）
+func (h *commandHandler) generateUniqueBotToken() (string, error) {
+	for i := 0; i < 3; i++ {
+		token := generateBotToken()
+		existing, err := h.db.queryRobotByBotToken(token)
+		if err != nil {
+			return "", fmt.Errorf("检查Token唯一性失败: %w", err)
+		}
+		if existing == nil {
+			return token, nil
+		}
+	}
+	return "", fmt.Errorf("生成唯一Token失败，已重试3次")
 }
 
 // randomHex 生成随机十六进制字符串

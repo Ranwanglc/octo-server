@@ -145,6 +145,14 @@ func (d *robotDB) updateRobotInfo(robotID string, fields map[string]interface{})
 	return err
 }
 
+// updateRobotIMTokenCache 更新机器人的IM Token缓存
+func (d *robotDB) updateRobotIMTokenCache(robotID string, imToken string) error {
+	_, err := d.session.Update("robot").SetMap(map[string]interface{}{
+		"im_token_cache": imToken,
+	}).Where("robot_id=?", robotID).Exec()
+	return err
+}
+
 // deleteRobotSoft 软删除机器人
 func (d *robotDB) deleteRobotSoft(robotID string) error {
 	_, err := d.session.Update("robot").SetMap(map[string]interface{}{
