@@ -88,9 +88,16 @@ func (u *User) usernameLogin(c *wkhttp.Context) {
 		return
 	}
 
-	if util.MD5(util.MD5(req.Password)) != userInfo.Password {
+	matched, needsMigration := CheckPassword(req.Password, userInfo.Password)
+	if !matched {
 		c.ResponseError(errors.New("密码不正确！"))
 		return
+	}
+	// 自动将旧 MD5 密码迁移到 bcrypt
+	if needsMigration {
+		if newHash, hashErr := HashPassword(req.Password); hashErr == nil {
+			_ = u.db.updatePassword(newHash, userInfo.UID)
+		}
 	}
 
 	result, err := u.execLogin(userInfo, config.DeviceFlag(req.Flag), req.Device, loginSpanCtx)
@@ -231,8 +238,14 @@ func (u *User) resetPwdWithWeb3PublicKey(c *wkhttp.Context) {
 		return
 	}
 
+	newHash, err := HashPassword(req.Password)
+	if err != nil {
+		u.Error("密码哈希失败", zap.Error(err))
+		c.ResponseError(errors.New("密码处理失败"))
+		return
+	}
 	updateMap := map[string]interface{}{}
-	updateMap["password"] = util.MD5(util.MD5(req.Password))
+	updateMap["password"] = newHash
 	err = u.db.updateUser(updateMap, user.UID)
 	if err != nil {
 		u.Error("修改用户密码错误", zap.Error(err))
@@ -459,12 +472,18 @@ func (u *User) updatePwd(c *wkhttp.Context) {
 		c.ResponseError(errors.New("该用户不存在"))
 		return
 	}
-	oldPwd := util.MD5(util.MD5(req.Password))
-	if oldPwd != userInfo.Password {
+	matched, _ := CheckPassword(req.Password, userInfo.Password)
+	if !matched {
 		c.ResponseError(errors.New("旧密码错误"))
 		return
 	}
-	err = u.db.UpdateUsersWithField("password", util.MD5(util.MD5(req.NewPassword)), userInfo.UID)
+	newHash, err := HashPassword(req.NewPassword)
+	if err != nil {
+		u.Error("密码哈希失败", zap.Error(err))
+		c.ResponseError(errors.New("密码处理失败"))
+		return
+	}
+	err = u.db.UpdateUsersWithField("password", newHash, userInfo.UID)
 	if err != nil {
 		u.Error("修改登录密码错误", zap.Error(err))
 		c.ResponseError(errors.New("修改登录密码错误"))

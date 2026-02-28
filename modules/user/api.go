@@ -2609,7 +2609,12 @@ func (u *User) createUserWithRespAndTx(registerSpanCtx context.Context, createUs
 		userModel.Username = fmt.Sprintf("%s%s", createUser.Zone, createUser.Phone)
 	}
 	if createUser.Password != "" {
-		userModel.Password = util.MD5(util.MD5(createUser.Password))
+		hashedPwd, hashErr := HashPassword(createUser.Password)
+		if hashErr != nil {
+			u.Error("密码哈希失败", zap.Error(hashErr))
+			return nil, hashErr
+		}
+		userModel.Password = hashedPwd
 	}
 	if createUser.Username != "" {
 		userModel.Username = createUser.Username

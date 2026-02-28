@@ -13,6 +13,9 @@ import (
 
 // 数据源
 func (w *Webhook) datasource(c *wkhttp.Context) {
+	if !w.verifyRequestSignature(c) {
+		return
+	}
 	var cmdReq struct {
 		CMD  string                 `json:"cmd"`
 		Data map[string]interface{} `json:"data"`

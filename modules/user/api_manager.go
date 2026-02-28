@@ -161,9 +161,16 @@ func (m *Manager) login(c *wkhttp.Context) {
 		c.ResponseError(errors.New("登录用户不存在"))
 		return
 	}
-	if userInfo.Password != util.MD5(util.MD5(req.Password)) {
+	matched, needsMigration := CheckPassword(req.Password, userInfo.Password)
+	if !matched {
 		c.ResponseError(errors.New("用户名或密码错误"))
 		return
+	}
+	// 自动将旧 MD5 密码迁移到 bcrypt
+	if needsMigration {
+		if newHash, hashErr := HashPassword(req.Password); hashErr == nil {
+			_ = m.userDB.updatePassword(newHash, userInfo.UID)
+		}
 	}
 	if userInfo.Role != string(wkhttp.Admin) && userInfo.Role != string(wkhttp.SuperAdmin) {
 		c.ResponseError(errors.New("登录账号未开通管理权限"))
@@ -234,7 +241,13 @@ func (m *Manager) resetUserPassword(c *wkhttp.Context) {
 		return
 	}
 
-	err = m.userDB.UpdateUsersWithField("password", util.MD5(util.MD5(req.NewPassword)), req.Uid)
+	newHash, hashErr := HashPassword(req.NewPassword)
+	if hashErr != nil {
+		m.Error("密码哈希失败", zap.Error(hashErr))
+		c.ResponseError(errors.New("密码处理失败"))
+		return
+	}
+	err = m.userDB.UpdateUsersWithField("password", newHash, req.Uid)
 	if err != nil {
 		m.Error("重置用户密码错误", zap.Error(err))
 		c.Response("重置用户密码错误")

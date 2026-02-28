@@ -410,7 +410,11 @@ func (s *Service) AddUser(user *AddUserReq) error {
 		Status:   1,
 	}
 	if user.Password != "" {
-		userM.Password = util.MD5(util.MD5(user.Password))
+		hashedPwd, hashErr := HashPassword(user.Password)
+		if hashErr != nil {
+			return nil, hashErr
+		}
+		userM.Password = hashedPwd
 	}
 
 	err := s.db.Insert(userM)
@@ -662,11 +666,15 @@ func (s *Service) UpdateLoginPassword(req UpdateLoginPasswordReq) error {
 	if userM == nil {
 		return errors.New("用户不存在！")
 	}
-	if util.MD5(util.MD5(req.Password)) != userM.Password {
+	if !VerifyPassword(req.Password, userM.Password) {
 		return errors.New("原密码不正确！")
 	}
 
-	err = s.db.updatePassword(util.MD5(util.MD5(req.NewPassword)), req.UID)
+	newHash, hashErr := HashPassword(req.NewPassword)
+	if hashErr != nil {
+		return hashErr
+	}
+	err = s.db.updatePassword(newHash, req.UID)
 	if err != nil {
 		return errors.New("更新密码失败！")
 	}

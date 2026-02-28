@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 
@@ -35,6 +36,7 @@ type Webhook struct {
 	pushMap      map[common.DeviceType]map[string]Push
 	groupService group.IService
 	userService  user.IService
+	secretKey    string // Webhook HMAC-SHA256 签名密钥
 	wkhook.UnimplementedWebhookServiceServer
 	grpcServer *grpc.Server
 }
@@ -92,6 +94,7 @@ func New(ctx *config.Context) *Webhook {
 		messageDB:    newMessageDB(ctx),
 		groupService: group.NewService(ctx),
 		userService:  user.NewService(ctx),
+		secretKey:    os.Getenv("TS_WEBHOOK_SECRET_KEY"),
 	}
 }
 func getSupportTypes() []common.ContentType {
@@ -151,6 +154,9 @@ func (w *Webhook) SendWebhook(ctx context.Context, req *wkhook.EventReq) (*wkhoo
 }
 
 func (w *Webhook) messageNotify(c *wkhttp.Context) {
+	if !w.verifyRequestSignature(c) {
+		return
+	}
 	var messages []MsgResp
 	if err := c.BindJSON(&messages); err != nil {
 		w.Error("数据格式有误！", zap.Error(err))
@@ -216,6 +222,9 @@ func (w *Webhook) handleMessageNotify(messages []MsgResp) ([]string, error) {
 }
 
 func (w *Webhook) webhook(c *wkhttp.Context) {
+	if !w.verifyRequestSignature(c) {
+		return
+	}
 
 	event := c.Query("event")
 
