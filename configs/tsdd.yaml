@@ -12,6 +12,12 @@ mode: "debug" #   运行模式 debug or release
 #groupUpgradeWhenMemberCount: 1000 # 群组人数达到多少人时，群组自动升级为超级群组
 #eventPoolSize: 100 # 事件池大小
 
+##################### Webhook安全配置 ####################
+# Webhook HMAC-SHA256 签名密钥（环境变量 TS_WEBHOOK_SECRET_KEY）
+# 配置后，所有入站 webhook 请求必须携带 X-Signature-256 头
+# 签名格式: sha256=<hex(HMAC-SHA256(body, secret_key))>
+#webhookSecretKey: "" # 留空则不验证签名
+
 ##################### 悟空IM配置 ####################
 #wukongIM:
 #  apiURL: "" # 悟空IM的api地址 格式： http://xx.xx.xx.xx:5001

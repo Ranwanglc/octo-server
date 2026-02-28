@@ -1,0 +1,72 @@
+package file
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestCheckReq(t *testing.T) {
+	f := &File{} // checkReq 不依赖 ctx
+
+	tests := []struct {
+		name     string
+		fileType Type
+		path     string
+		wantErr  bool
+		errMsg   string
+	}{
+		// 有效请求
+		{"chat with path", TypeChat, "/upload/test.jpg", false, ""},
+		{"moment with path", TypeMoment, "/upload/img.png", false, ""},
+		{"report with path", TypeReport, "/upload/report.jpg", false, ""},
+		{"chatbg with path", TypeChatBg, "/upload/bg.jpg", false, ""},
+		{"common with path", TypeCommon, "/upload/file.pdf", false, ""},
+		{"download with path", TypeDownload, "/download/file.zip", false, ""},
+
+		// TypeMomentCover 和 TypeSticker 可以没有 path
+		{"momentcover no path", TypeMomentCover, "", false, ""},
+		{"sticker no path", TypeSticker, "", false, ""},
+		{"momentcover with path", TypeMomentCover, "/path", false, ""},
+		{"sticker with path", TypeSticker, "/path", false, ""},
+
+		// 空文件类型
+		{"empty type", "", "/path", true, "文件类型不能为空"},
+
+		// 空路径（非 momentcover/sticker）
+		{"chat no path", TypeChat, "", true, "上传路径不能为空"},
+		{"moment no path", TypeMoment, "", true, "上传路径不能为空"},
+		{"report no path", TypeReport, "", true, "上传路径不能为空"},
+
+		// 无效文件类型
+		{"invalid type", Type("invalid"), "/path", true, "文件类型错误"},
+		{"workplace banner type", TypeWorkplaceBanner, "/path", true, "文件类型错误"},
+		{"workplace icon type", TypeWorkplaceAppIcon, "/path", true, "文件类型错误"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := f.checkReq(tt.fileType, tt.path)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestCheckReq_AllValidTypes(t *testing.T) {
+	f := &File{}
+	validTypes := []Type{
+		TypeChat, TypeMoment, TypeMomentCover,
+		TypeSticker, TypeReport, TypeChatBg,
+		TypeCommon, TypeDownload,
+	}
+
+	for _, ft := range validTypes {
+		err := f.checkReq(ft, "/path")
+		assert.NoError(t, err, "type %s should be valid", ft)
+	}
+}

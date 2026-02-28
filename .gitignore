@@ -40,4 +40,6 @@ docker/tsdd/.env
 
 # IDE
 .vscode/
-*.swp
+*.swpTangSengDaoDaoServer
+tsdd
+CLAUDE.md

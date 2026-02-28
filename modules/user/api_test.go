@@ -676,3 +676,204 @@ func TestDeleteUserRedDot(t *testing.T) {
 	s.GetRoute().ServeHTTP(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)
 }
+
+// TestUser_Login_WrongPassword 测试使用错误密码登录
+func TestUser_Login_WrongPassword(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	u := New(ctx)
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	err = u.db.Insert(&Model{
+		UID:      testutil.UID,
+		Name:     "admin",
+		Username: "admin",
+		Password: util.MD5(util.MD5("123456")),
+		ShortNo:  "uid_xxx1",
+		Status:   1,
+	})
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/user/login", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"username": "admin",
+		"password": "wrong_password",
+		"device": map[string]interface{}{
+			"device_id":    "device_id1",
+			"device_name":  "device_name1",
+			"device_model": "device_model1",
+		},
+	}))))
+	s.GetRoute().ServeHTTP(w, req)
+	// 密码错误应该返回错误
+	assert.NotEqual(t, http.StatusOK, w.Code)
+}
+
+// TestUser_Login_NonExistentUser 测试使用不存在的用户登录
+func TestUser_Login_NonExistentUser(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	_ = New(ctx)
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/user/login", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"username": "nonexistent_user",
+		"password": "123456",
+		"device": map[string]interface{}{
+			"device_id":    "device_id1",
+			"device_name":  "device_name1",
+			"device_model": "device_model1",
+		},
+	}))))
+	s.GetRoute().ServeHTTP(w, req)
+	assert.NotEqual(t, http.StatusOK, w.Code)
+}
+
+// TestUser_Register_MissingFields 测试缺少必填字段的注册请求
+func TestUser_Register_MissingFields(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	_ = New(ctx)
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	// 缺少 phone
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/user/register", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"code":     "123456",
+		"zone":     "0086",
+		"password": "1234567",
+	}))))
+	s.GetRoute().ServeHTTP(w, req)
+	assert.NotEqual(t, http.StatusOK, w.Code)
+}
+
+// TestUserGet_NotFound 测试获取不存在的用户
+func TestUserGet_NotFound(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	u := New(ctx)
+	u.Route(s.GetRoute())
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/users/nonexistent_uid", nil)
+	req.Header.Set("token", token)
+	s.GetRoute().ServeHTTP(w, req)
+	// 用户不存在时不应返回正常用户数据
+	assert.False(t, strings.Contains(w.Body.String(), `"uid":"nonexistent_uid"`))
+}
+
+// TestRemoveBlackList 测试移除黑名单
+func TestRemoveBlackList(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	u := New(ctx)
+	u.Route(s.GetRoute())
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	err = u.db.Insert(&Model{
+		UID:      "target_uid",
+		Name:     "target",
+		Username: "target",
+		ShortNo:  "uid_xxx2",
+	})
+	assert.NoError(t, err)
+
+	// 先添加黑名单
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/user/blacklist/target_uid", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// 再移除黑名单
+	w2 := httptest.NewRecorder()
+	req2, _ := http.NewRequest("DELETE", "/v1/user/blacklist/target_uid", nil)
+	req2.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w2, req2)
+	assert.Equal(t, http.StatusOK, w2.Code)
+}
+
+// TestUserUpdateInfo_MultipleFields 测试更新多个用户字段
+func TestUserUpdateInfo_MultipleFields(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	u := New(ctx)
+	u.Route(s.GetRoute())
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	err = u.db.Insert(&Model{
+		UID:      testutil.UID,
+		Name:     "admin",
+		Username: "admin",
+		Sex:      1,
+		Password: util.MD5(util.MD5("123456")),
+		ShortNo:  "uid_xxx1",
+		Zone:     "0086",
+		Phone:    "13600000001",
+	})
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/user/current", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"name": "新名字",
+		"sex":  0,
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// TestUser_Search_ByPhone 测试通过手机号搜索
+func TestUser_Search_ByPhone(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	u := New(ctx)
+	u.Route(s.GetRoute())
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+	err = u.db.Insert(&Model{
+		UID:           "1234",
+		Zone:          "0086",
+		Phone:         "13600000099",
+		Username:      "008613600000099",
+		Password:      util.MD5(util.MD5("123456")),
+		Name:          "手机搜索",
+		ShortNo:       "wukongchat_099",
+		SearchByPhone: 1,
+		SearchByShort: 1,
+	})
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/user/search?keyword=008613600000099", nil)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, true, strings.Contains(w.Body.String(), `"exist":1`))
+	assert.Equal(t, true, strings.Contains(w.Body.String(), `"uid":"1234"`))
+}
+
+// TestUserSetting_DeviceLock 测试设备锁设置
+func TestUserSetting_DeviceLock(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	u := New(ctx)
+	u.Route(s.GetRoute())
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	err = u.db.Insert(&Model{
+		UID:      testutil.UID,
+		Name:     "admin",
+		Username: "admin",
+		ShortNo:  "uid_xxx1",
+		Password: util.MD5(util.MD5("123456")),
+	})
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/user/my/setting", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"device_lock": 1,
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+}
