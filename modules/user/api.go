@@ -385,15 +385,29 @@ func (u *User) UserAvatar(c *wkhttp.Context) {
 			} else {
 				c.Header("Content-Type", "image/png")
 				c.Header("Content-Disposition", "inline; filename=avatar.png")
+				c.Header("Cache-Control", "public, max-age=86400")
 				c.Data(http.StatusOK, "image/png", imageData)
 				return
 			}
 		}
 
-		avatarID := crc32.ChecksumIEEE([]byte(uid)) % uint32(u.ctx.GetConfig().Avatar.DefaultCount)
-		ph = fmt.Sprintf("/avatar/default/test (%d).jpg", avatarID)
 		if strings.TrimSpace(u.ctx.GetConfig().Avatar.DefaultBaseURL) != "" {
+			avatarID := crc32.ChecksumIEEE([]byte(uid)) % uint32(u.ctx.GetConfig().Avatar.DefaultCount)
+			ph = fmt.Sprintf("/avatar/default/test (%d).jpg", avatarID)
 			downloadUrl = strings.ReplaceAll(u.ctx.GetConfig().Avatar.DefaultBaseURL, "{avatar}", fmt.Sprintf("%d", avatarID))
+		} else {
+			// 本地生成基于 UID 的彩色圆形默认头像
+			imageData, genErr := generateDefaultAvatar(uid)
+			if genErr != nil {
+				u.Error("生成默认头像失败", zap.Error(genErr))
+				c.Writer.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			c.Header("Content-Type", "image/png")
+			c.Header("Content-Disposition", "inline; filename=avatar.png")
+			c.Header("Cache-Control", "public, max-age=86400")
+			c.Data(http.StatusOK, "image/png", imageData)
+			return
 		}
 	}
 	if downloadUrl == "" {
