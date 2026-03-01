@@ -152,7 +152,10 @@ export function setup() {
     );
 
     let token = '';
-    try { token = JSON.parse(loginRes.body).token || ''; } catch (_) {}
+    try {
+      const body = JSON.parse(loginRes.body);
+      token = (body.data && body.data.token) || body.token || '';
+    } catch (_) {}
     syncTokens.push(token);
   }
 
@@ -266,7 +269,7 @@ export function scenarioUserLogin() {
     const ok = check(loginRes, {
       'login: status 200': (r) => r.status === 200,
       'login: has token':  (r) => {
-        try { return !!JSON.parse(r.body).token; } catch { return false; }
+        try { const b = JSON.parse(r.body); return !!(b.data && b.data.token) || !!b.token; } catch { return false; }
       },
     });
     if (!ok) { loginErrors.add(1); errorRate.add(1); } else { errorRate.add(0); }
@@ -287,7 +290,7 @@ export function scenarioUserLogin() {
     const ok = check(retryRes, {
       'login(retry): status 200': (r) => r.status === 200,
       'login(retry): has token':  (r) => {
-        try { return !!JSON.parse(r.body).token; } catch { return false; }
+        try { const b = JSON.parse(r.body); return !!(b.data && b.data.token) || !!b.token; } catch { return false; }
       },
     });
     if (!ok) { loginErrors.add(1); errorRate.add(1); } else { errorRate.add(0); }
