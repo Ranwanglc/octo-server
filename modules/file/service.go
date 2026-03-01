@@ -88,6 +88,20 @@ func (s *Service) DownloadImage(url string, ctx context.Context) (io.ReadCloser,
 	return reader, nil
 }
 
+// defaultAvatarReader 返回一个纯色占位图（灰色），用于头像下载失败时的替代
+func defaultAvatarReader() io.ReadCloser {
+	img := image.NewRGBA(image.Rect(0, 0, 128, 128))
+	placeholderColor := color.RGBA{R: 192, G: 192, B: 192, A: 255}
+	for y := 0; y < 128; y++ {
+		for x := 0; x < 128; x++ {
+			img.Set(x, y, placeholderColor)
+		}
+	}
+	var buf bytes.Buffer
+	_ = png.Encode(&buf, img)
+	return io.NopCloser(&buf)
+}
+
 // DownloadAndMakeCompose 下载并组合图片
 func (s *Service) DownloadAndMakeCompose(uploadPath string, downloadURLs []string) (map[string]interface{}, error) {
 	if len(downloadURLs) == 0 {
@@ -96,6 +110,7 @@ func (s *Service) DownloadAndMakeCompose(uploadPath string, downloadURLs []strin
 
 	s.Debug("DownloadAndMakeCompose", zap.Strings("downloadURLs", downloadURLs))
 	var w = sync.WaitGroup{}
+	var mu sync.Mutex
 	readers := make([]io.ReadCloser, 0, len(downloadURLs))
 	cancels := make([]context.CancelFunc, 0, len(downloadURLs))
 	for _, downloadURL := range downloadURLs {
@@ -103,17 +118,19 @@ func (s *Service) DownloadAndMakeCompose(uploadPath string, downloadURLs []strin
 		go func(srcUrl string) {
 			defer w.Done()
 			timeoutCtx, cancel := context.WithTimeout(context.Background(), time.Minute*1)
+			mu.Lock()
 			cancels = append(cancels, cancel)
+			mu.Unlock()
 			imgReader, err := s.downloadImage(srcUrl, timeoutCtx)
 			if err != nil {
-				s.Error("下载图片失败！", zap.String("srcPath", srcUrl), zap.Error(err))
-				return
+				s.Warn("下载头像失败，使用默认占位图", zap.String("srcPath", srcUrl), zap.Error(err))
+				imgReader = defaultAvatarReader()
+			} else if imgReader == nil {
+				imgReader = defaultAvatarReader()
 			}
-			if imgReader == nil {
-				return
-			}
+			mu.Lock()
 			readers = append(readers, imgReader)
-
+			mu.Unlock()
 		}(downloadURL)
 	}
 
