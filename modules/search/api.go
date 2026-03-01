@@ -87,9 +87,8 @@ func (s *Search) global(c *wkhttp.Context) {
 		Highlights:   highlights,
 	})
 	if err != nil {
-		s.Error("查询悟空IM消息错误", zap.Error(err))
-		c.ResponseError(errors.New("查询悟空IM消息错误"))
-		return
+		s.Warn("查询悟空IM消息错误（不影响好友和群搜索）", zap.Error(err))
+		msgResp = nil
 	}
 	channelIds := make([]string, 0)
 	messageIds := make([]string, 0)
