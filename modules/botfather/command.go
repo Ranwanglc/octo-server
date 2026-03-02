@@ -733,7 +733,7 @@ func (h *commandHandler) sendConnectPrompt(toUID string, bot *robotModel) {
 Read %s/v1/bot/skill.md to connect to DMWork messaging.
 My bot token is: %s
 API server: %s
-Install adapter: openclaw plugins install openclaw-channel-dmwork@0.2.13
+Install adapter: openclaw plugins install openclaw-channel-dmwork
 Configure in ~/.openclaw/openclaw.json:
 {"channels":{"dmwork":{"botToken":"YOUR_TOKEN","apiUrl":"API_SERVER"}}}
 Replace YOUR_TOKEN and API_SERVER with the values above.
@@ -765,7 +765,7 @@ func (h *commandHandler) sendCreatedPrompt(toUID string, name string, bot *robot
 Read %s/v1/bot/skill.md to connect to DMWork messaging.
 My bot token is: %s
 API server: %s
-Install adapter: openclaw plugins install openclaw-channel-dmwork@0.2.13
+Install adapter: openclaw plugins install openclaw-channel-dmwork
 Configure in ~/.openclaw/openclaw.json:
 {"channels":{"dmwork":{"botToken":"YOUR_TOKEN","apiUrl":"API_SERVER"}}}
 Replace YOUR_TOKEN and API_SERVER with the values above.
