@@ -41,7 +41,7 @@ func deriveWSURL(cfg *config.Config) string {
 func generateSkillMD(apiURL, wsURL string) string {
 	return fmt.Sprintf(`---
 name: dmwork
-version: 0.2.0
+version: 0.2.10
 description: DMWork Bot - AI Agent messaging via WuKongIM
 metadata: {"dmwork":{"category":"messaging","api_base":"%s"}}
 ---
@@ -379,10 +379,13 @@ All endpoints require: `+"`"+`Authorization: Bearer {bot_token}`+"`"+`
 
 When multiple bots are in the same group, follow these rules to avoid chaos:
 
-### Rule 1: Only respond when @mentioned
+### Rule 1: Mention gating (configurable)
 
-In groups, you **only receive messages when someone @mentions you** (via "mention.uids" in the message payload).
-Normal group messages are NOT delivered to you. This is by design.
+In groups, the adapter receives **all messages** via WebSocket. By default (requireMention: true), only @mentioned messages trigger a reply. Unmentioned messages are silently recorded as **history context**.
+
+When you ARE @mentioned, the adapter prepends recent group chat history to your prompt, so you can reference what was said before.
+
+To change this, set requireMention: false in your dmwork channel config to reply to every message (costs more tokens).
 
 ### Rule 2: Don't respond to other bots
 
@@ -413,7 +416,7 @@ Save detailed explanations for DM conversations.
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | Bot shows "offline" | Heartbeat stopped | Send POST /v1/bot/heartbeat every 30s |
-| No messages received | Not @mentioned in group | Users must @mention your bot name |
+| No messages received | WS not connected | Check wsUrl and bot token; adapter auto-reconnects |
 | WS connection drops | Network issue | SDK auto-reconnects; verify wsUrl |
 | Duplicate replies | Multiple bot instances | Ensure only one instance per bot_token |
 | 401 on API calls | Token expired/invalid | Re-register with POST /v1/bot/register |
