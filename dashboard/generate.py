@@ -9,6 +9,14 @@ from datetime import datetime
 MYSQL_CMD = "docker exec octo-mysql-1 mysql -uroot -ptsdd123456 --default-character-set=utf8mb4 -N -e"
 OUTPUT_DIR = "/var/www/html/dashboard"
 
+# 排除 Bot、系统账号、测试用户
+EXCLUDE_UIDS = """
+  uid NOT IN (SELECT robot_id FROM robot)
+  AND uid NOT IN ('u_10000', 'botfather', 'fileHelper')
+  AND name NOT LIKE '%%测试%%'
+  AND username NOT LIKE 'test%%'
+"""
+
 def query(sql):
     result = subprocess.run(
         f'{MYSQL_CMD} "{sql}" im',
@@ -25,20 +33,21 @@ def query(sql):
 def get_metrics():
     data = {}
     
-    # 核心指标
-    r = query("SELECT COUNT(*) FROM user")
+    # 核心指标（排除 Bot/测试/系统）
+    r = query(f"SELECT COUNT(*) FROM user WHERE {EXCLUDE_UIDS}")
     data['total_users'] = int(r[0][0]) if r else 0
     
-    r = query("SELECT COUNT(*) FROM user WHERE created_at >= CURDATE()")
+    r = query(f"SELECT COUNT(*) FROM user WHERE created_at >= CURDATE() AND {EXCLUDE_UIDS}")
     data['today_users'] = int(r[0][0]) if r else 0
     
-    r = query("SELECT COUNT(*) FROM user_online WHERE online=1")
+    r = query(f"SELECT COUNT(*) FROM user_online WHERE online=1 AND uid IN (SELECT uid FROM user WHERE {EXCLUDE_UIDS})")
     data['online_users'] = int(r[0][0]) if r else 0
     
-    r = query("SELECT COUNT(*) FROM message")
+    # 消息：排除 Bot 发的消息
+    r = query(f"SELECT COUNT(*) FROM message WHERE from_uid IN (SELECT uid FROM user WHERE {EXCLUDE_UIDS})")
     data['total_messages'] = int(r[0][0]) if r else 0
     
-    r = query("SELECT COUNT(*) FROM message WHERE created_at >= CURDATE()")
+    r = query(f"SELECT COUNT(*) FROM message WHERE created_at >= CURDATE() AND from_uid IN (SELECT uid FROM user WHERE {EXCLUDE_UIDS})")
     data['today_messages'] = int(r[0][0]) if r else 0
     
     r = query("SELECT COUNT(*) FROM `group`")
@@ -47,26 +56,26 @@ def get_metrics():
     r = query("SELECT COUNT(*) FROM robot")
     data['total_bots'] = int(r[0][0]) if r else 0
     
-    r = query("SELECT COUNT(*) FROM friend")
+    r = query(f"SELECT COUNT(*) FROM friend WHERE uid IN (SELECT uid FROM user WHERE {EXCLUDE_UIDS})")
     data['total_friends'] = int(r[0][0]) if r else 0
     
-    r = query("SELECT COUNT(*) FROM device")
+    r = query(f"SELECT COUNT(*) FROM device WHERE uid IN (SELECT uid FROM user WHERE {EXCLUDE_UIDS})")
     data['total_devices'] = int(r[0][0]) if r else 0
     
-    # DAU - 今日发过消息的去重用户
-    r = query("SELECT COUNT(DISTINCT from_uid) FROM message WHERE created_at >= CURDATE()")
+    # DAU - 今日发过消息的去重真实用户
+    r = query(f"SELECT COUNT(DISTINCT from_uid) FROM message WHERE created_at >= CURDATE() AND from_uid IN (SELECT uid FROM user WHERE {EXCLUDE_UIDS})")
     data['dau'] = int(r[0][0]) if r else 0
     
-    # 7日消息趋势
-    r = query("SELECT DATE(created_at), COUNT(*) FROM message WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 14 DAY) GROUP BY DATE(created_at) ORDER BY DATE(created_at)")
+    # 14日消息趋势（真实用户）
+    r = query(f"SELECT DATE(created_at), COUNT(*) FROM message WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 14 DAY) AND from_uid IN (SELECT uid FROM user WHERE {EXCLUDE_UIDS}) GROUP BY DATE(created_at) ORDER BY DATE(created_at)")
     data['msg_trend'] = [{'date': row[0], 'count': int(row[1])} for row in r] if r else []
     
-    # 7日注册趋势
-    r = query("SELECT DATE(created_at), COUNT(*) FROM user WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 14 DAY) GROUP BY DATE(created_at) ORDER BY DATE(created_at)")
+    # 14日注册趋势（真实用户）
+    r = query(f"SELECT DATE(created_at), COUNT(*) FROM user WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 14 DAY) AND {EXCLUDE_UIDS} GROUP BY DATE(created_at) ORDER BY DATE(created_at)")
     data['user_trend'] = [{'date': row[0], 'count': int(row[1])} for row in r] if r else []
     
-    # DAU趋势
-    r = query("SELECT DATE(created_at), COUNT(DISTINCT from_uid) FROM message WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 14 DAY) GROUP BY DATE(created_at) ORDER BY DATE(created_at)")
+    # DAU趋势（真实用户）
+    r = query(f"SELECT DATE(created_at), COUNT(DISTINCT from_uid) FROM message WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 14 DAY) AND from_uid IN (SELECT uid FROM user WHERE {EXCLUDE_UIDS}) GROUP BY DATE(created_at) ORDER BY DATE(created_at)")
     data['dau_trend'] = [{'date': row[0], 'count': int(row[1])} for row in r] if r else []
     
     # 群组详情
