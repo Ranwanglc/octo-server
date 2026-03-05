@@ -80,7 +80,7 @@ func tenValue2Char(ten int64) string {
 	case 32:
 		return "w"
 	case 33:
-		return "s"
+		return "x"
 	case 34:
 		return "y"
 	case 35:
@@ -132,7 +132,7 @@ func tenValue2Char(ten int64) string {
 	case 58:
 		return "W"
 	case 59:
-		return "S"
+		return "X"
 	case 60:
 		return "Y"
 	case 61:
