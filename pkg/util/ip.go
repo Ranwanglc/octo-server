@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // GetExternalIP 获取本服务器的外网IP
 func GetExternalIP() (string, error) {
-	resp, err := http.Get("https://ipw.cn/api/ip/myip")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get("https://ipw.cn/api/ip/myip")
 	if err != nil {
 		return "", err
 	}
@@ -53,7 +55,8 @@ func GetIPAddress(ip string, amapKey string) (province string, city string, err 
 		err = errors.New("amap API key is required")
 		return
 	}
-	resp, err = http.Get(fmt.Sprintf("https://restapi.amap.com/v3/ip?key=%s&ip=%s", amapKey, ip))
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err = client.Get(fmt.Sprintf("https://restapi.amap.com/v3/ip?key=%s&ip=%s", amapKey, ip))
 	if err != nil {
 		return
 	}

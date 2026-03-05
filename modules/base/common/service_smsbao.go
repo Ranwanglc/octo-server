@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"time"
 )
 
 type SmsbaoProvider struct {
@@ -80,7 +81,8 @@ func (u *SmsbaoProvider) SendSMS(ctx context.Context, zone, phone string, code s
 	sendurl := smsapi + "sms?" + params.Encode()
 
 	// 发送HTTP请求
-	resp, err := http.Get(sendurl)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(sendurl)
 	if err != nil {
 		fmt.Println("HTTP请求失败:", err)
 		return err
