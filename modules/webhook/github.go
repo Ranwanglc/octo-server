@@ -1,15 +1,15 @@
 package webhook
 
 import (
-	"fmt"
 	"io"
 
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"go.uber.org/zap"
 )
 
 func (w *Webhook) github(c *wkhttp.Context) {
-	fmt.Println("github webhook-->", c.Params)
+	w.Debug("github webhook", zap.Any("params", c.Params))
 
 	result, _ := io.ReadAll(c.Request.Body)
-	fmt.Println("github-result-->", result)
+	w.Debug("github webhook result", zap.ByteString("result", result))
 }
