@@ -8,9 +8,11 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -107,8 +109,35 @@ func (cn *Common) getKeepAliveVideo(c *wkhttp.Context) {
 		c.ResponseError(errors.New("视频名称不能为空"))
 		return
 	}
+
+	// Sanitize: extract base filename to prevent path traversal
+	videoName = filepath.Base(videoName)
+
+	// Validate file extension
+	if !strings.HasSuffix(strings.ToLower(videoName), ".mp4") {
+		c.ResponseError(errors.New("仅支持mp4格式"))
+		return
+	}
+
+	videoPath := filepath.Join("assets", "resources", "keepalive", videoName)
+
+	// Verify resolved path stays within the expected directory
+	absPath, err := filepath.Abs(videoPath)
+	if err != nil {
+		c.Writer.WriteHeader(http.StatusNotFound)
+		return
+	}
+	baseDir, err := filepath.Abs("assets/resources/keepalive")
+	if err != nil {
+		c.Writer.WriteHeader(http.StatusNotFound)
+		return
+	}
+	if !strings.HasPrefix(absPath, baseDir+string(filepath.Separator)) {
+		c.ResponseError(errors.New("非法文件路径"))
+		return
+	}
+
 	c.Header("Content-Type", "video/mp4")
-	videoPath := fmt.Sprintf("assets/resources/keepalive/%s", videoName)
 	videoBytes, err := os.ReadFile(videoPath)
 	if err != nil {
 		cn.Error("视频不存在", zap.Error(err))
