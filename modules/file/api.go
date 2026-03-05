@@ -94,6 +94,9 @@ func (f *File) getFilePath(c *wkhttp.Context) {
 		c.ResponseError(err)
 		return
 	}
+	if uploadPath != "" {
+		uploadPath, _ = sanitizePath(uploadPath)
+	}
 	var path string
 	if Type(fileType) == TypeMomentCover {
 		// 动态封面
@@ -129,6 +132,9 @@ func (f *File) uploadFile(c *wkhttp.Context) {
 	if err != nil {
 		c.ResponseError(err)
 		return
+	}
+	if uploadPath != "" {
+		uploadPath, _ = sanitizePath(uploadPath)
 	}
 
 	// 限制请求体大小，防止大文件 DoS
@@ -258,12 +264,32 @@ func (f *File) getFile(c *wkhttp.Context) {
 	c.Redirect(http.StatusFound, downloadURL)
 }
 
+// sanitizePath 规范化上传路径，防止路径遍历攻击
+func sanitizePath(p string) (string, error) {
+	// 解码可能的URL编码
+	decoded, err := url.QueryUnescape(p)
+	if err != nil {
+		return "", errors.New("路径包含无效字符")
+	}
+	// 禁止包含 .. 的路径遍历
+	cleaned := filepath.Clean(decoded)
+	if strings.Contains(cleaned, "..") {
+		return "", errors.New("路径不允许包含目录遍历字符")
+	}
+	return cleaned, nil
+}
+
 func (f *File) checkReq(fileType Type, path string) error {
 	if fileType == "" {
 		return errors.New("文件类型不能为空")
 	}
 	if path == "" && fileType != TypeMomentCover && fileType != TypeSticker {
 		return errors.New("上传路径不能为空")
+	}
+	if path != "" {
+		if _, err := sanitizePath(path); err != nil {
+			return err
+		}
 	}
 	if fileType != TypeChat && fileType != TypeMoment && fileType != TypeMomentCover && fileType != TypeSticker && fileType != TypeReport && fileType != TypeChatBg && fileType != TypeCommon && fileType != TypeDownload {
 		return errors.New("文件类型错误")
