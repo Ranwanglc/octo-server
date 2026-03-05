@@ -94,22 +94,20 @@ func (m *Message) handleReadedMessageCount() {
 		messageChannelMap[fakeChannelID] = list
 	}
 	m.mutex.Lock()
+	defer m.mutex.Unlock()
 	// 查询已经存在的消息扩展数据
 	messageExtras, err := m.messageExtraDB.queryWithMessageIDs(messageIds)
 	if err != nil {
-		m.mutex.Unlock()
 		m.Error("查询消息扩展数据错误", zap.Error(err))
 		return
 	}
 	tx, err := m.ctx.DB().Begin()
 	if err != nil {
-		m.mutex.Unlock()
 		m.Error("开启事务失败！", zap.Error(err))
 		return
 	}
 	defer func() {
 		if err := recover(); err != nil {
-			m.mutex.Unlock()
 			tx.RollbackUnlessCommitted()
 			fmt.Fprintf(os.Stderr, "recovered panic in goroutine: %v\n%s\n", err, debug.Stack())
 		}
@@ -136,7 +134,6 @@ func (m *Message) handleReadedMessageCount() {
 		}
 		messageReadedCountMap, err := m.memberReadedDB.queryCountWithMessageIDs(fakeChannelID, reqChannelType, messageIDStrs)
 		if err != nil {
-			m.mutex.Unlock()
 			tx.Rollback()
 			m.Error("获取消息已读数量map失败！", zap.Error(err))
 			return
@@ -170,7 +167,6 @@ func (m *Message) handleReadedMessageCount() {
 					Version:     version,
 				}, tx)
 				if err != nil {
-					m.mutex.Unlock()
 					tx.Rollback()
 					m.Error("添加消息扩展数据失败！", zap.Error(err), zap.Int64("messageID", message.MessageID), zap.String("channelID", fakeChannelID))
 					return
@@ -178,7 +174,6 @@ func (m *Message) handleReadedMessageCount() {
 			} else {
 				err = m.messageExtraDB.updateTx(tempMsgExtra, tx)
 				if err != nil {
-					m.mutex.Unlock()
 					tx.Rollback()
 					m.Error("更新消息扩展数据失败！", zap.Error(err), zap.Int64("messageID", message.MessageID), zap.String("channelID", fakeChannelID))
 					return
@@ -200,7 +195,6 @@ func (m *Message) handleReadedMessageCount() {
 			})
 		}
 	}
-	m.mutex.Unlock()
 	if err := tx.Commit(); err != nil {
 		tx.Rollback()
 		m.Error("提交事物错误", zap.Error(err))
