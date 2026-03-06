@@ -235,7 +235,7 @@ func (u *User) emailForgetPwd(c *wkhttp.Context) {
 	type reqVO struct {
 		Email    string `json:"email"`
 		Code     string `json:"code"`
-		Password string `json:"password"`
+		Password string `json:"new_password"`
 	}
 	var req reqVO
 	if err := c.BindJSON(&req); err != nil {
