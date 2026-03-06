@@ -49,6 +49,8 @@ func NewService(ctx *config.Context) IService {
 		uploadService = NewServiceOSS(ctx)
 	} else if service == config.FileServiceQiniu {
 		uploadService = NewServiceQiniu(ctx)
+	} else if service == config.FileServiceTencentCOS {
+		uploadService = NewServiceCOS(ctx)
 	} else {
 		uploadService = NewSeaweedFS(ctx)
 	}
