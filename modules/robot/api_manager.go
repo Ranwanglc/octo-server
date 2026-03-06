@@ -161,11 +161,11 @@ func (m *Manager) updateRobotStatus(c *wkhttp.Context) {
 		c.ResponseError(errors.New("查询操作的机器人错误"))
 		return
 	}
-	robot.Status = int(status)
 	if robot == nil {
 		c.ResponseError(errors.New("操作的机器人不存在"))
 		return
 	}
+	robot.Status = int(status)
 	err = m.db.updateRobot(robot)
 	if err != nil {
 		c.ResponseError(errors.New("修改机器人状态信息错误"))

@@ -58,7 +58,7 @@ func (s *EmailService) SendVerifyCode(ctx context.Context, email string, codeTyp
 		s.Error("生成验证码失败", zap.Error(err))
 		return errors.New("系统错误，请稍后重试")
 	}
-	s.Info("发送邮箱验证码", zap.String("email", email), zap.String("code", code))
+	s.Info("发送邮箱验证码", zap.String("email", email))
 
 	cacheKey := fmt.Sprintf("%s%d@%s", CacheKeyEmailCode, codeType, email)
 	err = s.ctx.GetRedisConn().SetAndExpire(cacheKey, code, time.Minute*5)

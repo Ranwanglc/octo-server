@@ -83,7 +83,7 @@ func (s *SMSService) SendVerifyCode(ctx context.Context, zone, phone string, cod
 		s.Error("生成验证码失败", zap.Error(err))
 		return errors.New("系统错误，请稍后重试")
 	}
-	s.Info("发送验证码", zap.String("code", verifyCode))
+	s.Info("发送验证码", zap.String("phone", phone))
 	cacheKey := fmt.Sprintf("%s%d@%s@%s", CacheKeySMSCode, codeType, zone, phone)
 	err = s.ctx.GetRedisConn().SetAndExpire(cacheKey, verifyCode, time.Minute*5)
 	if err != nil {

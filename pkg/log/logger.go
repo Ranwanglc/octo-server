@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -16,6 +17,7 @@ var errorLogger *zap.Logger
 var warnLogger *zap.Logger
 var testLogger *zap.Logger
 var atom = zap.NewAtomicLevel()
+var initOnce sync.Once
 
 func Configure(opts *Options) {
 	atom.SetLevel(opts.Level)
@@ -109,19 +111,24 @@ func timeEncoder(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
 }
 
 // Info Info
-func Info(msg string, fields ...zap.Field) {
-
-	if logger == nil {
+func ensureInit() {
+	initOnce.Do(func() {
 		Configure(NewOptions())
+	})
+}
+
+// Info Info
+func Info(msg string, fields ...zap.Field) {
+	if logger == nil {
+		ensureInit()
 	}
 	logger.Info(msg, fields...)
 }
 
 // Debug Debug
 func Debug(msg string, fields ...zap.Field) {
-
 	if logger == nil {
-		Configure(NewOptions())
+		ensureInit()
 	}
 	logger.Debug(msg, fields...)
 
@@ -130,7 +137,7 @@ func Debug(msg string, fields ...zap.Field) {
 // Error Error
 func Error(msg string, fields ...zap.Field) {
 	if errorLogger == nil {
-		Configure(NewOptions())
+		ensureInit()
 	}
 	errorLogger.Error(msg, fields...)
 }
@@ -139,7 +146,7 @@ func Error(msg string, fields ...zap.Field) {
 func Warn(msg string, fields ...zap.Field) {
 
 	if warnLogger == nil {
-		Configure(NewOptions())
+		ensureInit()
 	}
 	warnLogger.Warn(msg, fields...)
 }
