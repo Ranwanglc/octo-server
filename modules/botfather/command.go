@@ -857,14 +857,21 @@ func (h *commandHandler) fixFriendVersion(uid, toUID string) {
 }
 
 // generateBotToken 生成Bot Token
-func generateBotToken() string {
-	return BotTokenPrefix + randomHex(16)
+func generateBotToken() (string, error) {
+	hex, err := randomHex(16)
+	if err != nil {
+		return "", err
+	}
+	return BotTokenPrefix + hex, nil
 }
 
 // generateUniqueBotToken 生成唯一的Bot Token（最多重试3次）
 func (h *commandHandler) generateUniqueBotToken() (string, error) {
 	for i := 0; i < 3; i++ {
-		token := generateBotToken()
+		token, err := generateBotToken()
+		if err != nil {
+			return "", fmt.Errorf("生成Token失败: %w", err)
+		}
 		existing, err := h.db.queryRobotByBotToken(token)
 		if err != nil {
 			return "", fmt.Errorf("检查Token唯一性失败: %w", err)
@@ -877,8 +884,11 @@ func (h *commandHandler) generateUniqueBotToken() (string, error) {
 }
 
 // randomHex 生成随机十六进制字符串
-func randomHex(n int) string {
+func randomHex(n int) (string, error) {
 	bytes := make([]byte, n)
-	rand.Read(bytes)
-	return hex.EncodeToString(bytes)
+	_, err := rand.Read(bytes)
+	if err != nil {
+		return "", fmt.Errorf("随机数生成失败: %w", err)
+	}
+	return hex.EncodeToString(bytes), nil
 }

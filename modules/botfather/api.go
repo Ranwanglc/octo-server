@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-server/modules/base/app"
@@ -33,6 +34,8 @@ type BotFather struct {
 	userService      user.IService
 	appService       app.IService
 	robotEventPrefix string
+	initOnce         sync.Once
+	msgSem           chan struct{} // 限制并发消息处理的信号量
 	log.Log
 }
 
@@ -45,6 +48,7 @@ func New(ctx *config.Context) *BotFather {
 		userService:      user.NewService(ctx),
 		appService:       app.NewService(ctx),
 		robotEventPrefix: "robotEvent:",
+		msgSem:           make(chan struct{}, 100), // 限制最多100个并发消息处理
 		Log:              log.NewTLog("BotFather"),
 	}
 
@@ -79,8 +83,10 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 		botAPI.GET("/groups/:group_no/members", bf.getGroupMembers)
 	}
 
-	// 初始化BotFather系统用户
-	bf.initBotFatherUser()
+	// 初始化BotFather系统用户（使用sync.Once确保只执行一次）
+	bf.initOnce.Do(func() {
+		bf.initBotFatherUser()
+	})
 }
 
 // skillMD 返回skill.md文档
@@ -124,8 +130,16 @@ func (bf *BotFather) messagesListen(messages []*config.MessageResp) {
 			continue
 		}
 
-		// 处理命令
-		go bf.cmdHandler.HandleMessage(message.FromUID, content)
+		// 处理命令（使用信号量限制并发数）
+		select {
+		case bf.msgSem <- struct{}{}:
+			go func(uid, msg string) {
+				defer func() { <-bf.msgSem }()
+				bf.cmdHandler.HandleMessage(uid, msg)
+			}(message.FromUID, content)
+		default:
+			bf.Warn("消息处理并发数已达上限，丢弃消息", zap.String("fromUID", message.FromUID))
+		}
 	}
 }
 
