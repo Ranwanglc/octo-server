@@ -75,6 +75,10 @@ func (q *QRCode) handleQRCodeInfo(c *wkhttp.Context) {
 		return
 	}
 	uidAndNames := strings.Split(uidAndName, "@")
+	if len(uidAndNames) == 0 {
+		c.ResponseError(errors.New("登录信息格式错误！"))
+		return
+	}
 	loginUID := uidAndNames[0]
 	code := c.Param("code")
 
@@ -151,7 +155,7 @@ func (q *QRCode) handleScanLogin(loginUID string, uuid string, qrCodeModel commo
 	}
 	var pubkey string
 	if qrCodeModel.Data != nil && qrCodeModel.Data["pub_key"] != nil {
-		pubkey = qrCodeModel.Data["pub_key"].(string)
+		pubkey, _ = qrCodeModel.Data["pub_key"].(string)
 	}
 	qrcodeInfo := common.NewQRCodeModel(common.QRCodeTypeScanLogin, map[string]interface{}{
 		"app_id": "wukongchat",
@@ -172,8 +176,14 @@ func (q *QRCode) handleScanLogin(loginUID string, uuid string, qrCodeModel commo
 
 // 处理扫码入群
 func (q *QRCode) handleJoinGroup(loginUID string, qrCodeModel common.QRCodeModel) (interface{}, error) {
-	groupNo := qrCodeModel.Data["group_no"].(string)
-	generator := qrCodeModel.Data["generator"].(string)
+	groupNo, ok := qrCodeModel.Data["group_no"].(string)
+	if !ok {
+		return nil, errors.New("invalid QR code data: missing or invalid group_no")
+	}
+	generator, ok := qrCodeModel.Data["generator"].(string)
+	if !ok {
+		return nil, errors.New("invalid QR code data: missing or invalid generator")
+	}
 
 	exist, err := q.groupDB.ExistMember(loginUID, groupNo) // 已在群内
 	if err != nil {
