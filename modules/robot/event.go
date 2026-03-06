@@ -151,7 +151,7 @@ func (rb *Robot) saveRobotMessage(message *config.MessageResp, robotID string) {
 		Expire:  time.Now().Add(rb.ctx.GetConfig().Robot.MessageExpire).Unix(),
 	})
 	key := fmt.Sprintf("%s%s", rb.robotEventPrefix, robotID)
-	err := rb.ctx.GetRedisConn().ZAdd(key, float64(seq), messageUpdateJson)
+	err = rb.ctx.GetRedisConn().ZAdd(key, float64(seq), messageUpdateJson)
 	if err != nil {
 		rb.Error("投递消息给机器人失败！", zap.Error(err), zap.String("robotID", robotID), zap.String("message", messageUpdateJson))
 	}

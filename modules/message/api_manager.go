@@ -167,7 +167,7 @@ func (m *Manager) delete(c *wkhttp.Context) {
 			return
 		}
 		msgIds = append(msgIds, msg.MessageID)
-		err := m.managerDB.updateMsgExtraVersionAndDeletedTx(&messageExtraModel{
+		err = m.managerDB.updateMsgExtraVersionAndDeletedTx(&messageExtraModel{
 			ChannelID:   fakeChannelID,
 			ChannelType: req.ChannelType,
 			MessageID:   msg.MessageID,

@@ -2359,7 +2359,7 @@ func (u *User) addFileHelperFriend(uid string) error {
 			u.Error("GenSeq failed", zap.Error(err))
 			return err
 		}
-		err := u.friendDB.Insert(&FriendModel{
+		err = u.friendDB.Insert(&FriendModel{
 			UID:     uid,
 			ToUID:   u.ctx.GetConfig().Account.FileHelperUID,
 			Version: version,
@@ -2389,7 +2389,7 @@ func (u *User) addBotFatherFriend(uid string) error {
 			u.Error("GenSeq failed", zap.Error(err))
 			return err
 		}
-		err := u.friendDB.Insert(&FriendModel{
+		err = u.friendDB.Insert(&FriendModel{
 			UID:     uid,
 			ToUID:   botFatherUID,
 			Version: version,
@@ -2431,7 +2431,7 @@ func (u *User) addSystemFriend(uid string) error {
 			u.Error("GenSeq failed", zap.Error(err))
 			return err
 		}
-		err := u.friendDB.InsertTx(&FriendModel{
+		err = u.friendDB.InsertTx(&FriendModel{
 			UID:     uid,
 			ToUID:   u.ctx.GetConfig().Account.SystemUID,
 			Version: version,

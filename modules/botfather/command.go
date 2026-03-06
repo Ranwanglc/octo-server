@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Mininglamp-OSS/octo-server/modules/base/app"
+	"github.com/Mininglamp-OSS/octo-server/modules/group"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -21,18 +22,20 @@ type commandHandler struct {
 	db           *botfatherDB
 	sm           *stateMachine
 	userService  user.IService
+	groupService group.IService
 	appService   app.IService
 	log.Log
 }
 
 func newCommandHandler(ctx *config.Context) *commandHandler {
 	return &commandHandler{
-		ctx:         ctx,
-		db:          newBotfatherDB(ctx),
-		sm:          newStateMachine(ctx),
-		userService: user.NewService(ctx),
-		appService:  app.NewService(ctx),
-		Log:         log.NewTLog("BotFather"),
+		ctx:          ctx,
+		db:           newBotfatherDB(ctx),
+		sm:           newStateMachine(ctx),
+		userService:  user.NewService(ctx),
+		groupService: group.NewService(ctx),
+		appService:   app.NewService(ctx),
+		Log:          log.NewTLog("BotFather"),
 	}
 }
 
@@ -520,6 +523,58 @@ func (h *commandHandler) onDeleteConfirm(fromUID string, input string) {
 	eventKey := fmt.Sprintf("robotEvent:%s", botID)
 	h.ctx.GetRedisConn().Del(eventKey)
 
+	// Remove bot from all groups
+	groups, err := h.groupService.GetGroupsWithMemberUID(botID)
+	if err != nil {
+		h.Error("查询Bot所在群失败", zap.Error(err))
+	} else {
+		for _, g := range groups {
+			// Remove from IM channel
+			err = h.ctx.IMRemoveSubscriber(&config.SubscriberRemoveReq{
+				ChannelID:   g.GroupNo,
+				ChannelType: uint8(common.ChannelTypeGroup),
+				Subscribers: []string{botID},
+			})
+			if err != nil {
+				h.Error("从IM频道移除Bot失败", zap.String("groupNo", g.GroupNo), zap.Error(err))
+			}
+		}
+	}
+
+	// Remove bot from all group_member records with version for client sync
+	if groups != nil {
+		for _, g := range groups {
+			memberVersion, err := h.ctx.GenSeq(common.GroupMemberSeqKey)
+			if err != nil {
+				h.Error("GenSeq failed for group member", zap.String("groupNo", g.GroupNo), zap.Error(err))
+				continue
+			}
+			_, err = h.ctx.DB().Update("group_member").
+				Set("is_deleted", 1).
+				Set("version", memberVersion).
+				Where("group_no=? and uid=? and is_deleted=0", g.GroupNo, botID).
+				Exec()
+			if err != nil {
+				h.Error("删除Bot群成员记录失败", zap.String("groupNo", g.GroupNo), zap.Error(err))
+			}
+		}
+	}
+
+	// Remove bot from friend records with version for client sync (both directions)
+	friendVersion, err := h.ctx.GenSeq(common.FriendSeqKey)
+	if err != nil {
+		h.Error("GenSeq failed for friend", zap.Error(err))
+	} else {
+		_, err = h.ctx.DB().Update("friend").
+			Set("is_deleted", 1).
+			Set("version", friendVersion).
+			Where("(uid=? or to_uid=?) and is_deleted=0", botID, botID).
+			Exec()
+		if err != nil {
+			h.Error("删除Bot好友记录失败", zap.Error(err))
+		}
+	}
+
 	err = h.db.deleteRobot(botID)
 	if err != nil {
 		h.Error("删除机器人失败", zap.Error(err))
@@ -673,8 +728,7 @@ func (h *commandHandler) createBot(creatorUID, name, username, botToken string) 
 
 	version, err := h.ctx.GenSeq(common.RobotSeqKey)
 	if err != nil {
-		h.Error("GenSeq failed", zap.Error(err))
-		return
+		return fmt.Errorf("GenSeq failed: %w", err)
 	}
 	err = h.db.insertRobotTx(&robotModel{
 		AppID:      appResp.AppID,

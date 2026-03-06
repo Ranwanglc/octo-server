@@ -1074,7 +1074,7 @@ func (g *Group) addMembersTx(members []string, groupNo string, operator, operato
 		version, err := g.ctx.GenSeq(common.GroupMemberSeqKey)
 		if err != nil {
 			g.Error("GenSeq failed", zap.Error(err))
-			return err
+			return nil, err
 		}
 
 		userBaseVos = append(userBaseVos, &config.UserBaseVo{
@@ -1266,7 +1266,7 @@ func (g *Group) notifyBotJoinedGroup(botMembers []*user.Model, groupNo, operator
 			"expire": time.Now().Add(time.Hour * 24).Unix(),
 		}
 		key := fmt.Sprintf("robotEvent:%s", robotID)
-		err := g.ctx.GetRedisConn().ZAdd(key, float64(seq), util.ToJson(eventData))
+		err = g.ctx.GetRedisConn().ZAdd(key, float64(seq), util.ToJson(eventData))
 		if err != nil {
 			g.Error("推送bot_joined_group事件失败！", zap.Error(err), zap.String("robotID", robotID), zap.String("groupNo", groupNo))
 			continue
@@ -2337,8 +2337,7 @@ func (g *Group) groupSettingUpdate(c *wkhttp.Context) {
 		insert := false // 是否是插入操作
 		version, err := g.ctx.GenSeq(common.GroupSettingSeqKey)
 		if err != nil {
-			c.ResponseError(err)
-			return
+			return nil, false, err
 		}
 		if setting == nil { // 不存在设置信息
 			insert = true

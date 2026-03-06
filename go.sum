@@ -157,6 +157,8 @@ github.com/disintegration/imaging v1.6.2 h1:w1LecBlG2Lnp8B3jk5zSuNqd7b4DXhcjwek1
 github.com/disintegration/imaging v1.6.2/go.mod h1:44/5580QXChDfwIclfc/PCwrr44amcmDAg8hxG0Ewe4=
 github.com/Mininglamp-OSS/octo-lib v0.0.0-20260306074620-00e905047d1e h1:BI5N/FjTzfsPT7BFLmE3xq+LBXbtyvj4wvAfMu/KP4s=
 github.com/Mininglamp-OSS/octo-lib v0.0.0-20260306074620-00e905047d1e/go.mod h1:Y6vTjWHX30AzqURaJsdV44nGsXqd6uvG0aeAH6uMUeg=
+github.com/Mininglamp-OSS/octo-lib v0.0.0-20260306090121-b1295d400500 h1:lkna6rApu9EECulk3gYcOJJfj2QQL3jsdTSP/24UvW4=
+github.com/Mininglamp-OSS/octo-lib v0.0.0-20260306090121-b1295d400500/go.mod h1:Y6vTjWHX30AzqURaJsdV44nGsXqd6uvG0aeAH6uMUeg=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/eapache/queue v1.1.0 h1:YOEu7KNc61ntiQlcEeUIoDTJ2o8mQznoNvUhiigpIqc=
