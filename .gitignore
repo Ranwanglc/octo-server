@@ -13,35 +13,34 @@
 # Project-local glide cache, RE: https://github.com/Masterminds/glide/issues/736
 .glide/
 
+# IDE
 .idea/
+.vscode/
+*.swp
 
 *.socket
-
 *.db
-
 *.sqlite
-
 *.log
 .DS_Store
-
 .VSCodeCounter/
-
 logs/
-
 wukongimdata/
 
-# Docker 数据目录
+# Build outputs
+tsdd
+TangSengDaoDaoServer
+app
+tsdd-static
+
+# Docker volumes & data
 docker/tsdd/mysqldata/
+docker/tsdd/redisdata/
 docker/tsdd/miniodata/
 docker/tsdd/logs/
 
-# 环境配置（含密码）
+# Environment config (contains secrets)
 docker/tsdd/.env
 
-# IDE
-.vscode/
-*.swpTangSengDaoDaoServer
-tsdd
+# AI agent docs
 CLAUDE.md
-tsdd-static
-tsdd
