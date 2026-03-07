@@ -1114,7 +1114,12 @@ func (m *Message) mutualDelete(c *wkhttp.Context) {
 		return
 	}
 	isCanDelete := true
-	if req.ChannelType == common.ChannelTypeGroup.Uint8() {
+	if req.ChannelType == common.ChannelTypePerson.Uint8() {
+		// 私聊：验证是对话参与者且是消息发送者
+		if resp.Messages[0].FromUID != loginUID {
+			isCanDelete = false
+		}
+	} else if req.ChannelType == common.ChannelTypeGroup.Uint8() {
 		isManager, err := m.groupService.IsCreatorOrManager(req.ChannelID, loginUID)
 		if err != nil {
 			m.Error("查询登录用户群内权限错误", zap.Error(err))
