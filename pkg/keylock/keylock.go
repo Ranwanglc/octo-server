@@ -65,7 +65,7 @@ func (l *KeyLock) Unlock(key string) {
 func (l *KeyLock) Clean() {
 	l.mutex.Lock()
 	for k, v := range l.locks {
-		if v.count == 0 {
+		if atomic.LoadInt64(&v.count) == 0 {
 			delete(l.locks, k)
 		}
 	}
