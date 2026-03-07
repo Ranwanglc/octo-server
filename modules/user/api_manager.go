@@ -386,7 +386,13 @@ func (m *Manager) addAdminUser(c *wkhttp.Context) {
 	userModel.Username = req.LoginName
 	userModel.Zone = ""
 	userModel.Role = string(wkhttp.Admin)
-	userModel.Password = util.MD5(util.MD5(req.Password))
+	hashedPassword, err := HashPassword(req.Password)
+	if err != nil {
+		m.Error("密码哈希失败", zap.Error(err))
+		c.ResponseError(errors.New("密码处理失败"))
+		return
+	}
+	userModel.Password = hashedPassword
 	userModel.ShortNo = util.Ten2Hex(time.Now().UnixNano())
 	userModel.IsUploadAvatar = 0
 	userModel.NewMsgNotice = 0
@@ -468,7 +474,13 @@ func (m *Manager) addUser(c *wkhttp.Context) {
 	userModel.Phone = req.Phone
 	userModel.Username = fmt.Sprintf("%s%s", req.Zone, req.Phone)
 	userModel.Zone = req.Zone
-	userModel.Password = util.MD5(util.MD5(req.Password))
+	hashedPassword, err := HashPassword(req.Password)
+	if err != nil {
+		m.Error("密码哈希失败", zap.Error(err))
+		c.ResponseError(errors.New("密码处理失败"))
+		return
+	}
+	userModel.Password = hashedPassword
 	userModel.ShortNo = shortNo
 	userModel.IsUploadAvatar = 0
 	userModel.NewMsgNotice = 1
@@ -923,7 +935,8 @@ func (m *Manager) updatePwd(c *wkhttp.Context) {
 		c.ResponseError(errors.New("操作用户不存在"))
 		return
 	}
-	if util.MD5(util.MD5(req.Password)) != user.Password {
+	matched, _ := CheckPassword(req.Password, user.Password)
+	if !matched {
 		c.ResponseError(errors.New("原密码错误"))
 		return
 	}
@@ -935,7 +948,13 @@ func (m *Manager) updatePwd(c *wkhttp.Context) {
 		c.ResponseError(errors.New("新密码不能和旧密码一样"))
 		return
 	}
-	err = m.userDB.UpdateUsersWithField("password", util.MD5(util.MD5(req.NewPassword)), loginUID)
+	newHashedPassword, err := HashPassword(req.NewPassword)
+	if err != nil {
+		m.Error("密码哈希失败", zap.Error(err))
+		c.ResponseError(errors.New("密码处理失败"))
+		return
+	}
+	err = m.userDB.UpdateUsersWithField("password", newHashedPassword, loginUID)
 	if err != nil {
 		m.Error("修改用户密码错误", zap.Error(err))
 		c.Response("修改用户密码错误")
@@ -1093,6 +1112,11 @@ func (m *Manager) createManagerAccount() {
 	username := string(wkhttp.SuperAdmin)
 	role := string(wkhttp.SuperAdmin)
 	var pwd = m.ctx.GetConfig().AdminPwd
+	hashedPwd, hashErr := HashPassword(pwd)
+	if hashErr != nil {
+		m.Error("密码哈希失败", zap.Error(hashErr))
+		return
+	}
 	err = m.userDB.Insert(&Model{
 		UID:      m.ctx.GetConfig().Account.AdminUID,
 		Name:     "超级管理员",
@@ -1103,7 +1127,7 @@ func (m *Manager) createManagerAccount() {
 		Zone:     "0086",
 		Phone:    "13000000002",
 		Status:   1,
-		Password: util.MD5(util.MD5(pwd)),
+		Password: hashedPwd,
 	})
 	if err != nil {
 		m.Error("新增系统管理员错误", zap.Error(err))

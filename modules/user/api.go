@@ -2039,7 +2039,8 @@ func (u *User) setChatPwd(c *wkhttp.Context) {
 		c.ResponseError(errors.New("查询用户信息失败"))
 		return
 	}
-	if user.Password != util.MD5(util.MD5(req.LoginPwd)) {
+	pwdMatched, _ := CheckPassword(req.LoginPwd, user.Password)
+	if !pwdMatched {
 		c.ResponseError(errors.New("登录密码错误"))
 		return
 	}
@@ -2614,7 +2615,13 @@ func (u *User) pwdforget(c *wkhttp.Context) {
 		}
 	}
 
-	err = u.db.UpdateUsersWithField("password", util.MD5(util.MD5(req.Pwd)), userInfo.UID)
+	hashedPassword, hashErr := HashPassword(req.Pwd)
+	if hashErr != nil {
+		u.Error("密码哈希失败", zap.Error(hashErr))
+		c.ResponseError(errors.New("密码处理失败"))
+		return
+	}
+	err = u.db.UpdateUsersWithField("password", hashedPassword, userInfo.UID)
 	if err != nil {
 		u.Error("修改登录密码错误", zap.Error(err))
 		c.ResponseError(errors.New("修改登录密码错误"))
