@@ -814,12 +814,18 @@ func (g *Group) groupCreate(c *wkhttp.Context) {
 		return
 	}
 	groupResp := &GroupResp{}
-	c.Response(groupResp.from(&DetailModel{
+	resp := groupResp.from(&DetailModel{
 		Model:        *groupModel,
 		Receipt:      1,
 		RevokeRemind: 1,
 		Screenshot:   1,
-	}))
+	})
+	// 查询成员数
+	memberCount, mcErr := g.db.QueryMemberCount(groupNo)
+	if mcErr == nil {
+		resp.MemberCount = int(memberCount)
+	}
+	c.Response(resp)
 }
 
 // 修改群信息
