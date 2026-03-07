@@ -29,7 +29,14 @@ SELECT @space_id, robot_id, 0, 1, @now, @now
 FROM `robot`
 WHERE status = 1;
 
+-- 5. 生成默认邀请码（永不过期，无使用限制）
+SET @invite_code = 'minglue2026';
+INSERT IGNORE INTO `space_invitation` (space_id, invite_code, creator, max_uses, used_count, expires_at, status, created_at, updated_at)
+VALUES (@space_id, @invite_code, 'system', 0, 0, NULL, 1, @now, @now);
+
 -- 验证
 SELECT 'Space created' AS step, COUNT(*) AS count FROM `space` WHERE space_id = @space_id
 UNION ALL
-SELECT 'Members added', COUNT(*) FROM `space_member` WHERE space_id = @space_id AND status = 1;
+SELECT 'Members added', COUNT(*) FROM `space_member` WHERE space_id = @space_id AND status = 1
+UNION ALL
+SELECT 'Invite code', COUNT(*) FROM `space_invitation` WHERE space_id = @space_id AND status = 1;
