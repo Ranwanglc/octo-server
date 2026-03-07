@@ -37,6 +37,11 @@ func (d *DB) insertSpace(m *SpaceModel, tx *dbr.Tx) error {
 	return err
 }
 
+func (d *DB) insertSpaceNoTx(m *SpaceModel) error {
+	_, err := d.session.InsertInto("space").Columns(util.AttrToUnderscore(m)...).Record(m).Exec()
+	return err
+}
+
 func (d *DB) querySpaceByID(spaceId string) (*SpaceModel, error) {
 	var m SpaceModel
 	_, err := d.session.Select("*").From("space").Where("space_id=? and status=1", spaceId).Load(&m)
@@ -227,4 +232,50 @@ func (d *DB) incrementInviteUsedCountAtomic(code string) (bool, error) {
 		return false, err
 	}
 	return rows > 0, nil
+}
+
+// BotDetailModel Bot 详情模型
+type BotDetailModel struct {
+	RobotID string // 机器人ID
+	Name    string // 名称
+	Avatar  string // 头像
+}
+
+// querySpaceBots 查询 Space 内所有有效的 Bot 列表
+func (d *DB) querySpaceBots(spaceId string) ([]*BotDetailModel, error) {
+	var models []*BotDetailModel
+	_, err := d.session.SelectBySql(`
+		SELECT r.robot_id, IFNULL(u.name,'') as name, IFNULL(u.avatar,'') as avatar
+		FROM space_member sm
+		INNER JOIN robot r ON r.robot_id=sm.uid AND r.status=1
+		LEFT JOIN user u ON u.uid=sm.uid
+		WHERE sm.space_id=? AND sm.status=1
+		ORDER BY sm.created_at ASC
+	`, spaceId).Load(&models)
+	return models, err
+}
+
+// updateInvitation 更新邀请码设置
+func (d *DB) updateInvitation(code string, maxUses *int, expiresAt *time.Time) error {
+	builder := d.session.Update("space_invitation")
+	if maxUses != nil {
+		builder = builder.Set("max_uses", *maxUses)
+	}
+	if expiresAt != nil {
+		builder = builder.Set("expires_at", *expiresAt)
+	}
+	builder = builder.Set("updated_at", time.Now())
+	_, err := builder.Where("invite_code=? AND status=1", code).Exec()
+	return err
+}
+
+// queryInvitationBySpaceAndCode 查询指定 Space 下的邀请码
+func (d *DB) queryInvitationBySpaceAndCode(spaceId string, code string) (*InvitationModel, error) {
+	var m InvitationModel
+	_, err := d.session.Select("*").From("space_invitation").
+		Where("space_id=? AND invite_code=? AND status=1", spaceId, code).Load(&m)
+	if m.InviteCode == "" {
+		return nil, nil
+	}
+	return &m, err
 }

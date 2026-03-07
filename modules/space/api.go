@@ -9,6 +9,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"go.uber.org/zap"
 )
 
 // Space 团队空间API
@@ -60,11 +61,13 @@ func (s *Space) Route(r *wkhttp.WKHttp) {
 		auth.PUT("/:space_id/members/:uid/role", s.updateMemberRole)
 
 		auth.POST("/:space_id/invite", s.createInvite)
+		auth.PUT("/:space_id/invite/:code", s.updateInvite)
 	}
 
 	open := r.Group("/v1/space")
 	{
 		open.GET("/invite/:invite_code", s.getInviteInfo)
+		open.GET("/invite/:invite_code/preview", s.getInvitePreview)
 	}
 }
 
@@ -703,4 +706,130 @@ func (s *Space) getInviteInfo(c *wkhttp.Context) {
 // GetCoMemberUIDs 获取与指定用户同在至少一个空间的所有用户UID（公开方法，供其他模块调用）
 func (s *Space) GetCoMemberUIDs(uid string) ([]string, error) {
 	return s.db.queryCoMemberUIDs(uid)
+}
+
+// getInvitePreview 获取邀请预览（含 Bot 列表，公开接口）
+func (s *Space) getInvitePreview(c *wkhttp.Context) {
+	inviteCode := c.Param("invite_code")
+	if inviteCode == "" {
+		c.ResponseError(errors.New("邀请码不能为空"))
+		return
+	}
+
+	invitation, err := s.db.queryInvitationByCode(inviteCode)
+	if err != nil {
+		c.ResponseError(errors.New("查询邀请信息失败"))
+		return
+	}
+	if invitation == nil {
+		c.ResponseError(errors.New("邀请码无效"))
+		return
+	}
+
+	space, err := s.db.querySpaceByID(invitation.SpaceId)
+	if err != nil || space == nil {
+		c.ResponseError(errors.New("空间不存在或已解散"))
+		return
+	}
+
+	expiresAtStr := ""
+	if invitation.ExpiresAt != nil {
+		expiresAtStr = time.Time(*invitation.ExpiresAt).Format("2006-01-02 15:04:05")
+	}
+
+	// 查询 Space 成员数
+	memberCount := 0
+	var cnt struct {
+		Count int `db:"count"`
+	}
+	_, _ = s.ctx.DB().SelectBySql("SELECT COUNT(*) as count FROM space_member WHERE space_id=? AND status=1", invitation.SpaceId).Load(&cnt)
+	memberCount = cnt.Count
+
+	// 查询 Space 内的 Bot 列表
+	botModels, err := s.db.querySpaceBots(invitation.SpaceId)
+	if err != nil {
+		s.Error("查询 Bot 列表失败", zap.Error(err))
+		botModels = []*BotDetailModel{}
+	}
+
+	bots := make([]botResp, 0, len(botModels))
+	for _, b := range botModels {
+		bots = append(bots, botResp{
+			RobotID: b.RobotID,
+			Name:    b.Name,
+			Avatar:  b.Avatar,
+		})
+	}
+
+	c.Response(invitePreviewResp{
+		InviteCode:  invitation.InviteCode,
+		SpaceId:     invitation.SpaceId,
+		SpaceName:   space.Name,
+		Description: space.Description,
+		Logo:        space.Logo,
+		Creator:     invitation.Creator,
+		MaxUses:     invitation.MaxUses,
+		UsedCount:   invitation.UsedCount,
+		ExpiresAt:   expiresAtStr,
+		MemberCount: memberCount,
+		Bots:        bots,
+	})
+}
+
+// updateInvite 更新邀请码设置
+func (s *Space) updateInvite(c *wkhttp.Context) {
+	loginUID := c.GetLoginUID()
+	spaceId := c.Param("space_id")
+	code := c.Param("code")
+
+	if s.checkSpaceActive(c, spaceId) {
+		return
+	}
+
+	// 检查权限（需要管理员或拥有者）
+	member, err := s.db.queryMember(spaceId, loginUID)
+	if err != nil {
+		c.ResponseError(errors.New("查询成员信息失败"))
+		return
+	}
+	if member == nil || member.Role < 1 {
+		c.ResponseError(errors.New("无权限修改邀请码设置"))
+		return
+	}
+
+	// 检查邀请码是否存在且属于该 Space
+	invitation, err := s.db.queryInvitationBySpaceAndCode(spaceId, code)
+	if err != nil {
+		c.ResponseError(errors.New("查询邀请码失败"))
+		return
+	}
+	if invitation == nil {
+		c.ResponseError(errors.New("邀请码不存在"))
+		return
+	}
+
+	var req updateInviteReq
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("请求参数错误"))
+		return
+	}
+
+	// 解析过期时间
+	var expiresAt *time.Time
+	if req.ExpiresAt != nil && *req.ExpiresAt != "" {
+		t, err := time.Parse("2006-01-02 15:04:05", *req.ExpiresAt)
+		if err != nil {
+			c.ResponseError(errors.New("过期时间格式错误，请使用 2006-01-02 15:04:05 格式"))
+			return
+		}
+		expiresAt = &t
+	}
+
+	err = s.db.updateInvitation(code, req.MaxUses, expiresAt)
+	if err != nil {
+		c.ResponseError(errors.New("更新邀请码失败"))
+		return
+	}
+
+	c.ResponseOK()
 }

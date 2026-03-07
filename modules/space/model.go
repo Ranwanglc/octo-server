@@ -103,6 +103,34 @@ type inviteResp struct {
 	MemberCount int    `json:"member_count"`
 }
 
+// botResp Bot 信息响应
+type botResp struct {
+	RobotID string `json:"robot_id"`
+	Name    string `json:"name"`
+	Avatar  string `json:"avatar"`
+}
+
+// invitePreviewResp 邀请预览响应（含 Bot 列表）
+type invitePreviewResp struct {
+	InviteCode  string    `json:"invite_code"`
+	SpaceId     string    `json:"space_id"`
+	SpaceName   string    `json:"space_name"`
+	Description string    `json:"description"`
+	Logo        string    `json:"logo"`
+	Creator     string    `json:"creator"`
+	MaxUses     int       `json:"max_uses"`
+	UsedCount   int       `json:"used_count"`
+	ExpiresAt   string    `json:"expires_at"`
+	MemberCount int       `json:"member_count"`
+	Bots        []botResp `json:"bots"`
+}
+
+// updateInviteReq 更新邀请码请求
+type updateInviteReq struct {
+	MaxUses   *int    `json:"max_uses"`
+	ExpiresAt *string `json:"expires_at"`
+}
+
 // MemberDetailModel 带用户名的成员详情
 type MemberDetailModel struct {
 	MemberModel
