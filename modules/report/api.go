@@ -1,13 +1,17 @@
 package report
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/pkg/util"
 )
 
 // Report 举报
@@ -30,6 +34,7 @@ func (r *Report) Route(l *wkhttp.WKHttp) {
 	{
 		v.GET("/categories", r.categoies)
 		v.GET("/html", r.reportHTML)
+		v.POST("/session/resolve", r.resolveSession)
 	}
 	auth := l.Group("/v1/reports", r.ctx.AuthMiddleware(l))
 	{
@@ -38,6 +43,8 @@ func (r *Report) Route(l *wkhttp.WKHttp) {
 	}
 }
 
+const reportSessionPrefix = "report_session:"
+
 func (r *Report) reportHTML(c *wkhttp.Context) {
 
 	mode := c.Query("mode")
@@ -45,17 +52,70 @@ func (r *Report) reportHTML(c *wkhttp.Context) {
 		mode = "light"
 	}
 
+	// Store sensitive token in a temporary session to avoid URL exposure
+	uid := c.Query("uid")
+	token := c.Query("token")
+
 	redirectURL, _ := url.Parse(r.ctx.GetConfig().External.H5BaseURL)
 	redirectURL.Path = "/report.html"
 	q := redirectURL.Query()
 	q.Set("lang", c.Query("lang"))
-	q.Set("uid", c.Query("uid"))
-	q.Set("token", c.Query("token"))
+
+	if uid != "" && token != "" {
+		sessionID := util.GenerUUID()
+		data, _ := json.Marshal(map[string]string{"uid": uid, "token": token})
+		_ = r.ctx.GetRedisConn().SetAndExpire(
+			fmt.Sprintf("%s%s", reportSessionPrefix, sessionID),
+			string(data),
+			5*time.Minute,
+		)
+		q.Set("session", sessionID)
+	}
+
 	q.Set("channel_id", c.Query("channel_id"))
 	q.Set("channel_type", c.Query("channel_type"))
 	q.Set("mode", mode)
 	redirectURL.RawQuery = q.Encode()
 	c.Redirect(http.StatusMovedPermanently, redirectURL.String())
+}
+
+// resolveSession exchanges a temporary session ID for uid and token
+func (r *Report) resolveSession(c *wkhttp.Context) {
+	var req struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseErrorf("请求数据格式有误！", err)
+		return
+	}
+	if req.SessionID == "" {
+		c.ResponseError(errors.New("session_id不能为空"))
+		return
+	}
+
+	key := fmt.Sprintf("%s%s", reportSessionPrefix, req.SessionID)
+	data, err := r.ctx.GetRedisConn().GetString(key)
+	if err != nil || data == "" {
+		c.ResponseError(errors.New("会话已过期或无效"))
+		return
+	}
+
+	// Delete after use (one-time)
+	_ = r.ctx.GetRedisConn().Del(key)
+
+	var session struct {
+		UID   string `json:"uid"`
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal([]byte(data), &session); err != nil || session.UID == "" || session.Token == "" {
+		c.ResponseError(errors.New("会话数据无效"))
+		return
+	}
+
+	c.Response(map[string]string{
+		"uid":   session.UID,
+		"token": session.Token,
+	})
 }
 
 // 举报
