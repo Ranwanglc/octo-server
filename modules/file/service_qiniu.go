@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"strings"
+
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/qiniu/go-sdk/v7/auth"
 	"github.com/qiniu/go-sdk/v7/storage"
 	"go.uber.org/zap"
-	"io"
 )
 
 type ServiceQiniu struct {
@@ -73,10 +75,7 @@ func (s *ServiceQiniu) UploadFile(filePath string, contentType string, copyFileW
 func (s *ServiceQiniu) DownloadURL(path string, filename string) (string, error) {
 	qiniuCfg := s.ctx.GetConfig().Qiniu
 	domain := qiniuCfg.URL
-	key := path
-	if key[0:1] == "/" {
-		key = key[1:]
-	}
+	key := strings.TrimPrefix(path, "/")
 	publicAccessURL := storage.MakePublicURL(domain, key)
 	return publicAccessURL, nil
 }
