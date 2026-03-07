@@ -3,6 +3,7 @@ package webhook
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-lib/common"
@@ -147,13 +148,22 @@ func getMessageAlert(msg msgOfflineNotify, toUser *user.Resp, ctx *config.Contex
 	return alert, nil
 }
 
-var webhookDB *DB
+var (
+	webhookDB     *DB
+	webhookDBOnce sync.Once
+)
+
+// getWebhookDB returns the singleton webhookDB instance, initializing it thread-safely on first call.
+func getWebhookDB(ctx *config.Context) *DB {
+	webhookDBOnce.Do(func() {
+		webhookDB = NewDB(ctx.DB())
+	})
+	return webhookDB
+}
 
 // 获取和缓存发送者的显示名称
 func getAndCacheShowNameForFromUID(msgResp msgOfflineNotify, ctx *config.Context) (string, error) {
-	if webhookDB == nil {
-		webhookDB = NewDB(ctx.DB())
-	}
+	db := getWebhookDB(ctx)
 
 	var name, // 发送者常用名
 		remark, // 接收者对发送者的备注
@@ -169,7 +179,7 @@ func getAndCacheShowNameForFromUID(msgResp msgOfflineNotify, ctx *config.Context
 			name = nameMap["name"]
 			remark = nameMap["remark"]
 		} else { // 不存在缓存，从DB获取，然后再缓存
-			name, remark, _, err = webhookDB.GetThirdName(msgResp.FromUID, msgResp.ToUID, "")
+			name, remark, _, err = db.GetThirdName(msgResp.FromUID, msgResp.ToUID, "")
 			if err != nil {
 				return "", err
 			}
@@ -196,7 +206,7 @@ func getAndCacheShowNameForFromUID(msgResp msgOfflineNotify, ctx *config.Context
 			remark = nameMap["remark"]
 			nameInGroup = nameMap["name_in_group"]
 		} else { // 不存在缓存，从DB获取，然后再缓存
-			name, remark, nameInGroup, err = webhookDB.GetThirdName(msgResp.FromUID, msgResp.ToUID, msgResp.ChannelID)
+			name, remark, nameInGroup, err = db.GetThirdName(msgResp.FromUID, msgResp.ToUID, msgResp.ChannelID)
 			if err != nil {
 				return "", err
 			}
@@ -224,9 +234,7 @@ func getAndCacheShowNameForFromUID(msgResp msgOfflineNotify, ctx *config.Context
 
 // 获取和缓存群名
 func getAndCacheGroupName(msgResp msgOfflineNotify, ctx *config.Context) (string, error) {
-	if webhookDB == nil {
-		webhookDB = NewDB(ctx.DB())
-	}
+	db := getWebhookDB(ctx)
 
 	key := fmt.Sprintf("%s%s", groupNameCachePrefix, msgResp.ChannelID)
 	groupName, err := ctx.GetRedisConn().GetString(key)
@@ -234,7 +242,7 @@ func getAndCacheGroupName(msgResp msgOfflineNotify, ctx *config.Context) (string
 		return "", err
 	}
 	if groupName == "" {
-		groupName, err = webhookDB.GetGroupName(msgResp.ChannelID)
+		groupName, err = db.GetGroupName(msgResp.ChannelID)
 		if err != nil {
 			return "", err
 		}
