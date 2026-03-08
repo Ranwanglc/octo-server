@@ -14,6 +14,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/channel"
 	chservice "github.com/Mininglamp-OSS/octo-server/modules/channel/service"
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
+	"github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/Mininglamp-OSS/octo-lib/common"
@@ -583,10 +584,14 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	}
 	// Space 过滤
 	if hasSpaceFilter {
+		// 查用户的默认 Space（最早加入的），裸 UID 旧会话只在默认 Space 显示
+		defaultSpaceID := space.GetUserDefaultSpaceID(co.ctx, loginUID)
 		filtered := make([]*SyncUserConversationResp, 0, len(syncUserConversationResps))
 		for _, conv := range syncUserConversationResps {
-			// 匹配 Space 或旧会话（无 Space 前缀的裸 UID，视为属于当前 Space）
-			if conv.SpaceID == filterSpaceID || conv.SpaceID == "" {
+			if conv.SpaceID == filterSpaceID {
+				filtered = append(filtered, conv)
+			} else if conv.SpaceID == "" && filterSpaceID == defaultSpaceID {
+				// 裸 UID 旧会话只在默认 Space 显示
 				filtered = append(filtered, conv)
 			}
 		}

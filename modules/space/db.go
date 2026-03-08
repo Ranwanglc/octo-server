@@ -292,3 +292,15 @@ func (d *DB) queryInvitationBySpaceAndCode(spaceId string, code string) (*Invita
 	}
 	return &m, err
 }
+
+// GetUserDefaultSpaceID 获取用户最早加入的 Space（默认 Space）
+func GetUserDefaultSpaceID(ctx *config.Context, uid string) string {
+	var spaceID string
+	_, _ = ctx.DB().SelectBySql(`
+		SELECT space_id FROM space_member
+		WHERE uid=? AND status=1
+		ORDER BY created_at ASC
+		LIMIT 1
+	`, uid).Load(&spaceID)
+	return spaceID
+}
