@@ -70,3 +70,31 @@ func TestCheckReq_AllValidTypes(t *testing.T) {
 		assert.NoError(t, err, "type %s should be valid", ft)
 	}
 }
+
+func TestSanitizePath(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{"normal path", "/chat/image.jpg", false},
+		{"simple traversal", "../etc/passwd", true},
+		{"encoded traversal", "%2e%2e%2fetc%2fpasswd", true},
+		{"double encoded traversal", "%252e%252e%252fetc%252fpasswd", true},
+		{"triple encoded traversal", "%25252e%25252e%25252f", true},
+		{"clean path", "/chat/subfolder/file.png", false},
+		{"empty path", "", false},
+		{"path with spaces", "/chat/my file.jpg", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := sanitizePath(tt.input)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}

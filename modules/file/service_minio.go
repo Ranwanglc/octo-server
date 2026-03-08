@@ -65,9 +65,14 @@ func (sm *ServiceMinio) UploadFile(filePath string, contentType string, copyFile
 		sm.Error("创建错误：", zap.Error(err))
 		return nil, err
 	}
+	// Bucket name whitelist to prevent arbitrary bucket creation
+	allowedBuckets := map[string]bool{
+		"file": true, "chat": true, "moment": true, "sticker": true,
+		"report": true, "chatbg": true, "common": true, "download": true,
+	}
 	bucketName := "file"
 	strs := strings.Split(filePath, "/")
-	if len(strs) > 0 {
+	if len(strs) > 0 && allowedBuckets[strs[0]] {
 		bucketName = strs[0]
 	}
 	exists, err := minioClient.BucketExists(ctx, bucketName)

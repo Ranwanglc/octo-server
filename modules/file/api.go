@@ -39,16 +39,10 @@ func New(ctx *config.Context) *File {
 
 // Route 路由
 func (f *File) Route(r *wkhttp.WKHttp) {
-	api := r.Group("/v1/file")
-	{ // 文件上传
-		// api.POST("/upload/*path", f.upload)
-		// 组合图片
-		//	api.POST("/compose/*path", f.makeImageCompose)
-		// 获取文件
-		api.GET("/preview/*path", f.getFile)
-	}
 	auth := r.Group("/v1/file", f.ctx.AuthMiddleware(r))
 	{
+		// 获取文件（需认证，防止未授权访问用户文件）
+		auth.GET("/preview/*path", f.getFile)
 		//获取上传文件地址
 		auth.GET("/upload", f.getFilePath)
 		//上传文件
@@ -268,12 +262,19 @@ func (f *File) getFile(c *wkhttp.Context) {
 	c.Redirect(http.StatusFound, downloadURL)
 }
 
-// sanitizePath 规范化上传路径，防止路径遍历攻击
+// sanitizePath 规范化上传路径，防止路径遍历攻击（包括双重编码）
 func sanitizePath(p string) (string, error) {
-	// 解码可能的URL编码
-	decoded, err := url.QueryUnescape(p)
-	if err != nil {
-		return "", errors.New("路径包含无效字符")
+	// 循环解码防止双重/多重 URL 编码绕过
+	decoded := p
+	for i := 0; i < 3; i++ {
+		next, err := url.QueryUnescape(decoded)
+		if err != nil {
+			return "", errors.New("路径包含无效字符")
+		}
+		if next == decoded {
+			break // 没有更多编码层
+		}
+		decoded = next
 	}
 	// 禁止包含 .. 的路径遍历
 	cleaned := filepath.Clean(decoded)
