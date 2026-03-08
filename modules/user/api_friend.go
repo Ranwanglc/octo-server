@@ -496,7 +496,7 @@ func (f *Friend) friendApply(c *wkhttp.Context) {
 	// 如果目标是机器人，检查是否自动通过
 	if toUser.Robot == 1 {
 		var autoApprove int
-		_ = f.ctx.DB().Select("IFNULL(auto_approve,1)").From("robot").Where("robot_id=? AND status=1", toUser.UID).LoadOne(&autoApprove)
+		_ = f.ctx.DB().Select("IFNULL(auto_approve,0)").From("robot").Where("robot_id=? AND status=1", toUser.UID).LoadOne(&autoApprove)
 		if autoApprove == 1 {
 			// 自动通过好友申请
 			go f.autoApproveFriend(fromUID, toUser.UID, token)

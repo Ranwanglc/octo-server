@@ -234,7 +234,7 @@ func (s *Service) GetUserDetail(uid string, loginUID string) (*UserDetailResp, e
 			AutoApprove int    `db:"auto_approve"`
 		}
 		_, err = s.ctx.DB().SelectBySql(
-			"SELECT IFNULL(bot_commands,'') as bot_commands, IFNULL(description,'') as description, IFNULL(creator_uid,'') as creator_uid, IFNULL(auto_approve,1) as auto_approve FROM robot WHERE robot_id = ? AND status=1", uid,
+			"SELECT IFNULL(bot_commands,'') as bot_commands, IFNULL(description,'') as description, IFNULL(creator_uid,'') as creator_uid, IFNULL(auto_approve,0) as auto_approve FROM robot WHERE robot_id = ? AND status=1", uid,
 		).Load(&botDetails)
 		if err != nil {
 			s.Error("查询机器人详情失败", zap.Error(err))
@@ -410,7 +410,7 @@ func (s *Service) GetUserDetails(uids []string, loginUID string) ([]*UserDetailR
 			AutoApprove int    `db:"auto_approve"`
 		}
 		_, err = s.ctx.DB().SelectBySql(
-			"SELECT robot_id, IFNULL(bot_commands,'') as bot_commands, IFNULL(description,'') as description, IFNULL(creator_uid,'') as creator_uid, IFNULL(auto_approve,1) as auto_approve FROM robot WHERE robot_id in ? AND status=1",
+			"SELECT robot_id, IFNULL(bot_commands,'') as bot_commands, IFNULL(description,'') as description, IFNULL(creator_uid,'') as creator_uid, IFNULL(auto_approve,0) as auto_approve FROM robot WHERE robot_id in ? AND status=1",
 			robotUIDs,
 		).Load(&botDetails)
 		if err != nil {
