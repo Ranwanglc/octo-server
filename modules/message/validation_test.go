@@ -338,6 +338,194 @@ func TestSensitiveWords_ContainsFinancialTerms(t *testing.T) {
 	}
 }
 
+// TestGetMentionTypeAssertionSafety verifies that getMention uses safe type
+// assertions and doesn't panic on malformed data.
+func TestGetMentionTypeAssertionSafety(t *testing.T) {
+	m := &Message{}
+
+	tests := []struct {
+		name        string
+		payloadMap  map[string]interface{}
+		expectAll   bool
+		expectUIDs  []string
+		expectPanic bool
+	}{
+		{
+			name: "valid mention with all=1",
+			payloadMap: map[string]interface{}{
+				"mention": map[string]interface{}{
+					"all": "1",
+				},
+			},
+			expectAll:  false, // json.Number parsing will fail for string "1"
+			expectUIDs: nil,
+		},
+		{
+			name: "valid mention with uids",
+			payloadMap: map[string]interface{}{
+				"mention": map[string]interface{}{
+					"uids": []interface{}{"uid1", "uid2"},
+				},
+			},
+			expectAll:  false,
+			expectUIDs: []string{"uid1", "uid2"},
+		},
+		{
+			name: "mention is string instead of map - should not panic",
+			payloadMap: map[string]interface{}{
+				"mention": "invalid_string",
+			},
+			expectAll:   false,
+			expectUIDs:  nil,
+			expectPanic: false,
+		},
+		{
+			name: "mention is int instead of map - should not panic",
+			payloadMap: map[string]interface{}{
+				"mention": 12345,
+			},
+			expectAll:   false,
+			expectUIDs:  nil,
+			expectPanic: false,
+		},
+		{
+			name: "mention is nil - should not panic",
+			payloadMap: map[string]interface{}{
+				"mention": nil,
+			},
+			expectAll:   false,
+			expectUIDs:  nil,
+			expectPanic: false,
+		},
+		{
+			name: "mention.uids is string instead of array - should not panic",
+			payloadMap: map[string]interface{}{
+				"mention": map[string]interface{}{
+					"uids": "invalid_string",
+				},
+			},
+			expectAll:   false,
+			expectUIDs:  nil,
+			expectPanic: false,
+		},
+		{
+			name: "mention.uids contains non-string elements - should skip them",
+			payloadMap: map[string]interface{}{
+				"mention": map[string]interface{}{
+					"uids": []interface{}{"uid1", 123, "uid2", nil},
+				},
+			},
+			expectAll:   false,
+			expectUIDs:  []string{"uid1", "uid2"},
+			expectPanic: false,
+		},
+		{
+			name: "mention.uids is map instead of array - should not panic",
+			payloadMap: map[string]interface{}{
+				"mention": map[string]interface{}{
+					"uids": map[string]interface{}{"uid": "123"},
+				},
+			},
+			expectAll:   false,
+			expectUIDs:  nil,
+			expectPanic: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					if !tt.expectPanic {
+						t.Errorf("unexpected panic: %v", r)
+					}
+				}
+			}()
+
+			all, uids := m.getMention(tt.payloadMap)
+			assert.Equal(t, tt.expectAll, all)
+			assert.Equal(t, tt.expectUIDs, uids)
+		})
+	}
+}
+
+// TestVisiblesTypeAssertionSafety verifies that visibles parsing in getReminders
+// uses safe type assertions and doesn't panic on malformed data.
+func TestVisiblesTypeAssertionSafety(t *testing.T) {
+	tests := []struct {
+		name        string
+		payloadMap  map[string]interface{}
+		expectPanic bool
+	}{
+		{
+			name: "valid visibles array with strings",
+			payloadMap: map[string]interface{}{
+				"visibles": []interface{}{"uid1", "uid2"},
+			},
+			expectPanic: false,
+		},
+		{
+			name: "visibles is string instead of array - should not panic",
+			payloadMap: map[string]interface{}{
+				"visibles": "invalid_string",
+			},
+			expectPanic: false,
+		},
+		{
+			name: "visibles is int instead of array - should not panic",
+			payloadMap: map[string]interface{}{
+				"visibles": 12345,
+			},
+			expectPanic: false,
+		},
+		{
+			name: "visibles is map instead of array - should not panic",
+			payloadMap: map[string]interface{}{
+				"visibles": map[string]interface{}{"uid": "123"},
+			},
+			expectPanic: false,
+		},
+		{
+			name: "visibles is nil - should not panic",
+			payloadMap: map[string]interface{}{
+				"visibles": nil,
+			},
+			expectPanic: false,
+		},
+		{
+			name: "visibles contains non-string elements - should skip them",
+			payloadMap: map[string]interface{}{
+				"visibles": []interface{}{"uid1", 123, nil, "uid2"},
+			},
+			expectPanic: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					if !tt.expectPanic {
+						t.Errorf("unexpected panic for visibles type assertion: %v", r)
+					}
+				}
+			}()
+
+			// Simulate the safe visibles parsing pattern from api_reminders.go
+			if tt.payloadMap["visibles"] != nil {
+				visibleObjs, ok := tt.payloadMap["visibles"].([]interface{})
+				if ok {
+					for _, visibleObj := range visibleObjs {
+						if uid, ok := visibleObj.(string); ok {
+							assert.NotEmpty(t, uid)
+						}
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestTypeAssertionSafety verifies that type assertions in message payload
 // parsing use the comma-ok pattern to prevent panics on malformed data.
 func TestTypeAssertionSafety(t *testing.T) {

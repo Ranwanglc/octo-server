@@ -200,8 +200,15 @@ func (m *Message) getReminders(messages []*config.MessageResp) []*remindersModel
 		contentType := m.contentType(payloadMap)
 		if contentType == common.GroupMemberInvite.Int() {
 			if payloadMap["visibles"] != nil {
-				visibleObjs := payloadMap["visibles"].([]interface{})
+				visibleObjs, ok := payloadMap["visibles"].([]interface{})
+				if !ok {
+					continue
+				}
 				for _, visibleObj := range visibleObjs {
+					uid, ok := visibleObj.(string)
+					if !ok {
+						continue
+					}
 					version, err := m.ctx.GenSeq(common.RemindersKey)
 					if err != nil {
 						m.Warn("GenSeq failed", zap.Error(err))
@@ -213,7 +220,7 @@ func (m *Message) getReminders(messages []*config.MessageResp) []*remindersModel
 						MessageID:    fmt.Sprintf("%d", message.MessageID),
 						MessageSeq:   message.MessageSeq,
 						ReminderType: ReminderTypeApplyJoinGroup,
-						UID:          visibleObj.(string),
+						UID:          uid,
 						IsLocate:     1,
 						Version:      version,
 						Text:         "[进群申请]",
@@ -274,18 +281,28 @@ func (m *Message) hasMention(payloadMap map[string]interface{}) bool {
 }
 
 func (m *Message) getMention(payloadMap map[string]interface{}) (all bool, uids []string) {
-	mentionMap := payloadMap["mention"].(map[string]interface{})
+	mentionMap, ok := payloadMap["mention"].(map[string]interface{})
+	if !ok {
+		return false, nil
+	}
 	if mentionMap["all"] != nil {
-		allI, _ := mentionMap["all"].(json.Number).Int64()
-		if allI == 1 {
-			all = true
+		if allNum, ok := mentionMap["all"].(json.Number); ok {
+			allI, _ := allNum.Int64()
+			if allI == 1 {
+				all = true
+			}
 		}
 	}
 	if mentionMap["uids"] != nil {
-		uidObjs := mentionMap["uids"].([]interface{})
+		uidObjs, ok := mentionMap["uids"].([]interface{})
+		if !ok {
+			return all, nil
+		}
 		uids = make([]string, 0, len(uidObjs))
 		for _, uidObj := range uidObjs {
-			uids = append(uids, uidObj.(string))
+			if uid, ok := uidObj.(string); ok {
+				uids = append(uids, uid)
+			}
 		}
 	}
 	return
