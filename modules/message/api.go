@@ -610,6 +610,21 @@ func (m *Message) syncMessageExtra(c *wkhttp.Context) {
 		c.ResponseErrorf("数据格式有误！", err)
 		return
 	}
+
+	// 群组成员校验：非成员不允许同步消息扩展数据
+	if req.ChannelType == common.ChannelTypeGroup.Uint8() {
+		exist, err := m.groupService.ExistMember(req.ChannelID, c.GetLoginUID())
+		if err != nil {
+			m.Error("查询是否在群内存在失败！", zap.Error(err))
+			c.ResponseError(errors.New("查询是否在群内存在失败！"))
+			return
+		}
+		if !exist {
+			c.Response(make([]*messageExtraResp, 0))
+			return
+		}
+	}
+
 	fakeChannelID := req.ChannelID
 	if req.ChannelType == common.ChannelTypePerson.Uint8() {
 		fakeChannelID = common.GetFakeChannelIDWith(c.GetLoginUID(), req.ChannelID)
