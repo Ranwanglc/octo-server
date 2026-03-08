@@ -584,28 +584,18 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	}
 	// Space 过滤
 	if hasSpaceFilter {
-		// 获取目标 Space 的所有成员 UID，用于判断会话是否属于该 Space
-		spaceMemberUIDs, _ := space.GetSpaceMemberUIDs(co.ctx, filterSpaceID)
-		spaceMemberSet := make(map[string]bool, len(spaceMemberUIDs))
-		for _, uid := range spaceMemberUIDs {
-			spaceMemberSet[uid] = true
-		}
+		// 查用户的默认 Space（最早加入的），裸 UID 旧会话只在默认 Space 显示
+		defaultSpaceID := space.GetUserDefaultSpaceID(co.ctx, loginUID)
 		filtered := make([]*SyncUserConversationResp, 0, len(syncUserConversationResps))
 		for _, conv := range syncUserConversationResps {
 			if conv.SpaceID == filterSpaceID {
-				// Space 格式 channel_id，直接通过
+				// Space 格式 channel_id，属于当前 Space
 				filtered = append(filtered, conv)
-			} else if conv.SpaceID == "" {
-				// 裸 UID 会话：检查对方是否是目标 Space 的成员
-				peerUID := conv.ChannelID
-				if conv.ChannelType == 1 { // 单聊
-					if spaceMemberSet[peerUID] {
-						filtered = append(filtered, conv)
-					}
-				} else if conv.ChannelType == 2 { // 群聊 — 暂时在所有 Space 显示
-					filtered = append(filtered, conv)
-				}
+			} else if conv.SpaceID == "" && filterSpaceID == defaultSpaceID {
+				// 裸 UID 旧会话（单聊+群聊）只在用户默认 Space 显示
+				filtered = append(filtered, conv)
 			}
+			// 其他情况（旧会话 + 非默认 Space）→ 不显示
 		}
 		syncUserConversationResps = filtered
 	}
