@@ -15,7 +15,6 @@ import (
 
 	"github.com/Mininglamp-OSS/octo-server/modules/base/app"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
-	"github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -348,21 +347,12 @@ func getRobotIDFromContext(c *wkhttp.Context) string {
 	return ""
 }
 
-// resolveSpaceChannelID 将裸 UID 转为 Space channel_id（DM 场景）
-// 如果 bot 和目标用户在同一 Space，返回 s{spaceId}_{channelID}
-// 否则返回原始 channelID
+// resolveSpaceChannelID 处理 Bot API 的 channel_id
+// DM(channel_type=1): WuKongIM 只认裸 uid，不加 Space 前缀
+// Group: 原样返回
 func (bf *BotFather) resolveSpaceChannelID(robotID, channelID string, channelType uint8) string {
-	if channelType != common.ChannelTypePerson.Uint8() {
-		return channelID
-	}
-	// 已经是 Space 格式，不再处理
-	if strings.HasPrefix(channelID, "s") && strings.Contains(channelID, "_") {
-		return channelID
-	}
-	spaceID := space.GetCommonSpaceID(bf.ctx, robotID, channelID)
-	if spaceID != "" {
-		return fmt.Sprintf("s%s_%s", spaceID, channelID)
-	}
+	// DM 场景：始终使用裸 uid（WuKongIM DM 不认 Space 前缀）
+	// 非 DM 场景：原样返回
 	return channelID
 }
 
@@ -500,13 +490,8 @@ func (bf *BotFather) typing(c *wkhttp.Context) {
 	// 因为客户端用 param.channel_id 匹配会话
 	paramChannelID := channelID
 	if req.ChannelType == uint8(common.ChannelTypePerson) {
-		// Space 模式下用 Space 前缀的 robotID
-		spaceID := space.GetCommonSpaceID(bf.ctx, robotID, req.ChannelID)
-		if spaceID != "" {
-			paramChannelID = fmt.Sprintf("s%s_%s", spaceID, robotID)
-		} else {
-			paramChannelID = robotID
-		}
+		// DM 场景：paramChannelID 用裸 robotID（WuKongIM 不认 Space 前缀）
+		paramChannelID = robotID
 	}
 	err := bf.ctx.SendCMD(config.MsgCMDReq{
 		NoPersist:   true,
