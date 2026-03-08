@@ -89,7 +89,12 @@ func (f *File) getFilePath(c *wkhttp.Context) {
 		return
 	}
 	if uploadPath != "" {
-		uploadPath, _ = sanitizePath(uploadPath)
+		var sanitizeErr error
+		uploadPath, sanitizeErr = sanitizePath(uploadPath)
+		if sanitizeErr != nil {
+			c.ResponseError(errors.New("无效的文件路径"))
+			return
+		}
 	}
 	var path string
 	if Type(fileType) == TypeMomentCover {
@@ -128,7 +133,12 @@ func (f *File) uploadFile(c *wkhttp.Context) {
 		return
 	}
 	if uploadPath != "" {
-		uploadPath, _ = sanitizePath(uploadPath)
+		var sanitizeErr error
+		uploadPath, sanitizeErr = sanitizePath(uploadPath)
+		if sanitizeErr != nil {
+			c.ResponseError(errors.New("无效的文件路径"))
+			return
+		}
 	}
 
 	// 限制请求体大小，防止大文件 DoS
