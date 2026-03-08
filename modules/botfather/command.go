@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/Mininglamp-OSS/octo-server/modules/base/app"
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
@@ -57,37 +58,45 @@ func (h *commandHandler) HandleMessage(fromUID string, content string) {
 	h.handleStatefulInput(fromUID, content)
 }
 
-// spacePrefix 从 message.FromUID 提取 Space 前缀
-// 原理：fromUID 和 toUID 共享同一个 Space 前缀 s{spaceId}_
-// 我们已知 toUID 以 "_botfather" 结尾，fromUID 有同样的前缀
-// 所以通过 channel_id 中 BotFatherUID 的位置反推 prefix
-var currentSpacePrefix string
+// spacePrefixes stores per-fromUID Space prefix to avoid global mutable state.
+// Each message-processing goroutine sets its prefix before handling and cleans
+// up after, ensuring concurrent messages don't interfere with each other.
+var spacePrefixes sync.Map
 
-// setSpacePrefixFromChannel 从 channel_id 提取 Space 前缀
-func setSpacePrefixFromChannel(channelID string) {
-	// channel_id 格式: s{spaceId}_{uid1}@s{spaceId}_{uid2}
-	// 找到 BotFatherUID 在其中的位置来确定前缀
+// setSpacePrefixForUID extracts the Space prefix from channelID and stores it
+// keyed by fromUID. Returns a cleanup function that must be deferred.
+func setSpacePrefixForUID(fromUID, channelID string) func() {
+	prefix := ""
 	suffix := "_" + BotFatherUID
 	idx := strings.Index(channelID, suffix)
 	if idx > 0 {
-		// 前缀可能包含 @ 前的部分
-		part := channelID[:idx+1] // 包含 "_"
-		// 提取纯 Space 前缀 s{spaceId}_
+		part := channelID[:idx+1] // include trailing "_"
 		atIdx := strings.LastIndex(part, "@")
 		if atIdx >= 0 {
-			currentSpacePrefix = part[atIdx+1:]
+			prefix = part[atIdx+1:]
 		} else {
-			currentSpacePrefix = part
+			prefix = part
 		}
-	} else {
-		currentSpacePrefix = ""
 	}
+	if prefix != "" {
+		spacePrefixes.Store(fromUID, prefix)
+	}
+	return func() { spacePrefixes.Delete(fromUID) }
 }
 
-// extractRealUID 从可能带 Space 前缀的 uid 中提取真实 uid
+// getSpacePrefix returns the Space prefix for the given fromUID, or "".
+func getSpacePrefix(fromUID string) string {
+	if v, ok := spacePrefixes.Load(fromUID); ok {
+		return v.(string)
+	}
+	return ""
+}
+
+// extractRealUID strips the Space prefix from a uid if present.
 func extractRealUID(uid string) string {
-	if currentSpacePrefix != "" && strings.HasPrefix(uid, currentSpacePrefix) {
-		return uid[len(currentSpacePrefix):]
+	prefix := getSpacePrefix(uid)
+	if prefix != "" && strings.HasPrefix(uid, prefix) {
+		return uid[len(prefix):]
 	}
 	return uid
 }
@@ -839,8 +848,8 @@ func (h *commandHandler) reply(toUID string, content string) {
 	channelID := toUID
 	fromUID := BotFatherUID
 	// Space 模式：BotFather 也需要加 Space 前缀
-	if currentSpacePrefix != "" {
-		fromUID = currentSpacePrefix + BotFatherUID
+	if sp := getSpacePrefix(toUID); sp != "" {
+		fromUID = sp + BotFatherUID
 	}
 	h.ctx.SendMessage(&config.MsgSendReq{
 		Header: config.MsgHeader{

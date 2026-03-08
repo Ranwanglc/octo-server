@@ -1656,7 +1656,7 @@ func (u *User) loginWithAuthCode(c *wkhttp.Context) {
 
 // 获取二维码数据的管道
 func (u *User) getQRCodeModelChan(uuid string) <-chan *common.QRCodeModel {
-	qrcodeModelChan := make(chan *common.QRCodeModel)
+	qrcodeModelChan := make(chan *common.QRCodeModel, 1) // buffered: prevent message loss between return and receive
 	qrcodeChanLock.Lock()
 	qrcodeChanMap[uuid] = qrcodeModelChan
 	qrcodeChanLock.Unlock()
@@ -1665,9 +1665,10 @@ func (u *User) getQRCodeModelChan(uuid string) <-chan *common.QRCodeModel {
 func (u *User) removeQRCodeChan(uuid string) {
 	qrcodeChanLock.Lock()
 	defer qrcodeChanLock.Unlock()
-	_, exist := qrcodeChanMap[uuid]
+	ch, exist := qrcodeChanMap[uuid]
 	if exist {
 		delete(qrcodeChanMap, uuid)
+		close(ch) // close channel to unblock any pending sender
 	}
 }
 

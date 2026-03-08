@@ -131,7 +131,7 @@ func (bf *BotFather) messagesListen(messages []*config.MessageResp) {
 		}
 
 		// 提取 Space 前缀（用于后续 extractRealUID）
-		setSpacePrefixFromChannel(message.ChannelID)
+		channelID := message.ChannelID
 
 		// 解析消息内容
 		payloadValue := gjson.ParseBytes(message.Payload)
@@ -150,10 +150,12 @@ func (bf *BotFather) messagesListen(messages []*config.MessageResp) {
 		// 处理命令（使用信号量限制并发数）
 		select {
 		case bf.msgSem <- struct{}{}:
-			go func(uid, msg string) {
+			go func(uid, msg, chID string) {
 				defer func() { <-bf.msgSem }()
+				cleanup := setSpacePrefixForUID(uid, chID)
+				defer cleanup()
 				bf.cmdHandler.HandleMessage(uid, msg)
-			}(message.FromUID, content)
+			}(message.FromUID, content, channelID)
 		default:
 			bf.Warn("消息处理并发数已达上限，丢弃消息", zap.String("fromUID", message.FromUID))
 		}

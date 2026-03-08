@@ -929,15 +929,13 @@ func TestAddBotFatherFriend_Bidirectional(t *testing.T) {
 // TestSendQRCodeInfo_ConcurrentSendAndRemove 测试 QRCode 发送与删除的并发安全性
 // 此测试不依赖数据库，直接操作全局 qrcodeChanMap
 func TestSendQRCodeInfo_ConcurrentSendAndRemove(t *testing.T) {
+	u := &User{}
 	// 测试多轮并发操作，确保没有竞态条件
 	for round := 0; round < 100; round++ {
 		uuid := fmt.Sprintf("test-uuid-%d", round)
 
-		// 手动创建 channel 并注册到全局 map
-		qrcodeChan := make(chan *common.QRCodeModel)
-		qrcodeChanLock.Lock()
-		qrcodeChanMap[uuid] = qrcodeChan
-		qrcodeChanLock.Unlock()
+		// 使用 getQRCodeModelChan（buffered channel）
+		qrcodeChan := u.getQRCodeModelChan(uuid)
 
 		var wg sync.WaitGroup
 		wg.Add(2)
@@ -954,9 +952,7 @@ func TestSendQRCodeInfo_ConcurrentSendAndRemove(t *testing.T) {
 		// Goroutine 2: 移除 channel
 		go func() {
 			defer wg.Done()
-			qrcodeChanLock.Lock()
-			defer qrcodeChanLock.Unlock()
-			delete(qrcodeChanMap, uuid)
+			u.removeQRCodeChan(uuid)
 		}()
 
 		// 等待两个 goroutine 完成
@@ -964,10 +960,13 @@ func TestSendQRCodeInfo_ConcurrentSendAndRemove(t *testing.T) {
 
 		// 尝试从 channel 接收（非阻塞），验证不会 panic
 		select {
-		case <-qrcodeChan:
-			// 收到数据，正常
+		case _, ok := <-qrcodeChan:
+			if !ok {
+				// channel closed by removeQRCodeChan, expected
+			}
+			// 收到数据或 zero value from closed channel, both OK
 		default:
-			// 没有数据（channel 可能已被移除或发送被跳过），也是正常的
+			// 没有数据（发送被跳过），也是正常的
 		}
 	}
 }
@@ -975,13 +974,11 @@ func TestSendQRCodeInfo_ConcurrentSendAndRemove(t *testing.T) {
 // TestSendQRCodeInfo_NoReceiverDoesNotBlock 测试无接收者时发送不会阻塞
 // 此测试不依赖数据库，直接操作全局 qrcodeChanMap
 func TestSendQRCodeInfo_NoReceiverDoesNotBlock(t *testing.T) {
+	u := &User{}
 	uuid := "test-no-receiver"
 
-	// 手动创建 channel 并注册到全局 map
-	qrcodeChan := make(chan *common.QRCodeModel)
-	qrcodeChanLock.Lock()
-	qrcodeChanMap[uuid] = qrcodeChan
-	qrcodeChanLock.Unlock()
+	// 使用 getQRCodeModelChan（buffered channel, size=1）
+	_ = u.getQRCodeModelChan(uuid)
 
 	// 不启动接收者，直接发送
 	done := make(chan bool)
@@ -1002,7 +999,58 @@ func TestSendQRCodeInfo_NoReceiverDoesNotBlock(t *testing.T) {
 	}
 
 	// 清理
-	qrcodeChanLock.Lock()
-	delete(qrcodeChanMap, uuid)
-	qrcodeChanLock.Unlock()
+	u.removeQRCodeChan(uuid)
+}
+
+// TestRemoveQRCodeChan_ClosesChannel 测试 removeQRCodeChan 关闭 channel 不会 panic
+func TestRemoveQRCodeChan_ClosesChannel(t *testing.T) {
+	u := &User{}
+	uuid := "test-close-chan"
+
+	ch := u.getQRCodeModelChan(uuid)
+
+	// remove should close the channel
+	u.removeQRCodeChan(uuid)
+
+	// reading from closed channel should return zero value, not block
+	select {
+	case val, ok := <-ch:
+		if ok {
+			t.Fatalf("expected closed channel, got value: %v", val)
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("reading from closed channel should not block")
+	}
+
+	// double remove should not panic
+	u.removeQRCodeChan(uuid)
+}
+
+// TestBufferedChannel_PreventsTOCTOU 测试 buffered channel 防止 TOCTOU 消息丢失
+func TestBufferedChannel_PreventsTOCTOU(t *testing.T) {
+	u := &User{}
+	uuid := "test-toctou"
+
+	ch := u.getQRCodeModelChan(uuid)
+
+	// 先发送（在接收者 select 之前），buffered channel 不会丢失
+	qrcodeInfo := common.NewQRCodeModel(common.QRCodeTypeScanLogin, map[string]interface{}{
+		"status": 1,
+	})
+	SendQRCodeInfo(uuid, qrcodeInfo)
+
+	// 然后接收，应该能拿到数据
+	select {
+	case val, ok := <-ch:
+		if !ok {
+			t.Fatal("channel closed unexpectedly")
+		}
+		if val == nil {
+			t.Fatal("expected qrcode data, got nil")
+		}
+	case <-time.After(1 * time.Second):
+		t.Fatal("buffered channel should have data available immediately")
+	}
+
+	u.removeQRCodeChan(uuid)
 }
