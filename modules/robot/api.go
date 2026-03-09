@@ -1070,6 +1070,7 @@ func (rb *Robot) spaceBots(c *wkhttp.Context) {
 // myBots 我的 Bot — 已添加好友的 Bot
 func (rb *Robot) myBots(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
+	spaceID := c.Query("space_id")
 
 	type myBotRow struct {
 		UID         string `db:"uid"`
@@ -1079,7 +1080,8 @@ func (rb *Robot) myBots(c *wkhttp.Context) {
 		BotCommands string `db:"bot_commands"`
 	}
 	var bots []myBotRow
-	_, err := rb.ctx.DB().SelectBySql(`
+
+	query := `
 		SELECT f.to_uid as uid, IFNULL(u.name,'') as name,
 			IFNULL(r.description,'') as description,
 			IFNULL(r.creator_uid,'') as creator_uid,
@@ -1087,9 +1089,17 @@ func (rb *Robot) myBots(c *wkhttp.Context) {
 		FROM friend f
 		INNER JOIN user u ON f.to_uid = u.uid AND u.robot = 1
 		LEFT JOIN robot r ON r.robot_id = f.to_uid AND r.status = 1
-		WHERE f.uid = ? AND f.is_deleted = 0 AND f.to_uid != 'botfather'
-		ORDER BY f.created_at DESC
-	`, loginUID).Load(&bots)
+		WHERE f.uid = ? AND f.is_deleted = 0 AND f.to_uid != 'botfather'`
+	args := []interface{}{loginUID}
+
+	if spaceID != "" {
+		query += ` AND f.to_uid IN (SELECT member_uid FROM space_members WHERE space_id = ?)`
+		args = append(args, spaceID)
+	}
+
+	query += ` ORDER BY f.created_at DESC`
+
+	_, err := rb.ctx.DB().SelectBySql(query, args...).Load(&bots)
 	if err != nil {
 		rb.Error("查询我的 Bot 列表失败", zap.Error(err))
 		c.ResponseError(errors.New("查询失败"))
