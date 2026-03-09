@@ -124,6 +124,46 @@ func (sm *ServiceMinio) UploadFile(filePath string, contentType string, copyFile
 	}, err
 }
 
+func (sm *ServiceMinio) GetFile(ph string) (io.ReadCloser, string, error) {
+	minioConfig := sm.ctx.GetConfig().Minio
+	uploadUl, _ := url.Parse(minioConfig.UploadURL)
+	endpoint := uploadUl.Host
+	useSSL := strings.HasPrefix(uploadUl.Scheme, "https")
+
+	minioClient, err := minio.New(endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(minioConfig.AccessKeyID, minioConfig.SecretAccessKey, ""),
+		Secure: useSSL,
+	})
+	if err != nil {
+		return nil, "", err
+	}
+
+	bucketName := "file"
+	objectPath := ph
+	strs := strings.Split(ph, "/")
+	if len(strs) > 1 {
+		allowedBuckets := map[string]bool{
+			"file": true, "chat": true, "moment": true, "sticker": true,
+			"report": true, "chatbg": true, "common": true, "download": true,
+		}
+		if allowedBuckets[strs[0]] {
+			bucketName = strs[0]
+			objectPath = strings.TrimPrefix(ph, bucketName+"/")
+		}
+	}
+
+	obj, err := minioClient.GetObject(context.Background(), bucketName, objectPath, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, "", err
+	}
+	stat, err := obj.Stat()
+	if err != nil {
+		obj.Close()
+		return nil, "", err
+	}
+	return obj, stat.ContentType, nil
+}
+
 func (sm *ServiceMinio) DownloadURL(ph string, filename string) (string, error) {
 	minioConfig := sm.ctx.GetConfig().Minio
 	vals := url.Values{}

@@ -91,6 +91,10 @@ func (sc *ServiceCOS) UploadFile(filePath string, contentType string, copyFileWr
 }
 
 // DownloadURL 获取COS文件下载地址
+func (sc *ServiceCOS) GetFile(path string) (io.ReadCloser, string, error) {
+	return nil, "", fmt.Errorf("GetFile not supported for COS, use DownloadURL instead")
+}
+
 func (sc *ServiceCOS) DownloadURL(ph string, filename string) (string, error) {
 	cosConfig := sc.ctx.GetConfig().COS
 

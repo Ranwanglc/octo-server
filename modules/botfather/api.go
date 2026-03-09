@@ -883,41 +883,22 @@ func (bf *BotFather) botProxyFile(c *wkhttp.Context) {
 		}
 	}
 
-	downloadURL, err := bf.fileService.DownloadURL(ph, filename)
+	reader, contentType, err := bf.fileService.GetFile(ph)
 	if err != nil {
-		bf.Error("获取文件下载URL失败", zap.Error(err), zap.String("path", ph))
+		bf.Error("读取文件失败", zap.Error(err), zap.String("path", ph))
 		c.ResponseError(errors.New("获取文件失败"))
 		return
 	}
+	defer reader.Close()
 
-	// 直接使用带签名的完整 URL 读取文件（保留 MinIO presigned 签名）
-	resp, err := http.Get(downloadURL)
-	if err != nil {
-		bf.Error("读取文件失败", zap.Error(err), zap.String("url", downloadURL))
-		c.ResponseError(errors.New("获取文件失败"))
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bf.Error("存储后端返回错误", zap.Int("status", resp.StatusCode), zap.String("url", downloadURL))
-		c.ResponseError(errors.New("获取文件失败"))
-		return
-	}
-
-	// 设置响应头
-	contentType := resp.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
 	c.Header("Content-Type", contentType)
-	if resp.ContentLength > 0 {
-		c.Header("Content-Length", strconv.FormatInt(resp.ContentLength, 10))
-	}
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename*=UTF-8''%s", url.PathEscape(filename)))
 
 	c.Status(http.StatusOK)
-	io.Copy(c.Writer, resp.Body)
+	io.Copy(c.Writer, reader)
 }
 
 // botUploadFile Bot文件上传

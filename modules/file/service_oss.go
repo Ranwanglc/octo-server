@@ -2,6 +2,7 @@ package file
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/url"
 
@@ -64,6 +65,10 @@ func (s *ServiceOSS) UploadFile(filePath string, contentType string, copyFileWri
 	}
 
 	return map[string]interface{}{}, nil
+}
+
+func (s *ServiceOSS) GetFile(path string) (io.ReadCloser, string, error) {
+	return nil, "", fmt.Errorf("GetFile not supported for OSS, use DownloadURL instead")
 }
 
 func (s *ServiceOSS) DownloadURL(path string, filename string) (string, error) {

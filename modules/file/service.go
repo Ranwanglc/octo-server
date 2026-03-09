@@ -32,6 +32,8 @@ type IUploadService interface {
 	UploadFile(filePath string, contentType string, copyFileWriter func(io.Writer) error) (map[string]interface{}, error)
 	// 获取下载地址
 	DownloadURL(path string, filename string) (string, error)
+	// 直接读取文件内容（用于 MinIO 等非 public bucket）
+	GetFile(path string) (io.ReadCloser, string, error)
 }
 
 // IService IService
@@ -82,6 +84,10 @@ func (s *Service) UploadFile(filePath string, contentType string, copyFileWriter
 func (s *Service) DownloadURL(path string, filename string) (string, error) {
 
 	return s.uploadService.DownloadURL(path, filename)
+}
+
+func (s *Service) GetFile(path string) (io.ReadCloser, string, error) {
+	return s.uploadService.GetFile(path)
 }
 
 func (s *Service) DownloadImage(url string, ctx context.Context) (io.ReadCloser, error) {

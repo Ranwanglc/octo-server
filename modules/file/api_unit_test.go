@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -128,6 +129,10 @@ func (m *mockService) UploadFile(filePath string, contentType string, copyFileWr
 
 func (m *mockService) DownloadURL(path string, filename string) (string, error) {
 	return "", nil
+}
+
+func (m *mockService) GetFile(path string) (io.ReadCloser, string, error) {
+	return nil, "", fmt.Errorf("not implemented")
 }
 
 func TestMakeImageCompose_SafeTypeAssertion(t *testing.T) {

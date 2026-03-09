@@ -72,6 +72,10 @@ func (s *ServiceQiniu) UploadFile(filePath string, contentType string, copyFileW
 	}, err
 }
 
+func (s *ServiceQiniu) GetFile(path string) (io.ReadCloser, string, error) {
+	return nil, "", fmt.Errorf("GetFile not supported for Qiniu, use DownloadURL instead")
+}
+
 func (s *ServiceQiniu) DownloadURL(path string, filename string) (string, error) {
 	qiniuCfg := s.ctx.GetConfig().Qiniu
 	domain := qiniuCfg.URL

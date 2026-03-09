@@ -36,6 +36,10 @@ func (s *SeaweedFS) UploadFile(filePath string, contentType string, copyFileWrit
 	return resultMap, err
 }
 
+func (s *SeaweedFS) GetFile(path string) (io.ReadCloser, string, error) {
+	return nil, "", fmt.Errorf("GetFile not supported for SeaweedFS, use DownloadURL instead")
+}
+
 func (s *SeaweedFS) DownloadURL(path string, filename string) (string, error) {
 	seaweedConfig := s.ctx.GetConfig().Seaweed
 	rpath, _ := url.JoinPath(seaweedConfig.URL, path)
