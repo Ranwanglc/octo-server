@@ -604,11 +604,23 @@ func (f *Friend) friendSure(c *wkhttp.Context) {
 		return
 	}
 
-	applyUID := valueMap["from_uid"].(string)
-	vercode := valueMap["vercode"].(string)
+	applyUID, ok := valueMap["from_uid"].(string)
+	if !ok {
+		f.Error("好友申请数据无效：from_uid 类型错误或不存在", zap.Any("from_uid", valueMap["from_uid"]))
+		c.ResponseError(errors.New("好友申请数据无效"))
+		return
+	}
+	vercode, ok := valueMap["vercode"].(string)
+	if !ok {
+		f.Error("好友申请数据无效：vercode 类型错误或不存在", zap.Any("vercode", valueMap["vercode"]))
+		c.ResponseError(errors.New("好友申请数据无效"))
+		return
+	}
 	remark := ""
 	if valueMap["remark"] != nil {
-		remark = valueMap["remark"].(string)
+		if remarkVal, ok := valueMap["remark"].(string); ok {
+			remark = remarkVal
+		}
 	}
 
 	applyUser, err := f.userDB.QueryByUID(applyUID)
