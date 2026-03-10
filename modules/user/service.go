@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-server/modules/source"
+	"github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
@@ -223,6 +224,11 @@ func (s *Service) GetUserDetail(uid string, loginUID string) (*UserDetailResp, e
 	if toUserSetting != nil {
 		beBlacklist = toUserSetting.Blacklist
 	}
+	if follow == 0 {
+		if commonSpaceID := space.GetCommonSpaceID(s.ctx, loginUID, uid); commonSpaceID != "" {
+			follow = 1
+		}
+	}
 	resp := NewUserDetailResp(model, remark, loginUID, sourceFrom, online, lastOffline, deviceFlag, follow, blacklist, beDeleted, beBlacklist, userSetting, vercode)
 
 	// 为机器人用户填充bot_commands + 详情
@@ -364,6 +370,11 @@ func (s *Service) GetUserDetails(uids []string, loginUID string) ([]*UserDetailR
 			follow = 1
 			sourceFrom = friendVercodeSourceMap[friend.SourceVercode]
 			vercode = friend.Vercode
+		}
+		if follow == 0 {
+			if commonSpaceID := space.GetCommonSpaceID(s.ctx, loginUID, uid); commonSpaceID != "" {
+				follow = 1
+			}
 		}
 
 		status := 1
