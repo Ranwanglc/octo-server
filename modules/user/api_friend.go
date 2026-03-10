@@ -847,41 +847,57 @@ func (f *Friend) friendSync(c *wkhttp.Context) {
 	}
 	version := wkutil.ParseInt64OrDefault(c.Query("version"), 0)
 	apiVersion := wkutil.ParseInt64OrDefault(c.Query("api_version"), 0)
+	spaceID := c.Query("space_id")
+
+	// 老客户端兼容：没带 api_version=1 或没带 space_id 时，
+	// 从 space_member 表查询默认 Space 的所有成员，伪装成好友格式返回
+	if apiVersion == 0 || spaceID == "" {
+		defaultSpaceID := spaceID
+		if defaultSpaceID == "" {
+			defaultSpaceID = space.GetUserDefaultSpaceID(f.ctx, uid)
+		}
+		if defaultSpaceID == "" {
+			c.JSON(http.StatusOK, make([]*friendResp, 0))
+			return
+		}
+		memberUIDs, err := space.GetSpaceMemberUIDs(f.ctx, defaultSpaceID)
+		if err != nil {
+			f.Error("获取 Space 成员失败！", zap.Error(err))
+			c.ResponseError(errors.New("获取 Space 成员失败！"))
+			return
+		}
+		// 排除自己
+		filteredUIDs := make([]string, 0, len(memberUIDs))
+		for _, m := range memberUIDs {
+			if m != uid {
+				filteredUIDs = append(filteredUIDs, m)
+			}
+		}
+		userDetails, err := f.userService.GetUserDetails(filteredUIDs, c.GetLoginUID())
+		if err != nil {
+			f.Error("获取用户详情失败！", zap.Error(err))
+			c.ResponseError(errors.New("获取用户详情失败！"))
+			return
+		}
+		resps := make([]*friendResp, 0, len(userDetails))
+		for _, userDetail := range userDetails {
+			resp := &friendResp{}
+			resp.UserDetailResp = *userDetail
+			resp.Version = 1
+			resps = append(resps, resp)
+		}
+		c.JSON(http.StatusOK, resps)
+		return
+	}
+
 	var friends []*FriendModel
 	var err error
 	// 同步好友
-	if apiVersion == 0 {
-		c.ResponseError(errors.New("旧API已被废弃"))
+	friends, err = f.db.SyncFriends(version, uid, limit)
+	if err != nil {
+		f.Error("同步好友信息错误！", zap.Error(err))
+		c.ResponseError(errors.New("同步好友信息错误！"))
 		return
-	} else {
-		friends, err = f.db.SyncFriends(version, uid, limit)
-		if err != nil {
-			f.Error("同步好友信息错误！", zap.Error(err))
-			c.ResponseError(errors.New("同步好友信息错误！"))
-			return
-		}
-	}
-
-	// 老客户端兼容：没带 space_id 时，按用户默认 Space 过滤好友
-	spaceID := c.Query("space_id")
-	if spaceID == "" {
-		spaceID = space.GetUserDefaultSpaceID(f.ctx, uid)
-	}
-	if spaceID != "" {
-		memberUIDs, _ := space.GetSpaceMemberUIDs(f.ctx, spaceID)
-		if len(memberUIDs) > 0 {
-			memberSet := make(map[string]struct{}, len(memberUIDs))
-			for _, m := range memberUIDs {
-				memberSet[m] = struct{}{}
-			}
-			filtered := make([]*FriendModel, 0, len(friends))
-			for _, fr := range friends {
-				if _, ok := memberSet[fr.ToUID]; ok {
-					filtered = append(filtered, fr)
-				}
-			}
-			friends = filtered
-		}
 	}
 
 	friendUIDs := make([]string, 0, len(friends))
