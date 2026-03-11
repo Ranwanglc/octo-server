@@ -1165,6 +1165,14 @@ func (rb *Robot) proxyFile(c *wkhttp.Context) {
 	// 去掉前导 /
 	ph = strings.TrimPrefix(ph, "/")
 
+	// Sanitize path to prevent directory traversal
+	cleaned := filepath.Clean(ph)
+	if strings.Contains(cleaned, "..") || strings.ContainsAny(cleaned, "\x00") {
+		c.ResponseErrorWithStatus(errors.New("文件路径无效"), http.StatusBadRequest)
+		return
+	}
+	ph = cleaned
+
 	filename := c.Query("filename")
 	if filename == "" {
 		parts := strings.Split(ph, "/")
