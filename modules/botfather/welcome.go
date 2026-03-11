@@ -2,6 +2,7 @@ package botfather
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -12,8 +13,11 @@ import (
 const (
 	// welcomeSentKeyPrefix Redis key prefix for tracking welcome message sent status
 	welcomeSentKeyPrefix = "botfather:welcome:sent:"
-	// welcomeSentTTL TTL for welcome sent flag (7 days, in case user re-registers)
-	welcomeSentTTL = 60 * 60 * 24 * 7
+)
+
+var (
+	// welcomeSentTTL TTL for welcome sent flag (7 days)
+	welcomeSentTTL = 7 * 24 * time.Hour
 )
 
 // DefaultWelcomeMessage is the default welcome message content
