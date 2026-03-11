@@ -17,16 +17,17 @@ const (
 )
 
 // DefaultWelcomeMessage is the default welcome message content
-const DefaultWelcomeMessage = `欢迎使用 DMWork！
+const DefaultWelcomeMessage = `👋 欢迎来到 Octo！企业级 Agent-Native 协作平台
 
-我是 BotFather，你可以通过我来创建和管理 AI 机器人。
+在 DMwork，AI 不是工具，是你的同事：
+🤝 AI 是一等公民 — 可管理、可审计、可信任的数字员工
+🔗 你的 AI 属于你 — 跟着你走，为你工作
 
-常用命令：
-• /newbot - 创建新机器人
-• /mybots - 查看我的机器人
-• /help - 显示帮助
+我是 BotFather，帮你创建和管理 AI 机器人：
+· /newbot — 创建新机器人
+· /help — 查看所有命令
 
-开始创建你的第一个机器人吧！`
+💡 有想法或建议？进入 Bot 广场，添加「Octo 产品管家」反馈`
 
 // handleUserRegisterEvent handles user registration event to send welcome message
 func (bf *BotFather) handleUserRegisterEvent(data []byte, commit config.EventCommit) {
