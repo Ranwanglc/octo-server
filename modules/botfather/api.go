@@ -1125,8 +1125,8 @@ type messageResp struct {
 	Payload     interface{} `json:"payload"`
 }
 
-// syncAllBotTokens 启动时将所有活跃 bot 的 bot_token 同步到 WuKongIM
-// 确保 WuKongIM 重启后所有 bot 都能正常连接
+// syncAllBotTokens 启动时将所有活跃 bot 的 token 同步到 WuKongIM
+// 使用旧 im_token_cache（兼容未重启的 adapter），新 register 后会切换到 bot_token
 func (bf *BotFather) syncAllBotTokens() {
 	robots, err := bf.db.queryAllActiveRobots()
 	if err != nil {
@@ -1135,19 +1135,21 @@ func (bf *BotFather) syncAllBotTokens() {
 	}
 	successCount := 0
 	for _, robot := range robots {
+		// 优先用旧 im_token_cache（兼容还没 re-register 的旧 adapter）
+		// 旧 adapter 下次 register 后会自动切换到 bot_token
+		token := robot.IMTokenCache
+		if strings.TrimSpace(token) == "" {
+			token = robot.BotToken
+		}
 		resp, tokenErr := bf.ctx.UpdateIMToken(config.UpdateIMTokenReq{
 			UID:         robot.RobotID,
-			Token:       robot.BotToken,
+			Token:       token,
 			DeviceFlag:  config.APP,
 			DeviceLevel: config.DeviceLevelMaster,
 		})
 		if tokenErr != nil || resp.Status != config.UpdateTokenStatusSuccess {
 			bf.Warn("同步 bot token 失败", zap.String("robotID", robot.RobotID), zap.Any("error", tokenErr), zap.Any("status", resp))
 			continue
-		}
-		// 同步 DB cache
-		if robot.IMTokenCache != robot.BotToken {
-			bf.db.updateRobotIMTokenCache(robot.RobotID, robot.BotToken)
 		}
 		successCount++
 	}
