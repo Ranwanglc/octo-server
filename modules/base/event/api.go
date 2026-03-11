@@ -56,6 +56,8 @@ const (
 	OrgEmployeeExit string = "organization.employee.exit"
 	// EventUpdateSearchMessage 修改搜索消息内容
 	EventUpdateSearchMessage string = "message.update.search.data"
+	// SpaceMemberJoin 用户加入空间
+	SpaceMemberJoin string = "space.member.join"
 )
 
 // Event 事件

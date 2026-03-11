@@ -53,12 +53,24 @@ func (bf *BotFather) handleUserRegisterEvent(data []byte, commit config.EventCom
 		return
 	}
 
-	// Check idempotency: has welcome message already been sent?
+	// Check if user already belongs to any Space.
+	// If yes, SpaceMemberJoin event handler will send the welcome message instead.
+	var spaceCount int
+	_, err = bf.ctx.DB().SelectBySql("SELECT COUNT(*) FROM space_member WHERE uid=?", uid).Load(&spaceCount)
+	if err != nil {
+		bf.Warn("查询用户Space失败，降级发送bare-UID欢迎消息", zap.Error(err), zap.String("uid", uid))
+		// Fall through to send bare-UID welcome as safety net
+	} else if spaceCount > 0 {
+		bf.Debug("用户已有Space，跳过bare-UID欢迎消息（由SpaceMemberJoin事件处理）", zap.String("uid", uid))
+		commit(nil)
+		return
+	}
+
+	// Safety net: user has no Spaces, send bare-UID welcome
 	sentKey := fmt.Sprintf("%s%s", welcomeSentKeyPrefix, uid)
 	sentValue, err := bf.ctx.GetRedisConn().GetString(sentKey)
 	if err != nil && err.Error() != "redis: nil" {
 		bf.Warn("检查欢迎消息发送状态失败", zap.Error(err), zap.String("uid", uid))
-		// Continue anyway, worst case we send duplicate
 	}
 	if sentValue != "" {
 		bf.Debug("欢迎消息已发送，跳过", zap.String("uid", uid))
@@ -66,37 +78,40 @@ func (bf *BotFather) handleUserRegisterEvent(data []byte, commit config.EventCom
 		return
 	}
 
-	// Send welcome message
-	err = bf.sendWelcomeMessage(uid)
+	err = bf.sendWelcomeMessage(uid, "")
 	if err != nil {
-		bf.Error("发送欢迎消息失败", zap.Error(err), zap.String("uid", uid))
-		// Don't fail the event, welcome message is non-critical
+		bf.Error("发送bare-UID欢迎消息失败", zap.Error(err), zap.String("uid", uid))
 		commit(nil)
 		return
 	}
 
-	// Mark as sent (idempotency)
 	err = bf.ctx.GetRedisConn().SetAndExpire(sentKey, "1", welcomeSentTTL)
 	if err != nil {
 		bf.Warn("标记欢迎消息已发送失败", zap.Error(err), zap.String("uid", uid))
 	}
 
-	bf.Info("欢迎消息发送成功", zap.String("uid", uid))
+	bf.Info("bare-UID欢迎消息发送成功（用户无Space）", zap.String("uid", uid))
 	commit(nil)
 }
 
 // sendWelcomeMessage sends a welcome message from BotFather to the new user
-func (bf *BotFather) sendWelcomeMessage(toUID string) error {
+// If spaceID is non-empty, the channelID is prefixed with Space format: s{spaceId}_{uid}
+func (bf *BotFather) sendWelcomeMessage(toUID string, spaceID string) error {
 	// Use default welcome message
 	// Future: can be made configurable via database or env var
 	welcomeContent := DefaultWelcomeMessage
+
+	channelID := toUID
+	if spaceID != "" {
+		channelID = "s" + spaceID + "_" + toUID
+	}
 
 	// Send message via IM
 	_, err := bf.ctx.SendMessageWithResult(&config.MsgSendReq{
 		Header: config.MsgHeader{
 			RedDot: 1,
 		},
-		ChannelID:   toUID,
+		ChannelID:   channelID,
 		ChannelType: common.ChannelTypePerson.Uint8(),
 		FromUID:     BotFatherUID,
 		Payload: []byte(util.ToJson(map[string]interface{}{
@@ -106,4 +121,57 @@ func (bf *BotFather) sendWelcomeMessage(toUID string) error {
 	})
 
 	return err
+}
+
+// handleSpaceMemberJoinEvent handles space member join event to send welcome message
+func (bf *BotFather) handleSpaceMemberJoinEvent(data []byte, commit config.EventCommit) {
+	var req map[string]interface{}
+	err := util.ReadJsonByByte(data, &req)
+	if err != nil {
+		bf.Error("解析SpaceMemberJoin事件数据失败", zap.Error(err))
+		commit(nil)
+		return
+	}
+
+	uid, _ := req["uid"].(string)
+	spaceID, _ := req["space_id"].(string)
+	if uid == "" || spaceID == "" {
+		bf.Error("SpaceMemberJoin事件缺少uid或space_id")
+		commit(nil)
+		return
+	}
+
+	// Skip system users
+	if uid == BotFatherUID || uid == "u_10000" || uid == "fileHelper" {
+		commit(nil)
+		return
+	}
+
+	// Deduplicate with Redis
+	sentKey := fmt.Sprintf("botfather:welcome:space:sent:%s:%s", spaceID, uid)
+	sentValue, err := bf.ctx.GetRedisConn().GetString(sentKey)
+	if err != nil && err.Error() != "redis: nil" {
+		bf.Warn("检查Space欢迎消息发送状态失败", zap.Error(err), zap.String("uid", uid), zap.String("spaceID", spaceID))
+	}
+	if sentValue != "" {
+		bf.Debug("Space欢迎消息已发送，跳过", zap.String("uid", uid), zap.String("spaceID", spaceID))
+		commit(nil)
+		return
+	}
+
+	err = bf.sendWelcomeMessage(uid, spaceID)
+	if err != nil {
+		bf.Error("发送Space欢迎消息失败", zap.Error(err), zap.String("uid", uid), zap.String("spaceID", spaceID))
+		commit(nil)
+		return
+	}
+
+	// Mark as sent
+	err = bf.ctx.GetRedisConn().SetAndExpire(sentKey, "1", welcomeSentTTL)
+	if err != nil {
+		bf.Warn("标记Space欢迎消息已发送失败", zap.Error(err), zap.String("uid", uid), zap.String("spaceID", spaceID))
+	}
+
+	bf.Info("Space欢迎消息发送成功", zap.String("uid", uid), zap.String("spaceID", spaceID))
+	commit(nil)
 }

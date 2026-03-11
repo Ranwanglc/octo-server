@@ -68,6 +68,9 @@ func New(ctx *config.Context) *BotFather {
 	// 注册用户注册事件监听器，发送欢迎消息
 	ctx.AddEventListener(event.EventUserRegister, bf.handleUserRegisterEvent)
 
+	// 注册Space成员加入事件监听器，发送Space欢迎消息
+	ctx.AddEventListener(event.SpaceMemberJoin, bf.handleSpaceMemberJoinEvent)
+
 	return bf
 }
 

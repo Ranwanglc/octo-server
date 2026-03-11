@@ -10,8 +10,10 @@ import (
 	"strings"
 	"time"
 
+	event "github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/wkevent"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/opentracing/opentracing-go"
@@ -183,8 +185,8 @@ func (u *User) registerWithUsername(username string, name string, password strin
 		"minglue_default", uid,
 	).Exec()
 
-	// 新用户自动引导：BotFather + 示例 Bot 发送欢迎消息
-	go u.sendBotWelcomeMessages(uid)
+	// 触发 SpaceMemberJoin 事件，让 BotFather 发送 Space 感知的欢迎消息
+	go u.fireSpaceMemberJoinEvent(uid, "minglue_default")
 }
 
 // 通过web3公钥重置登录密码
@@ -520,26 +522,35 @@ type usernameRegisterReq struct {
 	Device   *deviceReq `json:"device"` //注册用户设备信息
 }
 
-// sendBotWelcomeMessages 新用户注册后自动发送 Bot 欢迎消息
-// 好友关系已在 addBotFatherFriend() 中建立，此处只负责发送欢迎消息
+// sendBotWelcomeMessages is now a no-op.
+// BotFather welcome is handled by botfather module's event handlers
+// (handleUserRegisterEvent / handleSpaceMemberJoinEvent).
 func (u *User) sendBotWelcomeMessages(uid string) {
-	// 短暂等待确保用户数据已持久化到数据库（该函数在 goroutine 中调用）
-	time.Sleep(300 * time.Millisecond)
+}
 
-	// BotFather 欢迎消息
-	err := u.ctx.SendMessage(&config.MsgSendReq{
-		FromUID:     "botfather",
-		ChannelID:   uid,
-		ChannelType: 1, // DM
-		Payload: []byte(util.ToJson(map[string]interface{}{
-			"content": "欢迎使用 DMWork！我是 BotFather，帮你创建和管理 AI 机器人。\n\n发送 /help 查看可用命令。",
-			"type":    1,
-		})),
-		Header: config.MsgHeader{
-			RedDot: 1,
-		},
-	})
+// fireSpaceMemberJoinEvent 触发 SpaceMemberJoin 事件
+func (u *User) fireSpaceMemberJoinEvent(uid string, spaceID string) {
+	tx, err := u.ctx.DB().Begin()
 	if err != nil {
-		u.Error("发送 BotFather 欢迎消息失败", zap.Error(err))
+		u.Error("开启SpaceMemberJoin事件事务失败", zap.Error(err))
+		return
 	}
+	eventID, err := u.ctx.EventBegin(&wkevent.Data{
+		Event: event.SpaceMemberJoin,
+		Type:  wkevent.Message,
+		Data: map[string]interface{}{
+			"uid":      uid,
+			"space_id": spaceID,
+		},
+	}, tx)
+	if err != nil {
+		tx.Rollback()
+		u.Error("开启SpaceMemberJoin事件失败", zap.Error(err), zap.String("uid", uid), zap.String("spaceID", spaceID))
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		u.Error("提交SpaceMemberJoin事件事务失败", zap.Error(err))
+		return
+	}
+	u.ctx.EventCommit(eventID)
 }

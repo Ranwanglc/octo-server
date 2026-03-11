@@ -7,10 +7,12 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/wkevent"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"go.uber.org/zap"
 )
@@ -157,6 +159,9 @@ func (s *Space) createSpace(c *wkhttp.Context) {
 
 	// 刷新 ParseChannelID 缓存
 	go s.loadKnownSpaceIDs()
+
+	// 触发 SpaceMemberJoin 事件（创建者）
+	go s.fireSpaceMemberJoinEvent(loginUID, spaceId)
 }
 
 // getSpace 获取空间详情
@@ -393,6 +398,7 @@ func (s *Space) addMembers(c *wkhttp.Context) {
 		}
 	}
 
+	newMembers := make([]string, 0, len(req.UIDs))
 	for _, uid := range req.UIDs {
 		existing, err := s.db.queryMemberIncludeRemoved(spaceId, uid)
 		if err != nil {
@@ -405,6 +411,7 @@ func (s *Space) addMembers(c *wkhttp.Context) {
 					c.ResponseError(errors.New("重新激活成员失败"))
 					return
 				}
+				newMembers = append(newMembers, uid)
 			}
 			continue
 		}
@@ -417,8 +424,14 @@ func (s *Space) addMembers(c *wkhttp.Context) {
 			c.ResponseError(errors.New("添加成员失败"))
 			return
 		}
+		newMembers = append(newMembers, uid)
 	}
 	c.ResponseOK()
+
+	// 触发 SpaceMemberJoin 事件（每个新成员）
+	for _, uid := range newMembers {
+		go s.fireSpaceMemberJoinEvent(uid, spaceId)
+	}
 }
 
 // removeMembers 移除成员
@@ -698,6 +711,9 @@ func (s *Space) joinSpace(c *wkhttp.Context) {
 	if space.PresetGroupIds != nil && *space.PresetGroupIds != "" {
 		go s.joinPresetGroups(loginUID, *space.PresetGroupIds)
 	}
+
+	// 触发 SpaceMemberJoin 事件
+	go s.fireSpaceMemberJoinEvent(loginUID, invitation.SpaceId)
 }
 
 // joinPresetGroups 将用户加入预设群组（通过直接DB操作避免循环依赖）
@@ -919,6 +935,33 @@ func (s *Space) updateInvite(c *wkhttp.Context) {
 	}
 
 	c.ResponseOK()
+}
+
+// fireSpaceMemberJoinEvent 触发 SpaceMemberJoin 事件
+func (s *Space) fireSpaceMemberJoinEvent(uid string, spaceId string) {
+	tx, err := s.ctx.DB().Begin()
+	if err != nil {
+		s.Error("开启SpaceMemberJoin事件事务失败", zap.Error(err))
+		return
+	}
+	eventID, err := s.ctx.EventBegin(&wkevent.Data{
+		Event: event.SpaceMemberJoin,
+		Type:  wkevent.Message,
+		Data: map[string]interface{}{
+			"uid":      uid,
+			"space_id": spaceId,
+		},
+	}, tx)
+	if err != nil {
+		tx.Rollback()
+		s.Error("开启SpaceMemberJoin事件失败", zap.Error(err), zap.String("uid", uid), zap.String("spaceId", spaceId))
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		s.Error("提交SpaceMemberJoin事件事务失败", zap.Error(err))
+		return
+	}
+	s.ctx.EventCommit(eventID)
 }
 
 // loadKnownSpaceIDs 从 DB 加载所有 spaceId 到 ParseChannelID 缓存
