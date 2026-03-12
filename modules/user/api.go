@@ -624,13 +624,13 @@ func (u *User) userUpdateWithField(c *wkhttp.Context) {
 					fmt.Fprintf(os.Stderr, "recovered panic in goroutine: %v\n%s\n", err, debug.Stack())
 				}
 			}()
-			err = u.db.UpdateUsersWithField(key, fmt.Sprintf("%s", value), loginUID)
+			err = u.db.UpdateUsersWithFieldTx(key, fmt.Sprintf("%s", value), loginUID, tx)
 			if err != nil {
 				c.ResponseError(errors.New("修改用户资料失败"))
 				tx.Rollback()
 				return
 			}
-			err = u.db.UpdateUsersWithField("short_status", "1", loginUID)
+			err = u.db.UpdateUsersWithFieldTx("short_status", "1", loginUID, tx)
 			if err != nil {
 				u.Error("修改用户资料失败", zap.Error(err), zap.Any(key, value))
 				c.ResponseError(errors.New("修改用户资料失败"))

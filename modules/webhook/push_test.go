@@ -157,6 +157,93 @@ func TestParseOPPOAuthResponse(t *testing.T) {
 	}
 }
 
+func TestMIPushResponseHandling(t *testing.T) {
+	tests := []struct {
+		name      string
+		result    map[string]interface{}
+		wantErr   bool
+		errString string
+	}{
+		{
+			name:    "nil result",
+			result:  nil,
+			wantErr: false,
+		},
+		{
+			name: "result ok",
+			result: map[string]interface{}{
+				"result": "ok",
+			},
+			wantErr: false,
+		},
+		{
+			name: "result not ok with reason",
+			result: map[string]interface{}{
+				"result": "error",
+				"reason": "invalid token",
+			},
+			wantErr:   true,
+			errString: "invalid token",
+		},
+		{
+			name: "result not ok with description",
+			result: map[string]interface{}{
+				"result":      "error",
+				"description": "server error",
+			},
+			wantErr:   true,
+			errString: "server error",
+		},
+		{
+			name: "result not ok without reason or description",
+			result: map[string]interface{}{
+				"result": "error",
+			},
+			wantErr:   true,
+			errString: "MI push failed with unknown error",
+		},
+		{
+			name: "result field missing (not string type)",
+			result: map[string]interface{}{
+				"result": 123,
+			},
+			wantErr: false,
+		},
+		{
+			name: "reason wrong type should not panic",
+			result: map[string]interface{}{
+				"result": "error",
+				"reason": 123,
+			},
+			wantErr:   true,
+			errString: "MI push failed with unknown error",
+		},
+		{
+			name: "description wrong type should not panic",
+			result: map[string]interface{}{
+				"result":      "error",
+				"description": 456,
+			},
+			wantErr:   true,
+			errString: "MI push failed with unknown error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkMIPushResult(tt.result)
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errString != "" {
+					assert.Equal(t, tt.errString, err.Error())
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestParseHMSAuthResponse(t *testing.T) {
 	tests := []struct {
 		name        string

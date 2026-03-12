@@ -81,11 +81,21 @@ func (m *MIPush) Push(deviceToken string, payload Payload) error {
 		return err
 	}
 	m.Debug("返回", zap.Any("data", result))
-	if result != nil && result["result"].(string) != "ok" {
-		if result["reason"] != nil {
-			return errors.New(result["reason"].(string))
+	return checkMIPushResult(result)
+}
+
+// checkMIPushResult validates the MI push API response with safe type assertions
+func checkMIPushResult(result map[string]interface{}) error {
+	if result != nil {
+		if resultStr, ok := result["result"].(string); ok && resultStr != "ok" {
+			if reason, ok := result["reason"].(string); ok {
+				return errors.New(reason)
+			}
+			if desc, ok := result["description"].(string); ok {
+				return errors.New(desc)
+			}
+			return errors.New("MI push failed with unknown error")
 		}
-		return errors.New(result["description"].(string))
 	}
 	return nil
 }
