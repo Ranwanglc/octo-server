@@ -50,6 +50,7 @@ type Robot struct {
 	inlineQueryEventResultChanMapLock sync.RWMutex
 	mentionRegexp                     *regexp.Regexp
 	creatorCache                      sync.Map // robotID -> creatorUID 缓存
+	msgSem                            chan struct{} // semaphore to limit concurrent message processing goroutines
 }
 
 func New(ctx *config.Context) *Robot {
@@ -65,6 +66,7 @@ func New(ctx *config.Context) *Robot {
 		inlineQueryEventsMap:          map[string][]*robotEvent{},
 		inlineQueryEventResultChanMap: map[string]chan *InlineQueryResult{},
 		mentionRegexp:                 regexp.MustCompile(`@\S+`),
+		msgSem:                        make(chan struct{}, 100), // limit concurrent message processing goroutines
 	}
 	ctx.AddMessagesListener(rb.messagesListen)
 

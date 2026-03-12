@@ -169,13 +169,32 @@ func (rb *Robot) robotMessageListen(messages []*config.MessageResp) {
 		if len(robotIDs) > 0 {
 			for _, rid := range robotIDs {
 				rb.Info("投递消息到机器人事件队列", zap.String("robotID", rid), zap.String("fromUID", message.FromUID), zap.Int64("messageID", message.MessageID))
-				go rb.saveRobotMessage(message, rid)
-				go rb.autoReadForBot(message, rid)
+				rid := rid // capture loop variable
+				rb.msgSem <- struct{}{}
+				go func() {
+					defer func() {
+						<-rb.msgSem
+						if r := recover(); r != nil {
+							rb.Error("panic in robot message goroutine", zap.Any("recover", r), zap.String("robotID", rid))
+						}
+					}()
+					rb.saveRobotMessage(message, rid)
+					rb.autoReadForBot(message, rid)
+				}()
 			}
 		} else if len(robotID) > 0 {
 			rb.Info("投递消息到机器人事件队列", zap.String("robotID", robotID), zap.String("fromUID", message.FromUID), zap.Int64("messageID", message.MessageID))
-			go rb.saveRobotMessage(message, robotID)
-			go rb.autoReadForBot(message, robotID)
+			rb.msgSem <- struct{}{}
+			go func() {
+				defer func() {
+					<-rb.msgSem
+					if r := recover(); r != nil {
+						rb.Error("panic in robot message goroutine", zap.Any("recover", r), zap.String("robotID", robotID))
+					}
+				}()
+				rb.saveRobotMessage(message, robotID)
+				rb.autoReadForBot(message, robotID)
+			}()
 		}
 	}
 }
