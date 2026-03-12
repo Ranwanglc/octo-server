@@ -1,23 +1,16 @@
 package group
 
 import (
-	"os"
-	"runtime/debug"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
-	chservice "github.com/Mininglamp-OSS/octo-server/modules/channel/service"
-	common2 "github.com/Mininglamp-OSS/octo-server/modules/common"
-	"github.com/Mininglamp-OSS/octo-server/modules/file"
-	"github.com/Mininglamp-OSS/octo-server/modules/source"
-	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
-	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/model"
@@ -26,6 +19,13 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkevent"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
+	chservice "github.com/Mininglamp-OSS/octo-server/modules/channel/service"
+	common2 "github.com/Mininglamp-OSS/octo-server/modules/common"
+	"github.com/Mininglamp-OSS/octo-server/modules/file"
+	"github.com/Mininglamp-OSS/octo-server/modules/source"
+	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/gin-gonic/gin"
 	"github.com/gocraft/dbr/v2"
 	"go.uber.org/zap"
@@ -1977,18 +1977,6 @@ func (g *Group) groupScanJoin(c *wkhttp.Context) {
 		c.ResponseError(errors.New("添加群成员失败！"))
 		return
 	}
-	// 调用IM的添加订阅者
-	err = g.ctx.IMAddSubscriber(&config.SubscriberAddReq{
-		ChannelID:   groupNo,
-		ChannelType: common.ChannelTypeGroup.Uint8(),
-		Subscribers: []string{scaner},
-	})
-	if err != nil {
-		tx.RollbackUnlessCommitted()
-		g.Error("调用IM的订阅接口失败！", zap.Error(err))
-		c.ResponseError(errors.New("调用IM的订阅接口失败！"))
-		return
-	}
 
 	if err := tx.Commit(); err != nil {
 		tx.Rollback()
@@ -1996,6 +1984,21 @@ func (g *Group) groupScanJoin(c *wkhttp.Context) {
 		c.ResponseError(errors.New("提交事务失败！"))
 		return
 	}
+
+	// 调用IM的添加订阅者（在事务提交后执行，确保数据一致性）
+	err = g.ctx.IMAddSubscriber(&config.SubscriberAddReq{
+		ChannelID:   groupNo,
+		ChannelType: common.ChannelTypeGroup.Uint8(),
+		Subscribers: []string{scaner},
+	})
+	if err != nil {
+		// IM 调用失败时记录日志，但不影响已提交的数据库事务
+		// 后续可通过数据同步机制修复 IM 订阅状态
+		g.Error("调用IM的订阅接口失败！", zap.Error(err), zap.String("group_no", groupNo), zap.String("scaner", scaner))
+		c.ResponseError(errors.New("调用IM的订阅接口失败！"))
+		return
+	}
+
 	g.ctx.EventCommit(eventID)
 	if groupAvatarEventID != 0 {
 		g.ctx.EventCommit(groupAvatarEventID)

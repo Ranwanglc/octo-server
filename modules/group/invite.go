@@ -2,18 +2,18 @@ package group
 
 import (
 	"errors"
-	"os"
-	"runtime/debug"
 	"fmt"
 	"net/http"
+	"os"
+	"runtime/debug"
 	"time"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkevent"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -146,12 +146,17 @@ func (g *Group) getToGroupMemberConfirmInviteDetailH5(c *wkhttp.Context) {
 		return
 	}
 	authCode := util.GenerUUID()
-	_ = g.ctx.GetRedisConn().SetAndExpire(fmt.Sprintf("%s%s", common.AuthCodeCachePrefix, authCode), util.ToJson(map[string]interface{}{
+	err = g.ctx.GetRedisConn().SetAndExpire(fmt.Sprintf("%s%s", common.AuthCodeCachePrefix, authCode), util.ToJson(map[string]interface{}{
 		"group_no":  groupNo,  // 群编号
 		"invite_no": inviteNo, // 邀请编号
 		"allower":   loginUID, // 通过者
 		"type":      common.AuthCodeTypeGroupMemberInvite,
 	}), time.Minute*5)
+	if err != nil {
+		g.Error("缓存授权码失败！", zap.Error(err))
+		c.ResponseError(errors.New("缓存授权码失败！"))
+		return
+	}
 
 	h5URL := fmt.Sprintf("%s/invite_detail.html?invite_no=%s&auth_code=%s", g.ctx.GetConfig().External.H5BaseURL, inviteNo, authCode)
 	c.JSON(http.StatusOK, gin.H{

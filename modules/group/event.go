@@ -2,9 +2,9 @@ package group
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"runtime/debug"
-	"fmt"
 	"strings"
 
 	"github.com/Mininglamp-OSS/octo-lib/common"
@@ -197,9 +197,16 @@ func (g *Group) handleGroupMemberAddEvent(data []byte, commit config.EventCommit
 			err := util.ReadJsonByByte(dataBytes, &req)
 			if err != nil {
 				g.Error("解析JSON失败！", zap.Error(err))
+				commit(err)
 				return
 			}
-			_ = g.ctx.SendGroupMemberAdd(req)
+			err = g.ctx.SendGroupMemberAdd(req)
+			if err != nil {
+				g.Error("发送群成员添加消息失败！", zap.Error(err))
+				commit(err)
+				return
+			}
+			commit(nil)
 		},
 	}
 }
