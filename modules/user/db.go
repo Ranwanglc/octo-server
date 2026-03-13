@@ -3,6 +3,7 @@ package user
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/db"
@@ -32,9 +33,18 @@ func (d *DB) QueryByKeyword(keyword string) (*Model, error) {
 }
 
 // QueryByUsername 通过用户名查询用户信息
+// 支持用户名、手机号（格式：zone-phone）、邮箱三种方式登录
 func (d *DB) QueryByUsername(username string) (*Model, error) {
 	var model *Model
-	_, err := d.session.Select("*").From("user").Where("username=? or concat(zone,phone)=? or email=?", username, username, username).Load(&model)
+	// 检查是否为手机号格式（zone-phone）
+	if idx := strings.Index(username, "-"); idx > 0 && idx < len(username)-1 {
+		zone := username[:idx]
+		phone := username[idx+1:]
+		_, err := d.session.Select("*").From("user").Where("zone=? AND phone=?", zone, phone).Load(&model)
+		return model, err
+	}
+	// 否则按用户名或邮箱查询
+	_, err := d.session.Select("*").From("user").Where("username=? or email=?", username, username).Load(&model)
 	return model, err
 }
 

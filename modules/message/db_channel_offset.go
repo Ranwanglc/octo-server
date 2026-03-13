@@ -40,13 +40,16 @@ func (c *channelOffsetDB) insertOrUpdateTx(m *channelOffsetModel, tx *dbr.Tx) er
 
 func (c *channelOffsetDB) queryWithUIDAndChannel(uid string, channelID string, channelType uint8) (*channelOffsetModel, error) {
 	var m *channelOffsetModel
-	_, err := c.session.Select("*").From(c.getTable(uid)).Where("(uid=? or uid='') and channel_id=? and channel_type=?", uid, channelID, channelType).OrderDesc("message_seq").Limit(1).Load(&m)
+	// 移除 "or uid=''" 条件，防止未授权访问
+	// 只查询指定 uid 的消息偏移记录
+	_, err := c.session.Select("*").From(c.getTable(uid)).Where("uid=? and channel_id=? and channel_type=?", uid, channelID, channelType).OrderDesc("message_seq").Limit(1).Load(&m)
 	return m, err
 }
 
 func (c *channelOffsetDB) queryWithUIDAndChannelIDs(uid string, channelIDs []string) ([]*channelOffsetModel, error) {
 	var models []*channelOffsetModel
-	_, err := c.session.Select("channel_id,channel_type,max(message_seq) message_seq").From(c.getTable(uid)).Where("(uid=? or uid='') and channel_id in ?", uid, channelIDs).GroupBy("channel_id", "channel_type").Load(&models)
+	// 移除 "or uid=''" 条件，防止未授权访问
+	_, err := c.session.Select("channel_id,channel_type,max(message_seq) message_seq").From(c.getTable(uid)).Where("uid=? and channel_id in ?", uid, channelIDs).GroupBy("channel_id", "channel_type").Load(&models)
 	return models, err
 }
 

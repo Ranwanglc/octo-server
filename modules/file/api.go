@@ -184,6 +184,30 @@ func (f *File) uploadFile(c *wkhttp.Context) {
 		return
 	}
 
+	// 读取文件头部用于魔数验证（最多读取 16 字节）
+	magicHeader := make([]byte, 16)
+	n, err := file.Read(magicHeader)
+	if err != nil && err.Error() != "EOF" {
+		f.Error("读取文件头部失败", zap.Error(err))
+		c.ResponseError(errors.New("读取文件失败"))
+		return
+	}
+	magicHeader = magicHeader[:n]
+
+	// 验证文件魔数是否与扩展名匹配
+	if !ValidateMagicNumber(ext, magicHeader) {
+		f.Warn("文件内容与扩展名不匹配", zap.String("filename", fileName), zap.String("ext", ext))
+		c.ResponseError(errors.New("文件内容与扩展名不匹配"))
+		return
+	}
+
+	// 重置文件指针到开头
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		f.Error("重置文件指针失败", zap.Error(err))
+		c.ResponseError(errors.New("文件处理失败"))
+		return
+	}
+
 	path := uploadPath
 	if !strings.HasPrefix(path, "/") {
 		path = fmt.Sprintf("/%s", path)

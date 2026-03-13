@@ -821,7 +821,8 @@ func (s *Space) GetCoMemberUIDs(uid string) ([]string, error) {
 	return s.db.queryCoMemberUIDs(uid)
 }
 
-// getInvitePreview 获取邀请预览（含 Bot 列表，公开接口）
+// getInvitePreview 获取邀请预览（公开接口）
+// 注意：公开接口不返回敏感信息（Bot 列表、精确成员数量）
 func (s *Space) getInvitePreview(c *wkhttp.Context) {
 	inviteCode := c.Param("invite_code")
 	if inviteCode == "" {
@@ -850,46 +851,19 @@ func (s *Space) getInvitePreview(c *wkhttp.Context) {
 		expiresAtStr = time.Time(*invitation.ExpiresAt).Format("2006-01-02 15:04:05")
 	}
 
-	// 查询 Space 成员数
-	memberCount := 0
-	var cnt struct {
-		Count int `db:"count"`
-	}
-	_, err = s.ctx.DB().SelectBySql("SELECT COUNT(*) as count FROM space_member WHERE space_id=? AND status=1", invitation.SpaceId).Load(&cnt)
-	if err != nil {
-		s.Error("查询空间成员数失败", zap.Error(err), zap.String("spaceId", invitation.SpaceId))
-	} else {
-		memberCount = cnt.Count
-	}
-
-	// 查询 Space 内的 Bot 列表
-	botModels, err := s.db.querySpaceBots(invitation.SpaceId)
-	if err != nil {
-		s.Error("查询 Bot 列表失败", zap.Error(err))
-		botModels = []*BotDetailModel{}
-	}
-
-	bots := make([]botResp, 0, len(botModels))
-	for _, b := range botModels {
-		bots = append(bots, botResp{
-			RobotID: b.RobotID,
-			Name:    b.Name,
-			Avatar:  b.Avatar,
-		})
-	}
-
+	// 公开接口只返回基本空间信息，不暴露 Bot 列表和精确成员数量
 	c.Response(invitePreviewResp{
 		InviteCode:  invitation.InviteCode,
 		SpaceId:     invitation.SpaceId,
 		SpaceName:   space.Name,
 		Description: space.Description,
 		Logo:        space.Logo,
-		Creator:     invitation.Creator,
+		Creator:     "", // 不暴露创建者 UID
 		MaxUses:     invitation.MaxUses,
 		UsedCount:   invitation.UsedCount,
 		ExpiresAt:   expiresAtStr,
-		MemberCount: memberCount,
-		Bots:        bots,
+		MemberCount: 0,   // 不暴露精确成员数量
+		Bots:        nil, // 不暴露 Bot 列表
 	})
 }
 

@@ -2,11 +2,10 @@ package user
 
 import (
 	"context"
-	"os"
-	"runtime/debug"
 	"encoding/hex"
 	"fmt"
-	"strconv"
+	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -447,10 +446,9 @@ func (u *User) getVerifyText(c *wkhttp.Context) {
 		c.ResponseError(errors.New("该用户尚未上传公钥"))
 		return
 	}
-	randomStr := util.GetRandomString(20)
-	now := time.Now()
-	timeStr := strconv.Itoa(now.Year()) + fmt.Sprintf("%02d", now.Month()) + fmt.Sprintf("%02d", now.Day()) + fmt.Sprintf("%02d", now.Hour()) + fmt.Sprintf("%02d", now.Minute()) + fmt.Sprintf("%02d", now.Second())
-	verifyText := fmt.Sprintf("%s%s", randomStr, timeStr)
+	// 使用足够长的随机字符串，不包含可预测的时间戳
+	// 32 字节随机字符串提供足够的熵防止暴力破解
+	verifyText := util.GetRandomString(32)
 	cacheKey := fmt.Sprintf("web3_verify:%s_%s", user.UID, verifyType)
 	err = u.ctx.GetRedisConn().SetAndExpire(cacheKey, verifyText, time.Minute*5)
 	if err != nil {

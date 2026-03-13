@@ -381,3 +381,142 @@ func TestSanitizeFilename_MultipleDotsInName(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateMagicNumber(t *testing.T) {
+	tests := []struct {
+		name   string
+		ext    string
+		header []byte
+		want   bool
+	}{
+		// PNG
+		{"valid png", ".png", []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}, true},
+		{"invalid png header", ".png", []byte{0xFF, 0xD8, 0xFF}, false},
+		{"png short header", ".png", []byte{0x89, 0x50}, false},
+
+		// JPEG
+		{"valid jpg", ".jpg", []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10}, true},
+		{"valid jpeg", ".jpeg", []byte{0xFF, 0xD8, 0xFF}, true},
+		{"invalid jpg header", ".jpg", []byte{0x89, 0x50, 0x4E, 0x47}, false},
+
+		// GIF
+		{"valid gif87a", ".gif", []byte{0x47, 0x49, 0x46, 0x38, 0x37, 0x61}, true},
+		{"valid gif89a", ".gif", []byte{0x47, 0x49, 0x46, 0x38, 0x39, 0x61}, true},
+		{"invalid gif", ".gif", []byte{0xFF, 0xD8, 0xFF}, false},
+
+		// PDF
+		{"valid pdf", ".pdf", []byte{0x25, 0x50, 0x44, 0x46, 0x2D}, true},
+		{"invalid pdf", ".pdf", []byte{0x50, 0x4B, 0x03, 0x04}, false},
+
+		// MP4 (ftyp container format)
+		{"valid mp4 ftyp", ".mp4", []byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm'}, true},
+		{"valid mp4 ftyp mp42", ".mp4", []byte{0x00, 0x00, 0x00, 0x20, 'f', 't', 'y', 'p', 'm', 'p', '4', '2'}, true},
+		{"invalid mp4 no ftyp", ".mp4", []byte{0x00, 0x00, 0x00, 0x18, 'm', 'o', 'o', 'v'}, false},
+		{"invalid mp4 too short", ".mp4", []byte{0x00, 0x00, 0x00}, false},
+		{"invalid mp4 random bytes", ".mp4", []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, false},
+
+		// MOV (ftyp container format)
+		{"valid mov ftyp", ".mov", []byte{0x00, 0x00, 0x00, 0x14, 'f', 't', 'y', 'p', 'q', 't', ' ', ' '}, true},
+		{"invalid mov no ftyp", ".mov", []byte{0x00, 0x00, 0x00, 0x14, 'm', 'o', 'o', 'v'}, false},
+
+		// M4A (ftyp container format)
+		{"valid m4a ftyp", ".m4a", []byte{0x00, 0x00, 0x00, 0x20, 'f', 't', 'y', 'p', 'M', '4', 'A', ' '}, true},
+		{"invalid m4a no ftyp", ".m4a", []byte{0x00, 0x00, 0x00, 0x20, 'f', 'r', 'e', 'e'}, false},
+
+		// Text files (no magic number defined, should pass)
+		{"txt no magic needed", ".txt", []byte("Hello, World!"), true},
+		{"json no magic needed", ".json", []byte("{\"key\": \"value\"}"), true},
+
+		// Unknown extension (no magic number defined, should pass)
+		{"unknown ext", ".xyz", []byte{0xFF, 0xFF, 0xFF}, true},
+
+		// Empty header
+		{"empty header png", ".png", []byte{}, false},
+		{"empty header mp4", ".mp4", []byte{}, false},
+
+		// Case insensitive extension
+		{"uppercase PNG", ".PNG", []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}, true},
+		{"mixed case Mp4", ".Mp4", []byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p'}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ValidateMagicNumber(tt.ext, tt.header)
+			assert.Equal(t, tt.want, got, "ValidateMagicNumber(%q, header)", tt.ext)
+		})
+	}
+}
+
+func TestValidateMagicNumber_FtypFormats(t *testing.T) {
+	// Test that ftyp container formats require proper ftyp magic at offset 4
+	ftypFormats := []string{".mp4", ".mov", ".m4a", ".m4v", ".3gp"}
+
+	// Valid ftyp header - any value for first 4 bytes, but "ftyp" at bytes 4-7
+	validFtypHeader := []byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm'}
+
+	// Invalid header - just zeros (should fail because no "ftyp" at offset 4)
+	invalidHeader := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+
+	for _, ext := range ftypFormats {
+		t.Run("valid "+ext, func(t *testing.T) {
+			assert.True(t, ValidateMagicNumber(ext, validFtypHeader),
+				"%s with valid ftyp header should pass", ext)
+		})
+		t.Run("invalid "+ext, func(t *testing.T) {
+			assert.False(t, ValidateMagicNumber(ext, invalidHeader),
+				"%s with invalid header should fail", ext)
+		})
+	}
+}
+
+func TestValidateMagicNumber_MP4Variations(t *testing.T) {
+	// Test various real-world MP4/MOV ftyp variations
+	tests := []struct {
+		name   string
+		header []byte
+		want   bool
+	}{
+		{
+			name:   "isom brand",
+			header: []byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm'},
+			want:   true,
+		},
+		{
+			name:   "mp42 brand",
+			header: []byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p', 'm', 'p', '4', '2'},
+			want:   true,
+		},
+		{
+			name:   "M4A brand",
+			header: []byte{0x00, 0x00, 0x00, 0x20, 'f', 't', 'y', 'p', 'M', '4', 'A', ' '},
+			want:   true,
+		},
+		{
+			name:   "qt brand (QuickTime)",
+			header: []byte{0x00, 0x00, 0x00, 0x14, 'f', 't', 'y', 'p', 'q', 't', ' ', ' '},
+			want:   true,
+		},
+		{
+			name:   "moov atom instead of ftyp",
+			header: []byte{0x00, 0x00, 0x00, 0x14, 'm', 'o', 'o', 'v'},
+			want:   false,
+		},
+		{
+			name:   "free atom instead of ftyp",
+			header: []byte{0x00, 0x00, 0x00, 0x08, 'f', 'r', 'e', 'e'},
+			want:   false,
+		},
+		{
+			name:   "short header",
+			header: []byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y'},
+			want:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ValidateMagicNumber(".mp4", tt.header)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
