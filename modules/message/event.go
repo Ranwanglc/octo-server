@@ -17,16 +17,42 @@ import (
 func (m *Message) syncMessageReadedCount() {
 	go m.startTimer()
 }
+
 func (m *Message) startTimer() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "recovered panic in startTimer: %v\n%s\n", r, debug.Stack())
+		}
+	}()
+
 	intervalSecond := m.ctx.GetConfig().Message.SyncReadedCountIntervalSecond
 	if intervalSecond == 0 {
 		intervalSecond = 3
 	}
 	ticker := time.NewTicker(time.Duration(intervalSecond) * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		m.handleReadedMessageCount()
+
+	for {
+		select {
+		case <-m.stopChan:
+			m.Info("startTimer stopped gracefully")
+			return
+		case <-ticker.C:
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						fmt.Fprintf(os.Stderr, "recovered panic in handleReadedMessageCount: %v\n%s\n", r, debug.Stack())
+					}
+				}()
+				m.handleReadedMessageCount()
+			}()
+		}
 	}
+}
+
+// Stop stops the background timer goroutine
+func (m *Message) Stop() {
+	close(m.stopChan)
 }
 
 // 处理消息已读数量
