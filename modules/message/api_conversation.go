@@ -212,10 +212,50 @@ func (co *Conversation) conversationExtraUpdate(c *wkhttp.Context) {
 
 // 删除最近会话
 func (co *Conversation) deleteConversation(c *wkhttp.Context) {
+	loginUID := c.GetLoginUID()
 	channelID := c.Param("channel_id")
-	channelType, _ := strconv.ParseInt(c.Param("channel_type"), 10, 64)
+	channelType, err := strconv.ParseInt(c.Param("channel_type"), 10, 64)
+	if err != nil {
+		c.ResponseError(errors.New("频道类型格式错误"))
+		return
+	}
+	if strings.TrimSpace(channelID) == "" {
+		c.ResponseError(errors.New("频道ID不能为空"))
+		return
+	}
 
-	err := co.service.DeleteConversation(c.GetLoginUID(), channelID, uint8(channelType))
+	// Verify the conversation belongs to the current user before deleting
+	if uint8(channelType) == common.ChannelTypeGroup.Uint8() {
+		// For group channels, verify the user is (or was) a member
+		isMember, err := co.groupService.ExistMember(channelID, loginUID)
+		if err != nil {
+			co.Error("查询群成员失败", zap.Error(err))
+			c.ResponseError(errors.New("操作失败"))
+			return
+		}
+		if !isMember {
+			c.ResponseError(errors.New("无权删除此会话"))
+			return
+		}
+	} else if uint8(channelType) == common.ChannelTypePerson.Uint8() {
+		// For person channels, verify channelID is a valid user
+		if channelID == loginUID {
+			c.ResponseError(errors.New("无法删除与自己的会话"))
+			return
+		}
+		userInfo, err := co.userService.GetUser(channelID)
+		if err != nil {
+			co.Error("查询用户信息失败", zap.Error(err))
+			c.ResponseError(errors.New("操作失败"))
+			return
+		}
+		if userInfo == nil {
+			c.ResponseError(errors.New("会话不存在或无权删除"))
+			return
+		}
+	}
+
+	err = co.service.DeleteConversation(loginUID, channelID, uint8(channelType))
 	if err != nil {
 		co.Error("删除最近会话失败！", zap.Error(err))
 		c.ResponseError(errors.New("删除最近会话失败！"))
