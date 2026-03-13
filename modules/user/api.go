@@ -85,6 +85,8 @@ type User struct {
 	commonService            common2.IService
 	deviceFlagDB             *deviceFlagDB
 	deviceFlagsCache         []*deviceFlagModel
+	deviceFlagsOnce          sync.Once
+	deviceFlagsErr           error
 	appService               app.IService
 }
 

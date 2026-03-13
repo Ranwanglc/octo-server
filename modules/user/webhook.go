@@ -152,15 +152,11 @@ func (u *User) getMainDeviceFlag() uint8 {
 }
 
 func (u *User) getDeviceFlags() ([]*deviceFlagModel, error) {
-	if u.deviceFlagsCache == nil {
-		var err error
-		u.deviceFlagsCache, err = u.deviceFlagDB.queryAll()
-		if err != nil {
-			return nil, err
-		}
-		if u.deviceFlagsCache == nil {
+	u.deviceFlagsOnce.Do(func() {
+		u.deviceFlagsCache, u.deviceFlagsErr = u.deviceFlagDB.queryAll()
+		if u.deviceFlagsErr == nil && u.deviceFlagsCache == nil {
 			u.deviceFlagsCache = make([]*deviceFlagModel, 0)
 		}
-	}
-	return u.deviceFlagsCache, nil
+	})
+	return u.deviceFlagsCache, u.deviceFlagsErr
 }
