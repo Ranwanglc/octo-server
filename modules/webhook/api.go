@@ -530,9 +530,9 @@ func (w *Webhook) pushTo(msgResp msgOfflineNotify, toUids []string) error {
 				}
 				result, err := w.push(toUser, msgResp)
 				if err != nil {
-					w.Debug("推送失败！", zap.String("uid", toUser.UID), zap.String("deviceType", result.deviceType), zap.String("deviceToken", result.deviceToken), zap.Error(err))
+					w.Debug("推送失败！", zap.String("uid", toUser.UID), zap.String("deviceType", result.deviceType), zap.String("deviceToken", maskToken(result.deviceToken)), zap.Error(err))
 				} else {
-					w.Debug("推送成功！", zap.String("uid", toUser.UID), zap.String("deviceType", result.deviceType), zap.String("deviceToken", result.deviceToken))
+					w.Debug("推送成功！", zap.String("uid", toUser.UID), zap.String("deviceType", result.deviceType), zap.String("deviceToken", maskToken(result.deviceToken)))
 				}
 			},
 		}
@@ -593,7 +593,7 @@ func (w *Webhook) push(toUser *user.Resp, msgResp msgOfflineNotify) (pushResp, e
 	deviceType := deviceMap["device_type"]
 	bundleID := deviceMap["bundle_id"]
 
-	w.Debug("开始推送", zap.String("uid", toUID), zap.String("deviceType", deviceType), zap.String("deviceToken", deviceToken))
+	w.Debug("开始推送", zap.String("uid", toUID), zap.String("deviceType", deviceType), zap.String("deviceToken", maskToken(deviceToken)))
 
 	if w.pushMap[common.DeviceType(deviceType)] == nil {
 		return pushResp{
@@ -636,6 +636,14 @@ func (w *Webhook) containSupportType(contentType common.ContentType) bool {
 		}
 	}
 	return false
+}
+
+// maskToken 对敏感令牌进行脱敏处理，只显示前 8 位
+func maskToken(token string) string {
+	if len(token) <= 8 {
+		return "***"
+	}
+	return token[:8] + "***"
 }
 
 // Event Event

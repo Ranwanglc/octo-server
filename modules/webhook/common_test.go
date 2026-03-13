@@ -118,3 +118,45 @@ func TestWebhookDBGlobalVariables(t *testing.T) {
 	})
 	assert.False(t, executed, "sync.Once should not execute again")
 }
+
+// TestMaskToken verifies the maskToken function properly masks sensitive tokens.
+func TestMaskToken(t *testing.T) {
+	tests := []struct {
+		name     string
+		token    string
+		expected string
+	}{
+		{
+			name:     "long token shows first 8 chars",
+			token:    "abc12345xyz67890",
+			expected: "abc12345***",
+		},
+		{
+			name:     "exactly 8 chars returns masked",
+			token:    "12345678",
+			expected: "***",
+		},
+		{
+			name:     "short token returns masked",
+			token:    "abc",
+			expected: "***",
+		},
+		{
+			name:     "empty token returns masked",
+			token:    "",
+			expected: "***",
+		},
+		{
+			name:     "9 chars shows first 8",
+			token:    "123456789",
+			expected: "12345678***",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := maskToken(tt.token)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}

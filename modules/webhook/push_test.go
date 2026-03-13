@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 	"time"
 
@@ -10,7 +11,14 @@ import (
 )
 
 func TestHMSPush(t *testing.T) {
-	hms := NewHMSPush("101827411", "649dedfb617dbd699715c05b9b430ce54013ad404cea0a5a2a16302fb01911a2", "com.xinbida.wukongchat")
+	appID := os.Getenv("HMS_APP_ID")
+	appSecret := os.Getenv("HMS_APP_SECRET")
+	packageName := os.Getenv("HMS_PACKAGE_NAME")
+	deviceToken := os.Getenv("HMS_DEVICE_TOKEN")
+	if appID == "" || appSecret == "" || packageName == "" || deviceToken == "" {
+		t.Skip("HMS push credentials not configured (set HMS_APP_ID, HMS_APP_SECRET, HMS_PACKAGE_NAME, HMS_DEVICE_TOKEN)")
+	}
+	hms := NewHMSPush(appID, appSecret, packageName)
 	accessToken, _, err := hms.GetHMSAccessToken()
 	assert.NoError(t, err)
 	payloadInfo := &PayloadInfo{
@@ -18,12 +26,20 @@ func TestHMSPush(t *testing.T) {
 		Content: "content2222",
 		Badge:   1,
 	}
-	err = hms.Push("ANqYJlGemvmj_H5U8L3629mb-OT7slBYJTdB8-vfpveu-oQzsJH8qtxCmEfzEiUemP1Gc7KV5M32rbiuhafNaZSu2VRPxAASLp3c_1_Ky-kUPN8FU06fZWHxLlA-6tJjCg", NewHMSPayload(payloadInfo, accessToken))
+	err = hms.Push(deviceToken, NewHMSPayload(payloadInfo, accessToken))
 	assert.NoError(t, err)
 }
 
 func TestMIPush(t *testing.T) {
-	mi := NewMIPush("2882303761519001722", "XIf41QWNIBRZPJVKUOOoYQ==", "com.xinbida.wukongchat", "")
+	appID := os.Getenv("MI_APP_ID")
+	appSecret := os.Getenv("MI_APP_SECRET")
+	packageName := os.Getenv("MI_PACKAGE_NAME")
+	channelID := os.Getenv("MI_CHANNEL_ID")
+	deviceToken := os.Getenv("MI_DEVICE_TOKEN")
+	if appID == "" || appSecret == "" || packageName == "" || deviceToken == "" {
+		t.Skip("MI push credentials not configured (set MI_APP_ID, MI_APP_SECRET, MI_PACKAGE_NAME, MI_DEVICE_TOKEN)")
+	}
+	mi := NewMIPush(appID, appSecret, packageName, channelID)
 
 	payloadInfo := &PayloadInfo{
 		Title:   "title",
@@ -31,43 +47,63 @@ func TestMIPush(t *testing.T) {
 		Badge:   1,
 	}
 
-	err := mi.Push("deviceToken", NewMIPayload(payloadInfo, "11"))
+	err := mi.Push(deviceToken, NewMIPayload(payloadInfo, "11"))
 	assert.NoError(t, err)
 }
 
 func TestOPPOPush(t *testing.T) {
-	oppo := NewOPPOPush("30755393", "aece2f965eb64a9a82e01db87b23030e", "d7205515e1ab4fe6ace46f0f5df1105f", "dd6e2ec2e89e4669bb4afe4433b28ac1", &config.Context{})
+	appID := os.Getenv("OPPO_APP_ID")
+	appKey := os.Getenv("OPPO_APP_KEY")
+	appSecret := os.Getenv("OPPO_APP_SECRET")
+	masterSecret := os.Getenv("OPPO_MASTER_SECRET")
+	deviceToken := os.Getenv("OPPO_DEVICE_TOKEN")
+	if appID == "" || appKey == "" || appSecret == "" || masterSecret == "" || deviceToken == "" {
+		t.Skip("OPPO push credentials not configured (set OPPO_APP_ID, OPPO_APP_KEY, OPPO_APP_SECRET, OPPO_MASTER_SECRET, OPPO_DEVICE_TOKEN)")
+	}
+	oppo := NewOPPOPush(appID, appKey, appSecret, masterSecret, &config.Context{})
 	payloadInfo := &PayloadInfo{
 		Title:   "标题",
 		Content: "内容",
 		Badge:   1,
 	}
-	err := oppo.Push("OPPO_CN_5831bbbefd00814c2bd82dbd40382869", NewOPPOPayload(payloadInfo, "11"))
+	err := oppo.Push(deviceToken, NewOPPOPayload(payloadInfo, "11"))
 	assert.NoError(t, err)
 }
 
 func TestVIVOPush(t *testing.T) {
-	vivo := NewVIVOPush("105542118", "d7aacd9d36621e75a9efb7ce69b5c567", "be82d800-0078-42cf-91d2-4127781361a9", &config.Context{})
+	appID := os.Getenv("VIVO_APP_ID")
+	appKey := os.Getenv("VIVO_APP_KEY")
+	appSecret := os.Getenv("VIVO_APP_SECRET")
+	deviceToken := os.Getenv("VIVO_DEVICE_TOKEN")
+	if appID == "" || appKey == "" || appSecret == "" || deviceToken == "" {
+		t.Skip("VIVO push credentials not configured (set VIVO_APP_ID, VIVO_APP_KEY, VIVO_APP_SECRET, VIVO_DEVICE_TOKEN)")
+	}
+	vivo := NewVIVOPush(appID, appKey, appSecret, &config.Context{})
 	payloadInfo := &PayloadInfo{
 		Title:   "标题",
 		Content: "内容",
 		Badge:   1,
 	}
-	err := vivo.Push("16569158930074211800064", NewVIVOPayload(payloadInfo, "11"))
+	err := vivo.Push(deviceToken, NewVIVOPayload(payloadInfo, "11"))
 	assert.NoError(t, err)
 }
 
 func TestFirebasePush(t *testing.T) {
-	// 请使用你本地的绝对路径进行测试
-	mi := NewFIREBASEPush("service_Account_json_Path", "bobo", "这个值请从json里面获取", "")
+	jsonPath := os.Getenv("FIREBASE_JSON_PATH")
+	packageName := os.Getenv("FIREBASE_PACKAGE_NAME")
+	projectID := os.Getenv("FIREBASE_PROJECT_ID")
+	deviceToken := os.Getenv("FIREBASE_DEVICE_TOKEN")
+	if jsonPath == "" || packageName == "" || projectID == "" || deviceToken == "" {
+		t.Skip("Firebase push credentials not configured (set FIREBASE_JSON_PATH, FIREBASE_PACKAGE_NAME, FIREBASE_PROJECT_ID, FIREBASE_DEVICE_TOKEN)")
+	}
+	firebase := NewFIREBASEPush(jsonPath, packageName, projectID, "")
 
 	payloadInfo := &PayloadInfo{
 		Title:   "title",
 		Content: "content",
 		Badge:   1,
 	}
-	// 这个device token是 firebase的token 不是app的device token，请前端老师帮忙提供即可。
-	err := mi.Push("请前端开发给你提供这个值", NewFIREBASEPayload(payloadInfo, "11"))
+	err := firebase.Push(deviceToken, NewFIREBASEPayload(payloadInfo, "11"))
 	assert.NoError(t, err)
 }
 
