@@ -194,6 +194,11 @@ echo "  结果: $PASSED 通过 / $FAILED 失败 (${DURATION}s)"
 echo "========================================="
 
 # 清理测试用户
+# Validate UID format to prevent SQL injection
+if [[ ! "$SMOKE_UID" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+  echo "❌ Invalid SMOKE_UID format" >&2
+  exit 1
+fi
 if [ -n "$SMOKE_UID" ]; then
   docker exec octo-mysql-1 mysql -u root -ptsdd123456 --default-character-set=utf8mb4 im \
     -e "DELETE FROM user WHERE uid='$SMOKE_UID';" 2>/dev/null
