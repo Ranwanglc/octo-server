@@ -128,10 +128,13 @@ func (sc *ServiceCOS) DownloadURL(ph string, filename string) (string, error) {
 		downloadBase = fmt.Sprintf("https://%s.cos.%s.myqcloud.com", cosConfig.Bucket, cosConfig.Region)
 	}
 
+	ph = sc.withPrefix(ph)
+	result, _ := url.JoinPath(downloadBase, ph)
+	if strings.TrimSpace(filename) == "" {
+		return result, nil
+	}
 	vals := url.Values{}
 	encodedFilename := "UTF-8''" + url.QueryEscape(filename)
 	vals.Set("response-content-disposition", fmt.Sprintf("attachment; filename*=%s", encodedFilename))
-	ph = sc.withPrefix(ph)
-	result, _ := url.JoinPath(downloadBase, ph)
 	return fmt.Sprintf("%s?%s", result, vals.Encode()), nil
 }

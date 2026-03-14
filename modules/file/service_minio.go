@@ -163,9 +163,12 @@ func (sm *ServiceMinio) GetFile(ph string) (io.ReadCloser, string, error) {
 
 func (sm *ServiceMinio) DownloadURL(ph string, filename string) (string, error) {
 	minioConfig := sm.ctx.GetConfig().Minio
+	result, _ := url.JoinPath(minioConfig.DownloadURL, ph)
+	if strings.TrimSpace(filename) == "" {
+		return result, nil
+	}
 	vals := url.Values{}
 	encodedFilename := "UTF-8''" + url.QueryEscape(filename)
 	vals.Set("response-content-disposition", fmt.Sprintf("attachment; filename*=%s", encodedFilename))
-	result, _ := url.JoinPath(minioConfig.DownloadURL, ph)
 	return fmt.Sprintf("%s?%s", result, vals.Encode()), nil
 }

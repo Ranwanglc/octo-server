@@ -1089,7 +1089,7 @@ func (bf *BotFather) botUploadFile(c *wkhttp.Context) {
 		return
 	}
 
-	fullURL, err := bf.fileService.DownloadURL(storagePath, fileName)
+	fullURL, err := bf.fileService.DownloadURL(storagePath, "")
 	if err != nil {
 		bf.Warn("生成下载URL失败，回退到相对路径", zap.Error(err))
 		fullURL = fmt.Sprintf("file/preview/%s%s", fileType, path)

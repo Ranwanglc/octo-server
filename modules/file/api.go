@@ -239,7 +239,7 @@ func (f *File) uploadFile(c *wkhttp.Context) {
 	}
 
 	storagePath := fmt.Sprintf("%s%s", fileType, path)
-	fullURL, err := f.service.DownloadURL(storagePath, fileName)
+	fullURL, err := f.service.DownloadURL(storagePath, "")
 	if err != nil {
 		f.Warn("生成下载URL失败，回退到相对路径", zap.Error(err))
 		fullURL = fmt.Sprintf("file/preview/%s%s", fileType, path)
