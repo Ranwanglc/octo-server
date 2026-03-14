@@ -589,16 +589,20 @@ func (bf *BotFather) sendMessage(c *wkhttp.Context) {
 			return
 		}
 	} else if req.ChannelType == common.ChannelTypePerson.Uint8() {
-		// 私聊场景：验证 bot 与目标用户有好友关系
-		isFriend, err := bf.userService.IsFriend(robotID, req.ChannelID)
-		if err != nil {
-			bf.Error("查询好友关系失败", zap.Error(err))
-			c.ResponseError(errors.New("查询好友关系失败"))
-			return
-		}
-		if !isFriend {
-			c.ResponseError(errors.New("bot is not a friend of this user"))
-			return
+		// 私聊场景：创建者天然有权和自己的 Bot 聊天，跳过 friend 检查
+		robot := getRobotFromContext(c)
+		isCreator := robot != nil && robot.CreatorUID == req.ChannelID
+		if !isCreator {
+			isFriend, err := bf.userService.IsFriend(robotID, req.ChannelID)
+			if err != nil {
+				bf.Error("查询好友关系失败", zap.Error(err))
+				c.ResponseError(errors.New("查询好友关系失败"))
+				return
+			}
+			if !isFriend {
+				c.ResponseError(errors.New("bot is not a friend of this user"))
+				return
+			}
 		}
 	}
 
