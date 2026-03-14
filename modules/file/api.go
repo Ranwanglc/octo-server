@@ -212,6 +212,10 @@ func (f *File) uploadFile(c *wkhttp.Context) {
 	if !strings.HasPrefix(path, "/") {
 		path = fmt.Sprintf("/%s", path)
 	}
+	// 修复客户端上传路径缺少扩展名点号的问题（如 HASHpdf → HASH.pdf）
+	if ext != "" && !strings.HasSuffix(strings.ToLower(path), ext) && strings.HasSuffix(strings.ToLower(path), ext[1:]) {
+		path = path[:len(path)-len(ext)+1] + ext
+	}
 	var sign []byte
 	if signatureInt == 1 {
 		h := sha512.New()
