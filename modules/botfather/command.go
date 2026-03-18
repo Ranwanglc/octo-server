@@ -436,6 +436,13 @@ func (h *commandHandler) handleQuickstart(fromUID string) {
 		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
 	}
 
+	// 获取当前 Space ID，放入引导词让 AI Agent 创建 Bot 时指定
+	spaceID := h.resolveSpaceID(fromUID)
+	spaceLine := ""
+	if spaceID != "" {
+		spaceLine = fmt.Sprintf("\nMy Space ID: %s", spaceID)
+	}
+
 	h.reply(fromUID, fmt.Sprintf(`🚀 Quickstart
 
 将下面的提示词复制发给你的 AI Agent：
@@ -444,7 +451,7 @@ func (h *commandHandler) handleQuickstart(fromUID string) {
 Read %s/v1/bot/skill.md to learn the DMWork Bot API (includes User API, multi-bot config, and OpenClaw setup).
 
 My User API Key: %s
-API server: %s
+API server: %s%s
 
 Create a bot, get the bot_token, then follow the skill.md instructions to connect.
 All User API endpoints require: Authorization: Bearer %s
@@ -452,7 +459,7 @@ All User API endpoints require: Authorization: Bearer %s
 
 💡 User API Key 可反复使用，用于管理你的所有 Bot
 🔑 你的 API Key: %s`,
-		apiURL, apiKey, apiURL, apiKey, apiKey))
+		apiURL, apiKey, apiURL, spaceLine, apiKey, apiKey))
 }
 
 func (h *commandHandler) handleHelp(fromUID string) {

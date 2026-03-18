@@ -122,6 +122,7 @@ type CreateBotReq struct {
 	Name        string  `json:"name"`
 	Username    string  `json:"username"`
 	Description *string `json:"description"`
+	SpaceID     string  `json:"space_id"` // 可选，指定 Bot 加入的 Space
 }
 
 // CreateBotResp 创建Bot响应
