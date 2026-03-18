@@ -41,7 +41,7 @@ func deriveWSURL(cfg *config.Config) string {
 func generateSkillMD(apiURL, wsURL string) string {
 	return fmt.Sprintf(`---
 name: dmwork
-version: 0.2.32
+version: latest
 description: DMWork Bot - AI Agent messaging via WuKongIM
 metadata: {"dmwork":{"category":"messaging","api_base":"%s"}}
 ---
@@ -609,5 +609,73 @@ To prevent abuse and control costs, implement rate limiting in your bot:
 - **Global**: Max 50 concurrent AI requests
 - **Cooldown**: If rate limited, reply with a friendly message instead of silently dropping
 
-`, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, wsURL, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL)
+## User API (Bot Management)
+
+Manage bots programmatically using a User API Key (obtained via BotFather /quickstart).
+
+All endpoints require: `+"`"+`Authorization: Bearer uk_xxxxx`+"`"+`
+
+### Quickstart Flow
+
+1. Get your User API Key from BotFather /quickstart command
+2. Create a bot via POST /v1/user/bots
+3. Get the bot_token from the response
+4. Register the bot via POST /v1/bot/register with the bot_token
+5. Configure openclaw.json with the bot_token and apiUrl
+6. Set session.dmScope to "per-account-channel-peer"
+7. Verify the bot is online
+
+### Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | %s/v1/user/bots | Create a new bot |
+| GET | %s/v1/user/bots | List all your bots |
+| PUT | %s/v1/user/bots/:bot_id | Update bot (name, description) |
+| DELETE | %s/v1/user/bots/:bot_id | Delete a bot |
+| GET | %s/v1/user/bots/:bot_id/token | Get bot_token |
+
+### Create Bot
+
+`+"```"+`bash
+curl -X POST %s/v1/user/bots \
+  -H "Authorization: Bearer uk_YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "My Bot", "username": "mybot", "description": "A helpful assistant"}'
+`+"```"+`
+
+Response:
+`+"```"+`json
+{
+  "robot_id": "mybot_bot",
+  "username": "mybot_bot",
+  "name": "My Bot",
+  "description": "A helpful assistant",
+  "bot_token": "bf_xxxxxxxx"
+}
+`+"```"+`
+
+### List Bots
+
+`+"```"+`bash
+curl %s/v1/user/bots -H "Authorization: Bearer uk_YOUR_API_KEY"
+`+"```"+`
+
+### Update Bot
+
+`+"```"+`bash
+curl -X PUT %s/v1/user/bots/mybot_bot \
+  -H "Authorization: Bearer uk_YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "New Name", "description": "Updated description"}'
+`+"```"+`
+
+### Delete Bot
+
+`+"```"+`bash
+curl -X DELETE %s/v1/user/bots/mybot_bot \
+  -H "Authorization: Bearer uk_YOUR_API_KEY"
+`+"```"+`
+
+`, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, wsURL, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL)
 }

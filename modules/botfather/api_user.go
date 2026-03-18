@@ -1,0 +1,411 @@
+package botfather
+
+import (
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+
+	"github.com/Mininglamp-OSS/octo-server/modules/base/app"
+	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	"github.com/Mininglamp-OSS/octo-lib/common"
+	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+)
+
+// ========== User API Key 认证中间件 ==========
+
+func (bf *BotFather) authUserAPIKey() wkhttp.HandlerFunc {
+	return func(c *wkhttp.Context) {
+		token := extractBotToken(c) // reuse Bearer extraction
+		if token == "" || !strings.HasPrefix(token, UserAPIKeyPrefix) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "缺少Authorization头或API Key无效"})
+			return
+		}
+
+		keyModel, err := bf.db.queryUserAPIKeyByKey(token)
+		if err != nil {
+			bf.Error("查询User API Key失败", zap.Error(err))
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "认证失败"})
+			return
+		}
+		if keyModel == nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "无效的API Key"})
+			return
+		}
+
+		c.Set("api_key_uid", keyModel.UID)
+		c.Next()
+	}
+}
+
+func getAPIKeyUID(c *wkhttp.Context) string {
+	v, _ := c.Get("api_key_uid")
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+// setupUserAPIRoutes 注册 User API Key 认证的路由
+func (bf *BotFather) setupUserAPIRoutes(r *wkhttp.WKHttp) {
+	userAPI := r.Group("/v1/user", bf.authUserAPIKey())
+	{
+		userAPI.POST("/bots", bf.createUserBot)
+		userAPI.GET("/bots", bf.listUserBots)
+		userAPI.PUT("/bots/:bot_id", bf.updateUserBot)
+		userAPI.DELETE("/bots/:bot_id", bf.deleteUserBot)
+		userAPI.GET("/bots/:bot_id/token", bf.getUserBotToken)
+	}
+}
+
+// ========== User Bot CRUD APIs ==========
+
+// createUserBot POST /v1/user/bots
+func (bf *BotFather) createUserBot(c *wkhttp.Context) {
+	uid := getAPIKeyUID(c)
+	var req CreateBotReq
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("数据格式有误"))
+		return
+	}
+
+	// Validate name
+	name := strings.TrimSpace(req.Name)
+	if name == "" || len(name) > 64 {
+		c.ResponseError(errors.New("name 长度需要在 1-64 个字符之间"))
+		return
+	}
+
+	// Validate and normalize username
+	username := strings.TrimSpace(strings.ToLower(req.Username))
+	username = strings.TrimSuffix(username, BotUsernameSuffix)
+	if username == "" || len(username) > 20 {
+		c.ResponseError(errors.New("username 长度需要在 1-20 个字符之间"))
+		return
+	}
+	for _, r := range username {
+		if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_') {
+			c.ResponseError(errors.New("username 只能包含英文字母、数字和下划线"))
+			return
+		}
+	}
+	username = username + BotUsernameSuffix
+
+	// Check uniqueness
+	exists, _ := bf.db.existRobotByUsername(username)
+	if exists {
+		c.ResponseError(fmt.Errorf("username %s 已被占用", username))
+		return
+	}
+	u, _ := bf.userService.GetUserWithUsername(username)
+	if u != nil {
+		c.ResponseError(fmt.Errorf("username %s 已被占用", username))
+		return
+	}
+
+	// Generate bot token
+	botToken, err := bf.cmdHandler.generateUniqueBotToken()
+	if err != nil {
+		bf.Error("生成Bot Token失败", zap.Error(err))
+		c.ResponseError(errors.New("创建失败，请稍后重试"))
+		return
+	}
+
+	robotID := username
+	description := ""
+	if req.Description != nil {
+		description = *req.Description
+	}
+
+	// Create App
+	appResp, err := bf.appService.CreateApp(app.Req{AppID: robotID})
+	if err != nil {
+		bf.Error("创建App失败", zap.Error(err))
+		c.ResponseError(errors.New("创建失败"))
+		return
+	}
+
+	// Create robot record
+	tx, err := bf.db.session.Begin()
+	if err != nil {
+		bf.Error("开启事务失败", zap.Error(err))
+		c.ResponseError(errors.New("创建失败"))
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	version, err := bf.ctx.GenSeq(common.RobotSeqKey)
+	if err != nil {
+		tx.Rollback()
+		c.ResponseError(errors.New("创建失败"))
+		return
+	}
+	err = bf.db.insertRobotTx(&robotModel{
+		AppID:       appResp.AppID,
+		RobotID:     robotID,
+		Username:    username,
+		Token:       appResp.AppKey,
+		Version:     version,
+		Status:      1,
+		CreatorUID:  uid,
+		BotToken:    botToken,
+		Description: description,
+	}, tx)
+	if err != nil {
+		tx.Rollback()
+		bf.Error("插入机器人记录失败", zap.Error(err))
+		c.ResponseError(errors.New("创建失败"))
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		bf.Error("提交事务失败", zap.Error(err))
+		c.ResponseError(errors.New("创建失败"))
+		return
+	}
+
+	// Create user
+	err = bf.userService.AddUser(&user.AddUserReq{
+		UID:      robotID,
+		Username: username,
+		Name:     name,
+		ShortNo:  username,
+		Robot:    1,
+	})
+	if err != nil {
+		// Rollback robot record
+		if delErr := bf.db.deleteRobot(robotID); delErr != nil {
+			bf.Error("回滚robot记录失败", zap.Error(delErr))
+		}
+		bf.Error("创建用户失败", zap.Error(err))
+		c.ResponseError(errors.New("创建失败"))
+		return
+	}
+
+	// Add bot to creator's Space (best-effort, non-critical)
+	var spaceIDs []string
+	_, spErr := bf.db.session.SelectBySql(
+		"SELECT space_id FROM space_member WHERE uid=? AND status=1", uid,
+	).Load(&spaceIDs)
+	if spErr != nil {
+		bf.Error("查询创建者Space失败", zap.String("uid", uid), zap.Error(spErr))
+	}
+	for _, sid := range spaceIDs {
+		_, insErr := bf.db.session.InsertBySql(
+			"INSERT IGNORE INTO space_member (space_id, uid, role, status, created_at, updated_at) VALUES (?, ?, 0, 1, NOW(), NOW())",
+			sid, robotID,
+		).Exec()
+		if insErr != nil {
+			bf.Error("添加Bot到Space失败", zap.String("spaceID", sid), zap.Error(insErr))
+		}
+	}
+
+	// Add friend relationships (non-critical — partial state is acceptable if these fail)
+	bf.userService.AddFriend(uid, &user.FriendReq{UID: uid, ToUID: robotID})
+	bf.userService.AddFriend(robotID, &user.FriendReq{UID: robotID, ToUID: uid})
+
+	c.Response(&CreateBotResp{
+		RobotID:     robotID,
+		Username:    username,
+		Name:        name,
+		Description: description,
+		BotToken:    botToken,
+	})
+}
+
+// listUserBots GET /v1/user/bots
+func (bf *BotFather) listUserBots(c *wkhttp.Context) {
+	uid := getAPIKeyUID(c)
+	bots, err := bf.db.queryRobotsByCreatorUID(uid)
+	if err != nil {
+		bf.Error("查询Bot列表失败", zap.Error(err))
+		c.ResponseError(errors.New("查询失败"))
+		return
+	}
+
+	list := make([]*UserBotResp, 0, len(bots))
+	for _, bot := range bots {
+		if bot.Status != 1 {
+			continue
+		}
+		// Get display name from user table
+		name := bot.Username
+		userResp, _ := bf.userService.GetUserWithUsername(bot.Username)
+		if userResp != nil {
+			name = userResp.Name
+		}
+		list = append(list, &UserBotResp{
+			RobotID:     bot.RobotID,
+			Username:    bot.Username,
+			Name:        name,
+			Description: bot.Description,
+			BotToken:    bot.BotToken,
+		})
+	}
+	c.Response(list)
+}
+
+// updateUserBot PUT /v1/user/bots/:bot_id
+func (bf *BotFather) updateUserBot(c *wkhttp.Context) {
+	uid := getAPIKeyUID(c)
+	botID := c.Param("bot_id")
+
+	bot, err := bf.db.queryRobotByRobotIDAndCreator(botID, uid)
+	if err != nil {
+		bf.Error("查询Bot失败", zap.Error(err))
+		c.ResponseError(errors.New("查询失败"))
+		return
+	}
+	if bot == nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"msg": "Bot不存在或无权限"})
+		return
+	}
+
+	var req UpdateBotReq
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("数据格式有误"))
+		return
+	}
+
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" || len(name) > 64 {
+			c.ResponseError(errors.New("name 长度需要在 1-64 个字符之间"))
+			return
+		}
+		err = bf.userService.UpdateUser(user.UserUpdateReq{
+			UID:  botID,
+			Name: &name,
+		})
+		if err != nil {
+			bf.Error("更新Bot名称失败", zap.Error(err))
+			c.ResponseError(errors.New("更新失败"))
+			return
+		}
+	}
+
+	if req.Description != nil {
+		desc := strings.TrimSpace(*req.Description)
+		if len(desc) > 500 {
+			c.ResponseError(errors.New("description 不能超过 500 个字符"))
+			return
+		}
+		err = bf.db.updateRobotDescription(botID, desc)
+		if err != nil {
+			bf.Error("更新Bot描述失败", zap.Error(err))
+			c.ResponseError(errors.New("更新失败"))
+			return
+		}
+	}
+
+	c.ResponseOK()
+}
+
+// deleteUserBot DELETE /v1/user/bots/:bot_id
+func (bf *BotFather) deleteUserBot(c *wkhttp.Context) {
+	uid := getAPIKeyUID(c)
+	botID := c.Param("bot_id")
+
+	bot, err := bf.db.queryRobotByRobotIDAndCreator(botID, uid)
+	if err != nil {
+		bf.Error("查询Bot失败", zap.Error(err))
+		c.ResponseError(errors.New("查询失败"))
+		return
+	}
+	if bot == nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"msg": "Bot不存在或无权限"})
+		return
+	}
+
+	// Clean up IM connection: invalidate token to kick existing WS sessions
+	newIMToken := util.GenerUUID()
+	_, imErr := bf.ctx.UpdateIMToken(config.UpdateIMTokenReq{
+		UID:         botID,
+		Token:       newIMToken,
+		DeviceFlag:  config.APP,
+		DeviceLevel: config.DeviceLevelMaster,
+	})
+	if imErr != nil {
+		bf.Error("撤销IM Token失败", zap.Error(imErr))
+	}
+	bf.db.updateRobotIMTokenCache(botID, "")
+
+	// Clear heartbeat and event queue
+	bf.ctx.GetRedisConn().Del(fmt.Sprintf("%s%s", heartbeatKeyPrefix, botID))
+	bf.ctx.GetRedisConn().Del(fmt.Sprintf("robotEvent:%s", botID))
+
+	// Remove friend records (both directions) with version for client sync
+	friendVersion, verErr := bf.ctx.GenSeq(common.FriendSeqKey)
+	if verErr != nil {
+		bf.Error("GenSeq failed for friend", zap.Error(verErr))
+	} else {
+		_, fErr := bf.ctx.DB().Update("friend").
+			Set("is_deleted", 1).
+			Set("version", friendVersion).
+			Where("(uid=? or to_uid=?) and is_deleted=0", botID, botID).
+			Exec()
+		if fErr != nil {
+			bf.Error("删除Bot好友记录失败", zap.Error(fErr))
+		}
+	}
+
+	// Remove from Spaces
+	_, spErr := bf.ctx.DB().UpdateBySql(
+		"UPDATE space_member SET status=0 WHERE uid=? AND status=1", botID,
+	).Exec()
+	if spErr != nil {
+		bf.Error("移除Bot的Space成员记录失败", zap.Error(spErr))
+	}
+
+	// Soft-delete robot record
+	err = bf.db.deleteRobot(botID)
+	if err != nil {
+		bf.Error("删除Bot失败", zap.Error(err))
+		c.ResponseError(errors.New("删除失败"))
+		return
+	}
+
+	// Release username and short_no so the identifier can be reused
+	_, relErr := bf.ctx.DB().Update("user").
+		Set("username", "").
+		Set("short_no", "").
+		Where("uid=?", botID).
+		Exec()
+	if relErr != nil {
+		bf.Error("释放Bot用户名失败", zap.String("botID", botID), zap.Error(relErr))
+	}
+
+	c.ResponseOK()
+}
+
+// getUserBotToken GET /v1/user/bots/:bot_id/token
+func (bf *BotFather) getUserBotToken(c *wkhttp.Context) {
+	uid := getAPIKeyUID(c)
+	botID := c.Param("bot_id")
+
+	bot, err := bf.db.queryRobotByRobotIDAndCreator(botID, uid)
+	if err != nil {
+		bf.Error("查询Bot失败", zap.Error(err))
+		c.ResponseError(errors.New("查询失败"))
+		return
+	}
+	if bot == nil {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"msg": "Bot不存在或无权限"})
+		return
+	}
+
+	c.Response(gin.H{
+		"robot_id":  bot.RobotID,
+		"bot_token": bot.BotToken,
+	})
+}

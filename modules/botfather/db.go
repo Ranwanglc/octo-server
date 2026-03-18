@@ -165,3 +165,42 @@ func (d *botfatherDB) queryAllActiveRobots() ([]*robotModel, error) {
 	_, err := d.session.Select("*").From("robot").Where("status=1 AND bot_token != ''").Load(&models)
 	return models, err
 }
+
+// ========== User API Key ==========
+
+// queryUserAPIKeyByKey 通过API Key查询
+func (d *botfatherDB) queryUserAPIKeyByKey(apiKey string) (*userAPIKeyModel, error) {
+	if apiKey == "" {
+		return nil, nil
+	}
+	var m *userAPIKeyModel
+	_, err := d.session.Select("*").From("user_api_key").Where("api_key=?", apiKey).Load(&m)
+	return m, err
+}
+
+// queryUserAPIKeyByUID 查询用户的API Key
+func (d *botfatherDB) queryUserAPIKeyByUID(uid string) (*userAPIKeyModel, error) {
+	var m *userAPIKeyModel
+	_, err := d.session.Select("*").From("user_api_key").Where("uid=?", uid).Load(&m)
+	return m, err
+}
+
+// insertUserAPIKey 插入用户API Key
+func (d *botfatherDB) insertUserAPIKey(uid, apiKey string) error {
+	_, err := d.session.InsertInto("user_api_key").Columns("uid", "api_key").Values(uid, apiKey).Exec()
+	return err
+}
+
+// queryRobotByRobotIDAndCreator 查询指定创建者的Bot
+func (d *botfatherDB) queryRobotByRobotIDAndCreator(robotID, creatorUID string) (*robotModel, error) {
+	var m *robotModel
+	_, err := d.session.Select("*").From("robot").Where("robot_id=? AND creator_uid=? AND status=1", robotID, creatorUID).Load(&m)
+	return m, err
+}
+
+// queryRobotByUsernameActive 查询活跃的Bot（用于用户名冲突检测）
+func (d *botfatherDB) queryRobotByUsernameActive(username string) (*robotModel, error) {
+	var m *robotModel
+	_, err := d.session.Select("*").From("robot").Where("username=? AND status=1", username).Load(&m)
+	return m, err
+}

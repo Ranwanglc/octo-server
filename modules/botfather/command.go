@@ -161,6 +161,8 @@ func (h *commandHandler) handleCommand(fromUID string, cmd string) {
 		h.handleToken(fromUID)
 	case CmdRevoke:
 		h.handleRevoke(fromUID)
+	case CmdQuickstart:
+		h.handleQuickstart(fromUID)
 	case CmdApprove:
 		h.handleApprove(fromUID, strings.TrimPrefix(cmd, command+" "))
 	case CmdReject:
@@ -399,11 +401,66 @@ func (h *commandHandler) handleRevoke(fromUID string) {
 	h.sendBotSelectionList(fromUID, bots, "请选择要重置 Token 的机器人：")
 }
 
+func (h *commandHandler) handleQuickstart(fromUID string) {
+	h.sm.Clear(fromUID)
+	realUID := extractRealUID(fromUID)
+
+	// 获取或创建 User API Key
+	existing, err := h.db.queryUserAPIKeyByUID(realUID)
+	if err != nil {
+		h.Error("查询User API Key失败", zap.Error(err))
+		h.reply(fromUID, "操作失败，请稍后重试。")
+		return
+	}
+	apiKey := ""
+	if existing != nil {
+		apiKey = existing.APIKey
+	} else {
+		apiKey, err = generateUserAPIKey()
+		if err != nil {
+			h.Error("生成User API Key失败", zap.Error(err))
+			h.reply(fromUID, "操作失败，请稍后重试。")
+			return
+		}
+		err = h.db.insertUserAPIKey(realUID, apiKey)
+		if err != nil {
+			h.Error("保存User API Key失败", zap.Error(err))
+			h.reply(fromUID, "操作失败，请稍后重试。")
+			return
+		}
+	}
+
+	cfg := h.ctx.GetConfig()
+	apiURL := cfg.External.BaseURL
+	if strings.TrimSpace(apiURL) == "" {
+		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
+	}
+
+	h.reply(fromUID, fmt.Sprintf(`🚀 Quickstart
+
+将下面的提示词复制发给你的 AI Agent：
+
+---
+Read %s/v1/bot/skill.md to learn the DMWork Bot API (includes User API, multi-bot config, and OpenClaw setup).
+
+My User API Key: %s
+API server: %s
+
+Create a bot, get the bot_token, then follow the skill.md instructions to connect.
+All User API endpoints require: Authorization: Bearer %s
+---
+
+💡 User API Key 可反复使用，用于管理你的所有 Bot
+🔑 你的 API Key: %s`,
+		apiURL, apiKey, apiURL, apiKey, apiKey))
+}
+
 func (h *commandHandler) handleHelp(fromUID string) {
 	h.sm.Clear(fromUID)
 	h.reply(fromUID, `BotFather 可以帮你创建和管理机器人。
 
 可用命令：
+/quickstart - AI Agent 快速入门（推荐）
 /newbot - 创建新机器人
 /mybots - 查看我的机器人
 /connect - 获取连接 prompt
@@ -1105,6 +1162,15 @@ func (h *commandHandler) generateUniqueBotToken() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("生成唯一Token失败，已重试3次")
+}
+
+// generateUserAPIKey 生成User API Key
+func generateUserAPIKey() (string, error) {
+	hex, err := randomHex(16)
+	if err != nil {
+		return "", err
+	}
+	return UserAPIKeyPrefix + hex, nil
 }
 
 // randomHex 生成随机十六进制字符串

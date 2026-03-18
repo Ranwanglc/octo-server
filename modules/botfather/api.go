@@ -112,6 +112,9 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 		botFileAPI.POST("/upload", bf.botUploadFile)
 	}
 
+	// User Bot API 端点（使用User API Key认证）
+	bf.setupUserAPIRoutes(r)
+
 	// Robot Apply API 端点（使用用户认证）
 	bf.setupApplyRoutes(r)
 
@@ -275,6 +278,7 @@ func (bf *BotFather) initBotFatherUser() {
 // registerBotFatherCommands 注册BotFather自身的命令列表
 func (bf *BotFather) registerBotFatherCommands() {
 	commands := []map[string]string{
+		{"command": CmdQuickstart, "description": "AI Agent 快速入门"},
 		{"command": CmdNewBot, "description": "创建新机器人"},
 		{"command": CmdMyBots, "description": "查看我的机器人"},
 		{"command": CmdConnect, "description": "获取连接 prompt"},

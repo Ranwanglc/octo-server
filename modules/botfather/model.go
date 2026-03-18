@@ -108,3 +108,44 @@ type RobotApplyListResp struct {
 	List  []*RobotApplyResp `json:"list"`
 	Count int64             `json:"count"`
 }
+
+// userAPIKeyModel 用户API Key模型
+type userAPIKeyModel struct {
+	ID        int64  `json:"id"`
+	UID       string `json:"uid"`
+	APIKey    string `json:"api_key"`
+	CreatedAt string `json:"created_at"`
+}
+
+// CreateBotReq 通过API Key创建Bot请求
+type CreateBotReq struct {
+	Name        string  `json:"name"`
+	Username    string  `json:"username"`
+	Description *string `json:"description"`
+}
+
+// CreateBotResp 创建Bot响应
+type CreateBotResp struct {
+	RobotID     string `json:"robot_id"`
+	Username    string `json:"username"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	BotToken    string `json:"bot_token"`
+	CreatedAt   string `json:"created_at"`
+}
+
+// UpdateBotReq 更新Bot请求
+type UpdateBotReq struct {
+	Name        *string `json:"name"`
+	Description *string `json:"description"`
+}
+
+// UserBotResp 用户Bot列表项
+type UserBotResp struct {
+	RobotID     string `json:"robot_id"`
+	Username    string `json:"username"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	BotToken    string `json:"bot_token"`
+	CreatedAt   string `json:"created_at"`
+}

@@ -10,6 +10,8 @@ const (
 	systemUIDFileHelper = "fileHelper"
 	// BotTokenPrefix Bot Token前缀
 	BotTokenPrefix = "bf_"
+	// UserAPIKeyPrefix User API Key前缀
+	UserAPIKeyPrefix = "uk_"
 	// BotUsernameSuffix 机器人用户名后缀
 	BotUsernameSuffix = "_bot"
 
@@ -39,6 +41,7 @@ const (
 	CmdApprove        = "/approve"
 	CmdReject         = "/reject"
 	CmdPending        = "/pending"
+	CmdQuickstart     = "/quickstart"
 )
 
 // 对话状态
