@@ -627,6 +627,10 @@ func (bf *BotFather) sendMessage(c *wkhttp.Context) {
 		c.ResponseError(errors.New("发送消息失败"))
 		return
 	}
+
+	// 重置 typing 限频状态（bot 已回复，下次可正常 typing）
+	bf.clearTypingThrottle(robotID, channelID, req.ChannelType)
+
 	c.Response(result)
 }
 
@@ -649,6 +653,41 @@ func (bf *BotFather) typing(c *wkhttp.Context) {
 
 	robotID := getRobotIDFromContext(c)
 	channelID := bf.resolveSpaceChannelID(robotID, req.ChannelID, req.ChannelType)
+
+	// Typing 限频：同一 bot+channel 90s 内允许转发，超过后静默丢弃
+	// 连续 3 个窗口未发消息则永久静默，直到 bot 发消息重置
+	typingStartKey := fmt.Sprintf("typing_start:%s:%s:%d", robotID, channelID, req.ChannelType)
+	typingCountKey := fmt.Sprintf("typing_count:%s:%s:%d", robotID, channelID, req.ChannelType)
+	const typingMaxDuration = 90  // 单窗口最大秒数
+	const typingMaxWindows = 3    // 最大连续窗口数
+	const typingKeyTTL = 180      // key 自动清理 TTL（秒）
+
+	startStr, _ := bf.ctx.GetRedisConn().GetString(typingStartKey)
+	now := time.Now().Unix()
+	if startStr != "" {
+		startTime, _ := strconv.ParseInt(startStr, 10, 64)
+		if now-startTime > int64(typingMaxDuration) {
+			// 窗口已过期，静默丢弃
+			c.ResponseOK()
+			return
+		}
+	} else {
+		// 新窗口：检查累计计数
+		countStr, _ := bf.ctx.GetRedisConn().GetString(typingCountKey)
+		if countStr != "" {
+			count, _ := strconv.ParseInt(countStr, 10, 64)
+			if count >= int64(typingMaxWindows) {
+				// 连续多次窗口未发消息，永久静默
+				c.ResponseOK()
+				return
+			}
+		}
+		// 开启新窗口
+		bf.ctx.GetRedisConn().SetAndExpire(typingStartKey, fmt.Sprintf("%d", now), time.Duration(typingKeyTTL)*time.Second)
+		bf.ctx.GetRedisConn().Incr(typingCountKey)
+		bf.ctx.GetRedisConn().SetExpire(typingCountKey, time.Duration(typingKeyTTL)*time.Second)
+	}
+
 	// DM 场景：param.channel_id 必须是 bot 自身 UID（或 Space 前缀），
 	// 因为客户端用 param.channel_id 匹配会话
 	paramChannelID := channelID
@@ -673,6 +712,14 @@ func (bf *BotFather) typing(c *wkhttp.Context) {
 		return
 	}
 	c.ResponseOK()
+}
+
+// clearTypingThrottle 重置 typing 限频状态（bot 发消息后调用）
+func (bf *BotFather) clearTypingThrottle(robotID string, channelID string, channelType uint8) {
+	typingStartKey := fmt.Sprintf("typing_start:%s:%s:%d", robotID, channelID, channelType)
+	typingCountKey := fmt.Sprintf("typing_count:%s:%s:%d", robotID, channelID, channelType)
+	bf.ctx.GetRedisConn().Del(typingStartKey)
+	bf.ctx.GetRedisConn().Del(typingCountKey)
 }
 
 // ========== Bot Read Receipt API ==========
