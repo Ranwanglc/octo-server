@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Mininglamp-OSS/octo-server/modules/base/app"
+	"github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -249,6 +250,39 @@ func (bf *BotFather) createUserBot(c *wkhttp.Context) {
 	// Fix friend version so WuKongIM SDK incremental sync picks up the relationship
 	bf.cmdHandler.fixFriendVersion(uid, robotID)
 	bf.cmdHandler.fixFriendVersion(robotID, uid)
+
+	// Add IM whitelist (both directions) — with Space prefix if applicable
+	userChannelID := uid
+	robotChannelID := robotID
+	spaceID = space.GetCommonSpaceID(bf.ctx, uid, robotID)
+	if spaceID != "" {
+		userChannelID = fmt.Sprintf("s%s_%s", spaceID, uid)
+		robotChannelID = fmt.Sprintf("s%s_%s", spaceID, robotID)
+	}
+	_ = bf.ctx.IMWhitelistAdd(config.ChannelWhitelistReq{
+		ChannelReq: config.ChannelReq{
+			ChannelID:   userChannelID,
+			ChannelType: common.ChannelTypePerson.Uint8(),
+		},
+		UIDs: []string{robotID},
+	})
+	_ = bf.ctx.IMWhitelistAdd(config.ChannelWhitelistReq{
+		ChannelReq: config.ChannelReq{
+			ChannelID:   robotChannelID,
+			ChannelType: common.ChannelTypePerson.Uint8(),
+		},
+		UIDs: []string{uid},
+	})
+
+	// Send friend accept notification so client updates conversation list
+	_ = bf.ctx.SendCMD(config.MsgCMDReq{
+		CMD:         common.CMDFriendAccept,
+		Subscribers: []string{uid, robotID},
+		Param: map[string]interface{}{
+			"to_uid":   uid,
+			"from_uid": robotID,
+		},
+	})
 
 	c.Response(&CreateBotResp{
 		RobotID:     robotID,
