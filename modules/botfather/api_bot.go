@@ -2,12 +2,16 @@ package botfather
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
+	"github.com/Mininglamp-OSS/octo-server/modules/group"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
 
@@ -183,4 +187,154 @@ func (bf *BotFather) getGroupMembers(c *wkhttp.Context) {
 	}
 
 	c.Response(members)
+}
+
+// getGroupMd returns GROUP.md content for a bot
+func (bf *BotFather) getGroupMd(c *wkhttp.Context) {
+	robotID := getRobotIDFromContext(c)
+	if robotID == "" {
+		c.ResponseError(errors.New("robot_id not found"))
+		return
+	}
+	groupNo := c.Param("group_no")
+
+	// Verify bot is a group member
+	isMember, err := bf.groupService.ExistMember(groupNo, robotID)
+	if err != nil {
+		bf.Error("check group membership failed", zap.Error(err))
+		c.ResponseError(errors.New("check group membership failed"))
+		return
+	}
+	if !isMember {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "bot is not a member of this group", "status": 403})
+		return
+	}
+
+	result, err := bf.groupService.GetGroupMd(groupNo)
+	if err != nil {
+		bf.Error("query GROUP.md failed", zap.Error(err))
+		c.ResponseError(errors.New("query GROUP.md failed"))
+		return
+	}
+	if result == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"content":    "",
+			"version":    0,
+			"updated_at": nil,
+			"updated_by": "",
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"content":    result.Content,
+		"version":    result.Version,
+		"updated_at": result.UpdatedAt,
+		"updated_by": result.UpdatedBy,
+	})
+}
+
+// updateGroupMd updates GROUP.md content by a bot
+func (bf *BotFather) updateGroupMd(c *wkhttp.Context) {
+	robotID := getRobotIDFromContext(c)
+	if robotID == "" {
+		c.ResponseError(errors.New("robot_id not found"))
+		return
+	}
+	groupNo := c.Param("group_no")
+
+	// Verify bot is a group member
+	isMember, err := bf.groupService.ExistMember(groupNo, robotID)
+	if err != nil {
+		bf.Error("check group membership failed", zap.Error(err))
+		c.ResponseError(errors.New("check group membership failed"))
+		return
+	}
+	if !isMember {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "bot is not a member of this group", "status": 403})
+		return
+	}
+
+	// Verify bot_admin
+	isBotAdmin, err := bf.groupService.IsBotAdmin(groupNo, robotID)
+	if err != nil {
+		bf.Error("check bot admin failed", zap.Error(err))
+		c.ResponseError(errors.New("check bot admin failed"))
+		return
+	}
+	if !isBotAdmin {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "bot is not a bot_admin in this group", "status": 403})
+		return
+	}
+
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("invalid request body"))
+		return
+	}
+
+	maxSize := group.GetGroupMdMaxSize()
+	if len(req.Content) > maxSize {
+		c.ResponseError(fmt.Errorf("GROUP.md content exceeds max size %d bytes", maxSize))
+		return
+	}
+
+	newVersion, err := bf.groupService.UpdateGroupMd(groupNo, req.Content, robotID)
+	if err != nil {
+		bf.Error("update GROUP.md failed", zap.Error(err))
+		c.ResponseError(errors.New("update GROUP.md failed"))
+		return
+	}
+
+	// Async send notification
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				bf.Error("sendGroupMdNotification panic", zap.Any("recover", r))
+			}
+		}()
+		bf.sendGroupMdNotification(groupNo, robotID, newVersion)
+	}()
+
+	c.JSON(http.StatusOK, gin.H{
+		"version": newVersion,
+	})
+}
+
+// sendGroupMdNotification sends GROUP.md event notification from bot
+func (bf *BotFather) sendGroupMdNotification(groupNo string, updatedBy string, version int64) {
+	botUIDs, err := bf.groupService.GetBotMemberUIDs(groupNo)
+	if err != nil {
+		bf.Error("query bot member UIDs failed", zap.Error(err))
+		return
+	}
+
+	payload := map[string]interface{}{
+		"type":    common.Text,
+		"content": "GROUP.md updated",
+		"event": map[string]interface{}{
+			"type":       "group_md_updated",
+			"version":    version,
+			"updated_by": updatedBy,
+		},
+	}
+	if len(botUIDs) > 0 {
+		payload["mention"] = map[string]interface{}{
+			"uids": botUIDs,
+		}
+	}
+
+	err = bf.ctx.SendMessage(&config.MsgSendReq{
+		Header: config.MsgHeader{
+			RedDot: 0,
+		},
+		ChannelID:   groupNo,
+		ChannelType: common.ChannelTypeGroup.Uint8(),
+		FromUID:     updatedBy,
+		Payload:     []byte(util.ToJson(payload)),
+	})
+	if err != nil {
+		bf.Error("send GROUP.md notification failed", zap.Error(err))
+	}
 }

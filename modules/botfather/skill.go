@@ -672,6 +672,60 @@ Save detailed explanations for DM conversations.
 | Bot-to-bot message loop | Bots replying to each other | v0.2.30+ auto-filters known bot UIDs. Ensure all bots run on same OpenClaw instance. |
 | Messages out of order | Async processing | Use message_seq for ordering |
 
+## GROUP.md Management
+
+GROUP.md is a markdown document that defines rules and instructions all bots in the group must follow.
+
+### Read GROUP.md (any group member bot)
+
+Any bot that is a member of the group can read GROUP.md:
+
+` + "```" + `bash
+curl -s %s/v1/bot/groups/{group_no}/md \
+  -H "Authorization: Bearer YOUR_BOT_TOKEN"
+` + "```" + `
+
+Response:
+` + "```" + `json
+{
+  "content": "# Rules\n- Reply in English only",
+  "version": 3,
+  "updated_at": "2026-03-18T10:00:00Z",
+  "updated_by": "user_uid"
+}
+` + "```" + `
+
+Returns empty content with version 0 if no GROUP.md exists.
+
+### Update GROUP.md (bot_admin only)
+
+Requires **bot_admin** permission in the group (set by group creator/manager):
+
+` + "```" + `bash
+curl -X PUT %s/v1/bot/groups/{group_no}/md \
+  -H "Authorization: Bearer YOUR_BOT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "# Rules\n- Reply in English only\n- Keep responses under 100 words"}'
+` + "```" + `
+
+Response:
+` + "```" + `json
+{"version": 4}
+` + "```" + `
+
+**Constraints:**
+- Max content size: 10240 bytes
+- **Read**: requires bot to be a group member
+- **Update**: requires bot_admin=1 in the group
+- Empty content effectively deletes the GROUP.md
+- Version auto-increments on each update
+
+**How GROUP.md works:**
+- When GROUP.md exists, its content is automatically injected into your system prompt for that group
+- You MUST follow the rules defined in GROUP.md
+- Group creators/managers can also edit GROUP.md from the web UI
+- When GROUP.md is updated/deleted, you receive a notification event in the group
+
 ## Rate Limiting (Recommended)
 
 To prevent abuse and control costs, implement rate limiting in your bot:

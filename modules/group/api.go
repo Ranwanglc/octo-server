@@ -98,6 +98,11 @@ func (g *Group) Route(r *wkhttp.WKHttp) {
 		groups.POST("/:group_no/avatar", g.avatarUpload)                                   // 上传群头像
 		groups.DELETE("/:group_no/disband", g.disband)                                     // 解散群
 		groups.GET("/:group_no/detail", g.groupDetailGet)                                  // 获取群详情
+		groups.GET("/:group_no/md", g.groupMdGet)                                          // 获取GROUP.md
+		groups.PUT("/:group_no/md", g.groupMdUpdate)                                       // 更新GROUP.md
+		groups.DELETE("/:group_no/md", g.groupMdDelete)                                    // 删除GROUP.md
+		groups.PUT("/:group_no/bot_admin/:uid", g.botAdminSet)                              // 设置Bot管理员
+		groups.DELETE("/:group_no/bot_admin/:uid", g.botAdminRemove)                        // 移除Bot管理员
 	}
 	openGroups := r.Group("/v1/groups")
 	{ // 获取群头像
@@ -3157,7 +3162,266 @@ func (g *Group) getGroupInfo(groupNo string) (*Model, error) {
 	return group, nil
 }
 
+// getGroupMdMaxSize is a convenience alias for GetGroupMdMaxSize (service layer)
+func getGroupMdMaxSize() int {
+	return GetGroupMdMaxSize()
+}
+
+// groupMdGet returns GROUP.md content for a group
+func (g *Group) groupMdGet(c *wkhttp.Context) {
+	groupNo := c.Param("group_no")
+	loginUID := c.GetLoginUID()
+
+	isMember, err := g.db.ExistMember(loginUID, groupNo)
+	if err != nil {
+		g.Error("check group member failed", zap.Error(err))
+		c.ResponseError(errors.New("check group member failed"))
+		return
+	}
+	if !isMember {
+		c.ResponseError(errors.New("no permission"))
+		return
+	}
+
+	result, err := g.db.QueryGroupMd(groupNo)
+	if err != nil {
+		g.Error("query GROUP.md failed", zap.Error(err))
+		c.ResponseError(errors.New("query GROUP.md failed"))
+		return
+	}
+	if result == nil {
+		c.Response(groupMdResp{
+			Content:   "",
+			Version:   0,
+			UpdatedAt: nil,
+			UpdatedBy: "",
+		})
+		return
+	}
+	c.Response(groupMdResp{
+		Content:   result.Content,
+		Version:   result.Version,
+		UpdatedAt: result.UpdatedAt,
+		UpdatedBy: result.UpdatedBy,
+	})
+}
+
+// groupMdUpdate creates or updates GROUP.md content
+func (g *Group) groupMdUpdate(c *wkhttp.Context) {
+	groupNo := c.Param("group_no")
+	loginUID := c.GetLoginUID()
+
+	isManagerOrCreator, err := g.db.QueryIsGroupManagerOrCreator(groupNo, loginUID)
+	if err != nil {
+		g.Error("check permission failed", zap.Error(err))
+		c.ResponseError(errors.New("check permission failed"))
+		return
+	}
+	if !isManagerOrCreator {
+		c.ResponseError(errors.New("only creator or manager can edit GROUP.md"))
+		return
+	}
+
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("invalid request body"))
+		return
+	}
+
+	maxSize := getGroupMdMaxSize()
+	if len(req.Content) > maxSize {
+		c.ResponseError(fmt.Errorf("GROUP.md content exceeds max size %d bytes", maxSize))
+		return
+	}
+
+	newVersion, err := g.db.UpdateGroupMd(groupNo, req.Content, loginUID)
+	if err != nil {
+		g.Error("update GROUP.md failed", zap.Error(err))
+		c.ResponseError(errors.New("update GROUP.md failed"))
+		return
+	}
+
+	// Async send notification
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				g.Error("sendGroupMdNotification panic", zap.Any("recover", r))
+			}
+		}()
+		g.sendGroupMdNotification(groupNo, loginUID, newVersion, "group_md_updated", "GROUP.md updated")
+	}()
+
+	c.Response(map[string]interface{}{
+		"version": newVersion,
+	})
+}
+
+// groupMdDelete deletes GROUP.md content
+func (g *Group) groupMdDelete(c *wkhttp.Context) {
+	groupNo := c.Param("group_no")
+	loginUID := c.GetLoginUID()
+
+	isManagerOrCreator, err := g.db.QueryIsGroupManagerOrCreator(groupNo, loginUID)
+	if err != nil {
+		g.Error("check permission failed", zap.Error(err))
+		c.ResponseError(errors.New("check permission failed"))
+		return
+	}
+	if !isManagerOrCreator {
+		c.ResponseError(errors.New("only creator or manager can delete GROUP.md"))
+		return
+	}
+
+	newVersion, err := g.db.DeleteGroupMd(groupNo)
+	if err != nil {
+		g.Error("delete GROUP.md failed", zap.Error(err))
+		c.ResponseError(errors.New("delete GROUP.md failed"))
+		return
+	}
+
+	// Async send notification
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				g.Error("sendGroupMdNotification panic", zap.Any("recover", r))
+			}
+		}()
+		g.sendGroupMdNotification(groupNo, loginUID, newVersion, "group_md_deleted", "GROUP.md deleted")
+	}()
+
+	c.ResponseOK()
+}
+
+// botAdminSet sets a bot member as bot_admin
+func (g *Group) botAdminSet(c *wkhttp.Context) {
+	groupNo := c.Param("group_no")
+	targetUID := c.Param("uid")
+	loginUID := c.GetLoginUID()
+
+	isManagerOrCreator, err := g.db.QueryIsGroupManagerOrCreator(groupNo, loginUID)
+	if err != nil {
+		g.Error("check permission failed", zap.Error(err))
+		c.ResponseError(errors.New("check permission failed"))
+		return
+	}
+	if !isManagerOrCreator {
+		c.ResponseError(errors.New("only creator or manager can set bot admin"))
+		return
+	}
+
+	// Verify target is a robot member
+	member, err := g.db.QueryMemberWithUID(targetUID, groupNo)
+	if err != nil {
+		g.Error("query member failed", zap.Error(err))
+		c.ResponseError(errors.New("query member failed"))
+		return
+	}
+	if member == nil {
+		c.ResponseError(errors.New("member not found in group"))
+		return
+	}
+	if member.Robot != 1 {
+		c.ResponseError(errors.New("target member is not a bot"))
+		return
+	}
+
+	version, err := g.ctx.GenSeq(common.GroupMemberSeqKey)
+	if err != nil {
+		g.Error("GenSeq failed", zap.Error(err))
+		c.ResponseError(errors.New("generate version failed"))
+		return
+	}
+
+	err = g.db.UpdateBotAdmin(groupNo, targetUID, 1, version)
+	if err != nil {
+		g.Error("set bot admin failed", zap.Error(err))
+		c.ResponseError(errors.New("set bot admin failed"))
+		return
+	}
+	c.ResponseOK()
+}
+
+// botAdminRemove removes bot_admin from a bot member
+func (g *Group) botAdminRemove(c *wkhttp.Context) {
+	groupNo := c.Param("group_no")
+	targetUID := c.Param("uid")
+	loginUID := c.GetLoginUID()
+
+	isManagerOrCreator, err := g.db.QueryIsGroupManagerOrCreator(groupNo, loginUID)
+	if err != nil {
+		g.Error("check permission failed", zap.Error(err))
+		c.ResponseError(errors.New("check permission failed"))
+		return
+	}
+	if !isManagerOrCreator {
+		c.ResponseError(errors.New("only creator or manager can remove bot admin"))
+		return
+	}
+
+	version, err := g.ctx.GenSeq(common.GroupMemberSeqKey)
+	if err != nil {
+		g.Error("GenSeq failed", zap.Error(err))
+		c.ResponseError(errors.New("generate version failed"))
+		return
+	}
+
+	err = g.db.UpdateBotAdmin(groupNo, targetUID, 0, version)
+	if err != nil {
+		g.Error("remove bot admin failed", zap.Error(err))
+		c.ResponseError(errors.New("remove bot admin failed"))
+		return
+	}
+	c.ResponseOK()
+}
+
+// sendGroupMdNotification sends GROUP.md event notification to the group
+func (g *Group) sendGroupMdNotification(groupNo string, updatedBy string, version int64, eventType string, contentText string) {
+	botUIDs, err := g.db.QueryBotMemberUIDs(groupNo)
+	if err != nil {
+		g.Error("query bot member UIDs failed", zap.Error(err))
+		return
+	}
+
+	payload := map[string]interface{}{
+		"type":    common.Text,
+		"content": contentText,
+		"event": map[string]interface{}{
+			"type":       eventType,
+			"version":    version,
+			"updated_by": updatedBy,
+		},
+	}
+	if len(botUIDs) > 0 {
+		payload["mention"] = map[string]interface{}{
+			"uids": botUIDs,
+		}
+	}
+
+	err = g.ctx.SendMessage(&config.MsgSendReq{
+		Header: config.MsgHeader{
+			RedDot: 0,
+		},
+		ChannelID:   groupNo,
+		ChannelType: common.ChannelTypeGroup.Uint8(),
+		FromUID:     updatedBy,
+		Payload:     []byte(util.ToJson(payload)),
+	})
+	if err != nil {
+		g.Error("send GROUP.md notification failed", zap.Error(err))
+	}
+}
+
 // ---------- vo ----------
+
+type groupMdResp struct {
+	Content   string     `json:"content"`
+	Version   int64      `json:"version"`
+	UpdatedAt *time.Time `json:"updated_at"`
+	UpdatedBy string     `json:"updated_by"`
+}
+
 
 type groupDetailResp struct {
 	GroupNo     string `json:"group_no"`  // 群编号
@@ -3198,6 +3462,7 @@ type memberDetailResp struct {
 	InviteUID          string `json:"invite_uid"`           // 邀请人
 	Robot              int    `json:"robot"`                // 机器人
 	ForbiddenExpirTime int64  `json:"forbidden_expir_time"` // 禁言时长
+	BotAdmin           int    `json:"bot_admin"`            // Bot管理员
 	CreatedAt          string `json:"created_at"`
 	UpdatedAt          string `json:"updated_at"`
 }
@@ -3217,6 +3482,7 @@ func (r memberDetailResp) from(model *MemberDetailModel) memberDetailResp {
 		InviteUID:          model.InviteUID,
 		Robot:              model.Robot,
 		ForbiddenExpirTime: model.ForbiddenExpirTime,
+		BotAdmin:           model.BotAdmin,
 		CreatedAt:          model.CreatedAt.String(),
 		UpdatedAt:          model.UpdatedAt.String(),
 	}

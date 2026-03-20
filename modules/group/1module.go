@@ -205,6 +205,15 @@ func newChannelRespWithGroupResp(groupResp *GroupResp) *model.ChannelResp {
 		extraMap["forbidden_expir_time"] = groupResp.ForbiddenExpirTime
 	}
 
+	// GROUP.md fields
+	extraMap["has_group_md"] = groupResp.HasGroupMd
+	extraMap["group_md_version"] = groupResp.GroupMdVersion
+	if groupResp.GroupMdUpdatedAt != nil {
+		extraMap["group_md_updated_at"] = *groupResp.GroupMdUpdatedAt
+	}
+	extraMap["can_edit_group_md"] = groupResp.CanEditGroupMd
+	extraMap["can_manage_bot_admin"] = groupResp.CanManageBotAdmin
+
 	resp.Extra = extraMap
 
 	return resp

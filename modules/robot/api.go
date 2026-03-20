@@ -101,6 +101,7 @@ func (rb *Robot) Route(r *wkhttp.WKHttp) {
 		robotAuth.POST("/stream/end", rb.streamEnd)                // 流式消息结束
 		robotAuth.GET("/file/*path", rb.proxyFile)                  // 文件下载代理
 		robotAuth.POST("/upload", rb.botUploadFile)                 // 文件上传
+		// GROUP.md routes are in botfather module (/v1/bot/groups/:group_no/md)
 
 	}
 

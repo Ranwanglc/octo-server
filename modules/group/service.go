@@ -2,6 +2,8 @@ package group
 
 import (
 	"errors"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -66,6 +68,16 @@ type IService interface {
 	GetMembersWithUIDAndGroupIds(uid string, groupNos []string) ([]*MemberResp, error)
 	// 查询一批群的管理员及群主
 	GetManagersWithGroupNos(groupNos []string) ([]*MemberResp, error)
+	// GetGroupMd returns GROUP.md content for a group
+	GetGroupMd(groupNo string) (*GroupMdResult, error)
+	// UpdateGroupMd updates GROUP.md content
+	UpdateGroupMd(groupNo string, content string, updatedBy string) (int64, error)
+	// DeleteGroupMd deletes GROUP.md content
+	DeleteGroupMd(groupNo string) (int64, error)
+	// IsBotAdmin checks if a member is a bot admin
+	IsBotAdmin(groupNo string, uid string) (bool, error)
+	// GetBotMemberUIDs returns UIDs of robot members in the group
+	GetBotMemberUIDs(groupNo string) ([]string, error)
 }
 
 // Service Service
@@ -231,6 +243,9 @@ func (s *Service) GetGroupDetail(groupNo string, uid string) (*GroupResp, error)
 	if memberOfMe != nil {
 		groupResp.Role = memberOfMe.Role
 		groupResp.ForbiddenExpirTime = memberOfMe.ForbiddenExpirTime
+		isManagerOrCreator := memberOfMe.Role == MemberRoleCreator || memberOfMe.Role == MemberRoleManager
+		groupResp.CanEditGroupMd = isManagerOrCreator
+		groupResp.CanManageBotAdmin = isManagerOrCreator
 	}
 	return groupResp, nil
 }
@@ -391,6 +406,26 @@ func (s *Service) GetMembersWithUIDAndGroupIds(uid string, groupNos []string) ([
 	return list, err
 }
 
+func (s *Service) GetGroupMd(groupNo string) (*GroupMdResult, error) {
+	return s.db.QueryGroupMd(groupNo)
+}
+
+func (s *Service) UpdateGroupMd(groupNo string, content string, updatedBy string) (int64, error) {
+	return s.db.UpdateGroupMd(groupNo, content, updatedBy)
+}
+
+func (s *Service) DeleteGroupMd(groupNo string) (int64, error) {
+	return s.db.DeleteGroupMd(groupNo)
+}
+
+func (s *Service) IsBotAdmin(groupNo string, uid string) (bool, error) {
+	return s.db.QueryIsBotAdmin(groupNo, uid)
+}
+
+func (s *Service) GetBotMemberUIDs(groupNo string) ([]string, error) {
+	return s.db.QueryBotMemberUIDs(groupNo)
+}
+
 // AddGroupReq 添加群
 type AddGroupReq struct {
 	GroupNo string
@@ -536,13 +571,18 @@ type GroupResp struct {
 	Role                     int       `json:"role"`                        // 我在群聊里的角色
 	ForbiddenExpirTime       int64     `json:"forbidden_expir_time"`        // 我在此群的禁言过期时间
 	AllowMemberPinnedMessage int       `json:"allow_member_pinned_message"` //是否允许群成员置顶消息
+	HasGroupMd               bool      `json:"has_group_md"`                // 是否有GROUP.md
+	GroupMdVersion           int64     `json:"group_md_version"`            // GROUP.md版本
+	GroupMdUpdatedAt         *string   `json:"group_md_updated_at"`         // GROUP.md最后更新时间
+	CanEditGroupMd           bool      `json:"can_edit_group_md"`           // 是否可编辑GROUP.md
+	CanManageBotAdmin        bool      `json:"can_manage_bot_admin"`        // 是否可管理Bot管理员
 	CreatedAt                string    `json:"created_at"`
 	UpdatedAt                string    `json:"updated_at"`
 	Version                  int64     `json:"version"` // 群数据版本
 }
 
 func (g *GroupResp) from(model *DetailModel) *GroupResp {
-	return &GroupResp{
+	resp := &GroupResp{
 		GroupNo:                  model.GroupNo,
 		GroupType:                GroupType(model.GroupType),
 		Category:                 model.Category,
@@ -567,13 +607,20 @@ func (g *GroupResp) from(model *DetailModel) *GroupResp {
 		Status:                   model.Status,
 		AllowViewHistoryMsg:      model.AllowViewHistoryMsg,
 		AllowMemberPinnedMessage: model.AllowMemberPinnedMessage,
+		HasGroupMd:               model.GroupMd != nil && *model.GroupMd != "",
+		GroupMdVersion:           model.GroupMdVersion,
 		CreatedAt:                model.CreatedAt.String(),
 		UpdatedAt:                model.UpdatedAt.String(),
 	}
+	if model.GroupMdUpdatedAt != nil {
+		t := model.GroupMdUpdatedAt.Format("2006-01-02 15:04:05")
+		resp.GroupMdUpdatedAt = &t
+	}
+	return resp
 }
 
 func (g *GroupResp) fromModel(model *Model) *GroupResp {
-	return &GroupResp{
+	resp := &GroupResp{
 		GroupNo:                  model.GroupNo,
 		GroupType:                GroupType(model.GroupType),
 		Category:                 model.Category,
@@ -585,7 +632,25 @@ func (g *GroupResp) fromModel(model *Model) *GroupResp {
 		Status:                   model.Status,
 		AllowViewHistoryMsg:      model.AllowViewHistoryMsg,
 		AllowMemberPinnedMessage: model.AllowMemberPinnedMessage,
+		HasGroupMd:               model.GroupMd != nil && *model.GroupMd != "",
+		GroupMdVersion:           model.GroupMdVersion,
 		CreatedAt:                model.CreatedAt.String(),
 		UpdatedAt:                model.UpdatedAt.String(),
 	}
+	if model.GroupMdUpdatedAt != nil {
+		t := model.GroupMdUpdatedAt.Format("2006-01-02 15:04:05")
+		resp.GroupMdUpdatedAt = &t
+	}
+	return resp
+}
+
+// GetGroupMdMaxSize returns the max GROUP.md size from env or default (10240)
+func GetGroupMdMaxSize() int {
+	val := os.Getenv("TS_GROUPMDMAXSIZE")
+	if val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 10240
 }
