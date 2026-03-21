@@ -1337,6 +1337,7 @@ func (rb *Robot) botUploadCredentials(c *wkhttp.Context) {
 		},
 		"startTime":   res.StartTime,
 		"expiredTime": res.ExpiredTime,
+		"cdnBaseUrl":  cosConfig.BucketURL,
 	})
 }
 
