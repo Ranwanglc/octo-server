@@ -138,3 +138,45 @@ func TestDeleteBotCleansUpFriends(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, 2, count)
 }
+
+// TestDeleteBotReleasesUsername verifies that deleteRobot clears the username
+// field so that existRobotByUsername no longer considers it occupied.
+func TestDeleteBotReleasesUsername(t *testing.T) {
+	_, ctx := testutil.NewTestServer()
+
+	db := newBotfatherDB(ctx)
+
+	robotID := "test_bot_username_release"
+	username := "reuse_me_bot"
+
+	// Insert a robot with a username directly via SQL
+	_, err := ctx.DB().InsertInto("robot").Columns(
+		"robot_id", "username", "status", "version",
+	).Values(robotID, username, 1, 1).Exec()
+	assert.NoError(t, err)
+
+	// Confirm username is occupied
+	exists, err := db.existRobotByUsername(username)
+	assert.NoError(t, err)
+	assert.True(t, exists, "username should be occupied before delete")
+
+	// Delete the robot
+	err = db.deleteRobot(robotID)
+	assert.NoError(t, err)
+
+	// Confirm username is now free
+	exists, err = db.existRobotByUsername(username)
+	assert.NoError(t, err)
+	assert.False(t, exists, "username should be free after delete")
+
+	// Verify a new bot can reuse the same username (real-world scenario)
+	newRobotID := "test_bot_username_reuse_new"
+	_, err = ctx.DB().InsertInto("robot").Columns(
+		"robot_id", "username", "status", "version",
+	).Values(newRobotID, username, 1, 1).Exec()
+	assert.NoError(t, err, "should be able to create new bot with same username after delete")
+
+	exists, err = db.existRobotByUsername(username)
+	assert.NoError(t, err)
+	assert.True(t, exists, "new bot should now occupy the username")
+}

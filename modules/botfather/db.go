@@ -109,10 +109,11 @@ func (d *botfatherDB) updateRobotDescription(robotID string, description string)
 	return err
 }
 
-// deleteRobot 删除机器人（软删除 - 设置status=0）
+// deleteRobot 软删除机器人（status=0）并清除 username 以释放标识符供复用。
 func (d *botfatherDB) deleteRobot(robotID string) error {
 	_, err := d.session.Update("robot").SetMap(map[string]interface{}{
-		"status": 0,
+		"status":   0,
+		"username": "",
 	}).Where("robot_id=?", robotID).Exec()
 	return err
 }
@@ -151,9 +152,8 @@ func (d *botfatherDB) updateBotCommands(robotID string, botCommands string) erro
 	return err
 }
 
-// existRobotByUsername 检查用户名是否已被占用（包括已软删除的记录）。
-// 设计意图：移除 status=1 过滤条件，防止新 Bot 复用已删除 Bot 的 username，
-// 避免因 username 唯一约束导致的数据冲突和潜在的消息路由混乱。
+// existRobotByUsername 检查用户名是否被现存记录占用。
+// 已删除的 Bot 会在 deleteRobot 中清空 username，因此不会阻止标识符复用。
 func (d *botfatherDB) existRobotByUsername(username string) (bool, error) {
 	var count int
 	err := d.session.Select("count(*)").From("robot").Where("username=?", username).LoadOne(&count)
