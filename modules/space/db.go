@@ -148,10 +148,14 @@ func (d *DB) queryMembers(spaceId string, loginUID string, page uint64, limit ui
 		FROM space_member sm
 		LEFT JOIN user u ON u.uid=sm.uid
 		LEFT JOIN robot r ON r.robot_id=sm.uid
-		WHERE sm.space_id=? AND sm.status=1 AND (r.robot_id IS NULL OR r.creator_uid = ?)
+		WHERE sm.space_id=? AND sm.status=1 AND (
+			r.robot_id IS NULL
+			OR r.creator_uid = ?
+			OR EXISTS (SELECT 1 FROM friend f WHERE f.uid = ? AND f.to_uid = sm.uid AND f.is_deleted = 0)
+		)
 		ORDER BY sm.role DESC, sm.created_at ASC
 		LIMIT ? OFFSET ?
-	`, spaceId, loginUID, limit, (page-1)*limit).Load(&models)
+	`, spaceId, loginUID, loginUID, limit, (page-1)*limit).Load(&models)
 	return models, err
 }
 
