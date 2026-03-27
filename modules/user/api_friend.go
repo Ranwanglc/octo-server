@@ -381,8 +381,11 @@ func (f *Friend) friendApply(c *wkhttp.Context) {
 		}
 	}
 
-	// 提取 space_id（提前到 cache 写入前，确保持久化）
-	spaceID := c.Query("space_id")
+	// 提取 space_id：body > query > header（客户端可能从任意层传递）
+	spaceID := req.SpaceID
+	if spaceID == "" {
+		spaceID = c.Query("space_id")
+	}
 	if spaceID == "" {
 		spaceID = c.GetHeader("X-Space-ID")
 	}
@@ -651,7 +654,11 @@ func (f *Friend) friendSure(c *wkhttp.Context) {
 		c.ResponseError(err)
 		return
 	}
-	spaceID := c.Query("space_id")
+	// 提取 space_id：body > query > header
+	spaceID := req.SpaceID
+	if spaceID == "" {
+		spaceID = c.Query("space_id")
+	}
 	if spaceID == "" {
 		spaceID = c.GetHeader("X-Space-ID")
 	}
@@ -1119,9 +1126,10 @@ func (f *Friend) remark(c *wkhttp.Context) {
 // ---------- vo ----------
 // 好友申请请求
 type applyReq struct {
-	ToUID   string `json:"to_uid"`  // 向谁申请好友
-	Remark  string `json:"remark"`  // 备注
-	Vercode string `json:"vercode"` // 验证码
+	ToUID   string `json:"to_uid"`   // 向谁申请好友
+	Remark  string `json:"remark"`   // 备注
+	Vercode string `json:"vercode"`  // 验证码
+	SpaceID string `json:"space_id"` // Space ID（可选，客户端从 body 传递）
 }
 
 // 修改好友备注请求
@@ -1141,7 +1149,8 @@ func (r applyReq) Check() error {
 }
 
 type sureReq struct {
-	Token string `json:"token"` // 收到申请的token
+	Token   string `json:"token"`    // 收到申请的token
+	SpaceID string `json:"space_id"` // Space ID（可选，客户端从 body 传递）
 }
 
 func (r sureReq) Check() error {
