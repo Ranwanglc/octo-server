@@ -15,7 +15,7 @@ const (
 	maxChatContextLength = 10000           // max chat_context characters
 )
 
-var defaultModels = []string{"gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro"}
+var defaultModels = []string{"gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-2.5-pro"}
 
 // VoiceConfig holds configuration for voice transcription
 type VoiceConfig struct {

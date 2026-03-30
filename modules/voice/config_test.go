@@ -27,7 +27,7 @@ func TestNewVoiceConfigFromEnv_Defaults(t *testing.T) {
 	assert.Equal(t, "", cfg.LiteLLMKey)
 	assert.Equal(t, 30, cfg.Timeout)
 	assert.Equal(t, 45, cfg.TotalTimeout)
-	assert.Equal(t, []string{"gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro"}, cfg.Models)
+	assert.Equal(t, []string{"gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-2.5-pro"}, cfg.Models)
 	assert.Equal(t, 60, cfg.MaxDuration)
 	assert.Equal(t, int64(5*1024*1024), cfg.MaxFileSize)
 }
