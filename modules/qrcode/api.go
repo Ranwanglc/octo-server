@@ -220,7 +220,8 @@ func (q *QRCode) handleJoinGroup(loginUID string, qrCodeModel common.QRCodeModel
 	if err != nil {
 		return nil, err
 	}
-	return NewHandleResult(ForwardH5, HandlerTypeWebView, map[string]interface{}{
-		"url": fmt.Sprintf("%s/join_group.html?group_no=%s&auth_code=%s", q.ctx.GetConfig().External.H5BaseURL, groupNo, authCode),
+	return NewHandleResult(ForwardNative, HandlerTypeGroup, map[string]interface{}{
+		"group_no":  groupNo,
+		"auth_code": authCode,
 	}), nil
 }
