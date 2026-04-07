@@ -129,6 +129,15 @@ func (d *DB) queryMember(spaceId string, uid string) (*MemberModel, error) {
 	return &m, err
 }
 
+// IsMember 检查用户是否是 Space 成员
+func (d *DB) IsMember(spaceId string, uid string) (bool, error) {
+	m, err := d.queryMember(spaceId, uid)
+	if err != nil {
+		return false, err
+	}
+	return m != nil, nil
+}
+
 // queryMemberIncludeRemoved 查询成员（包括已移除的），用于判断是否曾经加入过
 func (d *DB) queryMemberIncludeRemoved(spaceId string, uid string) (*MemberModel, error) {
 	var m MemberModel
