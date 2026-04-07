@@ -3,6 +3,7 @@ package event
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -176,7 +177,7 @@ func (e *Event) handleGroupAvatarUpdateEvent(model *Model) {
 				if len(downloadURLs) >= 9 {
 					break
 				}
-				downloadURLs = append(downloadURLs, fmt.Sprintf("%s/users/%s/avatar", e.ctx.GetConfig().External.APIBaseURL, member))
+				downloadURLs = append(downloadURLs, fmt.Sprintf("%s/users/%s/avatar?t=%d", e.ctx.GetConfig().External.APIBaseURL, member, time.Now().UnixNano()))
 			}
 			uploadPath := e.ctx.GetConfig().GetGroupAvatarFilePath(req.GroupNo)
 			_, err = e.fileService.DownloadAndMakeCompose(uploadPath, downloadURLs)
