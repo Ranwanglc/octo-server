@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
+	"github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -38,6 +39,7 @@ type QRCode struct {
 	ctx *config.Context
 	log.Log
 	groupDB     *group.DB
+	spaceDB     *space.DB
 	userService user.IService
 }
 
@@ -47,6 +49,7 @@ func New(ctx *config.Context) *QRCode {
 		ctx:         ctx,
 		Log:         log.NewTLog("QRCode"),
 		groupDB:     group.NewDB(ctx),
+		spaceDB:     space.NewDB(ctx),
 		userService: user.NewService(ctx),
 	}
 }
@@ -201,15 +204,6 @@ func (q *QRCode) handleJoinGroup(loginUID string, qrCodeModel common.QRCodeModel
 		return nil, errors.New("invalid QR code data: missing or invalid generator")
 	}
 
-	exist, err := q.groupDB.ExistMember(loginUID, groupNo) // 已在群内
-	if err != nil {
-		return nil, err
-	}
-	if exist {
-		return NewHandleResult(ForwardNative, HandlerTypeGroup, map[string]interface{}{
-			"group_no": groupNo,
-		}), nil
-	}
 	// 查询群信息用于预览
 	groupModel, err := q.groupDB.QueryWithGroupNo(groupNo)
 	if err != nil {
@@ -218,9 +212,35 @@ func (q *QRCode) handleJoinGroup(loginUID string, qrCodeModel common.QRCodeModel
 	if groupModel == nil {
 		return nil, errors.New("群不存在")
 	}
+
+	// 检查用户是否在群所属的 Space 中
+	if groupModel.SpaceID != "" {
+		isMember, err := q.spaceDB.IsMember(groupModel.SpaceID, loginUID)
+		if err != nil {
+			return nil, err
+		}
+		if !isMember {
+			return nil, errors.New("请先加入该空间后再扫码入群")
+		}
+	}
+
 	memberCount, err := q.groupDB.QueryMemberCount(groupNo)
 	if err != nil {
 		return nil, err
+	}
+
+	exist, err := q.groupDB.ExistMember(loginUID, groupNo) // 已在群内
+	if err != nil {
+		return nil, err
+	}
+	if exist {
+		return NewHandleResult(ForwardNative, HandlerTypeGroup, map[string]interface{}{
+			"group_no":     groupNo,
+			"name":         groupModel.Name,
+			"avatar":       fmt.Sprintf("groups/%s/avatar", groupNo),
+			"member_count": memberCount,
+			"is_member":    true, // 标识已在群内
+		}), nil
 	}
 
 	authCode := util.GenerUUID()
