@@ -169,7 +169,8 @@ func (s *VoiceService) callLiteLLM(totalCtx context.Context, model string, audio
 	b64Audio := base64.StdEncoding.EncodeToString(audioData)
 
 	reqBody := chatCompletionRequest{
-		Model: model,
+		Model:           model,
+		ReasoningEffort: "low",
 		Messages: []message{
 			{
 				Role: "user",
@@ -400,8 +401,9 @@ func isNonRetryableError(err error) bool {
 // Request/response types for OpenAI-compatible chat completion API
 
 type chatCompletionRequest struct {
-	Model    string    `json:"model"`
-	Messages []message `json:"messages"`
+	Model            string            `json:"model"`
+	Messages         []message         `json:"messages"`
+	ReasoningEffort  string            `json:"reasoning_effort,omitempty"`
 }
 
 type message struct {
