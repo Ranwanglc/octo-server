@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"strings"
 	"time"
@@ -27,9 +28,19 @@ func NewVoiceService(cfg *VoiceConfig) *VoiceService {
 	}
 }
 
-// Transcribe transcribes audio data using the configured model fallback chain.
+// Transcribe transcribes audio data using the configured engine.
 // Returns the transcribed text, the model used, or an error.
 func (s *VoiceService) Transcribe(audioData []byte, mimeType string, contextText string, chatContext string) (string, string, error) {
+	switch s.config.Engine {
+	case "gpt":
+		return s.transcribeViaAudioAPI(audioData, mimeType, contextText, chatContext)
+	default:
+		return s.transcribeViaChatCompletion(audioData, mimeType, contextText, chatContext)
+	}
+}
+
+// transcribeViaChatCompletion uses the /chat/completions endpoint (Gemini path)
+func (s *VoiceService) transcribeViaChatCompletion(audioData []byte, mimeType string, contextText string, chatContext string) (string, string, error) {
 	prompt := buildPrompt(contextText, chatContext)
 
 	totalCtx, totalCancel := context.WithTimeout(context.Background(), time.Duration(s.config.TotalTimeout)*time.Second)
@@ -37,7 +48,6 @@ func (s *VoiceService) Transcribe(audioData []byte, mimeType string, contextText
 
 	var lastErr error
 	for _, model := range s.config.Models {
-		// Check if total deadline already expired
 		if totalCtx.Err() != nil {
 			break
 		}
@@ -49,7 +59,6 @@ func (s *VoiceService) Transcribe(audioData []byte, mimeType string, contextText
 
 		lastErr = err
 
-		// Only retry on 429, 5xx, or timeout; 4xx (except 429) returns immediately
 		if isNonRetryableError(err) {
 			return "", model, err
 		}
@@ -59,6 +68,43 @@ func (s *VoiceService) Transcribe(audioData []byte, mimeType string, contextText
 		lastErr = fmt.Errorf("no models configured")
 	}
 	return "", "", fmt.Errorf("all models failed: %w", lastErr)
+}
+
+// transcribeViaAudioAPI uses the /audio/transcriptions endpoint (GPT path)
+func (s *VoiceService) transcribeViaAudioAPI(audioData []byte, mimeType string, contextText string, chatContext string) (string, string, error) {
+	prompt := buildPrompt(contextText, chatContext)
+
+	totalCtx, totalCancel := context.WithTimeout(context.Background(), time.Duration(s.config.TotalTimeout)*time.Second)
+	defer totalCancel()
+
+	var lastErr error
+	for _, model := range s.config.GPTModels {
+		if totalCtx.Err() != nil {
+			break
+		}
+
+		text, err := s.callAudioTranscriptions(totalCtx, model, audioData, mimeType, prompt)
+		if err == nil {
+			if text == "" {
+				return "", model, nil
+			}
+			if isNoSpeech(text) {
+				return "", model, nil
+			}
+			return text, model, nil
+		}
+
+		lastErr = err
+
+		if isNonRetryableError(err) {
+			return "", model, err
+		}
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no GPT models configured")
+	}
+	return "", "", fmt.Errorf("all GPT models failed: %w", lastErr)
 }
 
 // callLiteLLM sends a chat completion request to LiteLLM with audio content.
@@ -141,6 +187,68 @@ func (s *VoiceService) callLiteLLM(totalCtx context.Context, model string, audio
 	}
 
 	return result, nil
+}
+
+// callAudioTranscriptions calls /audio/transcriptions (multipart form)
+func (s *VoiceService) callAudioTranscriptions(totalCtx context.Context, model string,
+	audioData []byte, mimeType string, prompt string) (string, error) {
+
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	writer.WriteField("model", model)
+
+	if s.config.Language != "" {
+		writer.WriteField("language", s.config.Language)
+	}
+
+	if prompt != "" {
+		writer.WriteField("prompt", prompt)
+	}
+
+	ext := mimeTypeToFormat(mimeType)
+	part, err := writer.CreateFormFile("file", "audio."+ext)
+	if err != nil {
+		return "", fmt.Errorf("create form file: %w", err)
+	}
+	part.Write(audioData)
+	writer.Close()
+
+	perModelTimeout := time.Duration(s.config.Timeout) * time.Second
+	ctx, cancel := context.WithTimeout(totalCtx, perModelTimeout)
+	defer cancel()
+
+	url := strings.TrimRight(s.config.LiteLLMUrl, "/") + "/audio/transcriptions"
+	req, err := http.NewRequestWithContext(ctx, "POST", url, &buf)
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+s.config.LiteLLMKey)
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", &apiError{StatusCode: resp.StatusCode, Body: string(respBody)}
+	}
+
+	var result struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("parse response: %w", err)
+	}
+
+	return strings.TrimSpace(result.Text), nil
 }
 
 // mimeTypeToFormat converts MIME type to a short format string for the API

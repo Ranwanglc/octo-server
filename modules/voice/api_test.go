@@ -97,6 +97,7 @@ func TestTranscribeAPI_Success(t *testing.T) {
 		Models:       []string{"test-model"},
 		MaxDuration:  60,
 		MaxFileSize:  5 * 1024 * 1024,
+		Engine:       "gemini",
 	}
 
 	router := setupTestRouter(cfg, "")
@@ -112,7 +113,8 @@ func TestTranscribeAPI_Success(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, float64(200), resp["status"])
 	assert.Equal(t, "Transcribed text", resp["text"])
-	assert.Equal(t, "test-model", resp["model"])
+	assert.Equal(t, "test-model", resp["m"])
+	assert.Equal(t, "ge", resp["engine"])
 }
 
 func TestTranscribeAPI_WithContextText(t *testing.T) {
@@ -326,7 +328,7 @@ func TestTranscribeAPI_WithChatContext(t *testing.T) {
 		json.NewDecoder(r.Body).Decode(&req)
 
 		prompt := req.Messages[0].Content[0].Text
-		assert.Contains(t, prompt, "以下是当前聊天的最近对话记录")
+		assert.Contains(t, prompt, "以下聊天记录仅用于辅助识别专有名词拼写")
 		assert.Contains(t, prompt, "Alice: 明天开会")
 
 		resp := chatCompletionResponse{
@@ -441,4 +443,136 @@ func TestTranscribeAPI_EmptyChatContext(t *testing.T) {
 	var resp map[string]interface{}
 	json.Unmarshal(w.Body.Bytes(), &resp)
 	assert.Equal(t, "plain transcription", resp["text"])
+}
+
+func TestTranscribeAPI_GPTEngine(t *testing.T) {
+	litellmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/audio/transcriptions", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"text": "GPT transcribed"})
+	}))
+	defer litellmServer.Close()
+
+	cfg := &VoiceConfig{
+		LiteLLMUrl:   litellmServer.URL,
+		LiteLLMKey:   "test-key",
+		Timeout:      5,
+		TotalTimeout: 10,
+		Engine:       "gpt",
+		GPTModels:    []string{"gpt-4o-mini-transcribe"},
+		MaxDuration:  60,
+		MaxFileSize:  5 * 1024 * 1024,
+	}
+
+	router := setupTestRouter(cfg, "")
+
+	w := httptest.NewRecorder()
+	req := createMultipartRequest(t, "/v1/voice/transcribe", []byte("fake-audio"), "")
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.Equal(t, "GPT transcribed", resp["text"])
+	assert.Equal(t, "g4omt", resp["m"])
+	assert.Equal(t, "gt", resp["engine"])
+}
+
+func TestTranscribeAPI_GeminiEngineShortened(t *testing.T) {
+	litellmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "Gemini text"}}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer litellmServer.Close()
+
+	cfg := &VoiceConfig{
+		LiteLLMUrl:   litellmServer.URL,
+		LiteLLMKey:   "test-key",
+		Timeout:      5,
+		TotalTimeout: 10,
+		Engine:       "gemini",
+		Models:       []string{"gemini-3-flash-preview"},
+		MaxDuration:  60,
+		MaxFileSize:  5 * 1024 * 1024,
+	}
+
+	router := setupTestRouter(cfg, "")
+
+	w := httptest.NewRecorder()
+	req := createMultipartRequest(t, "/v1/voice/transcribe", []byte("fake-audio"), "")
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.Equal(t, "ge", resp["engine"])
+}
+
+func TestGetConfigAPI_EngineGemini(t *testing.T) {
+	cfg := &VoiceConfig{
+		LiteLLMUrl:   "https://example.com",
+		LiteLLMKey:   "test-key",
+		Timeout:      5,
+		TotalTimeout: 10,
+		Engine:       "gemini",
+		Models:       []string{"test-model"},
+		MaxDuration:  90,
+		MaxFileSize:  5 * 1024 * 1024,
+	}
+
+	router := setupTestRouter(cfg, "")
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/voice/config", nil)
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.Equal(t, "ge", resp["engine"])
+}
+
+func TestGetConfigAPI_EngineGPT(t *testing.T) {
+	cfg := &VoiceConfig{
+		LiteLLMUrl:   "https://example.com",
+		LiteLLMKey:   "test-key",
+		Timeout:      5,
+		TotalTimeout: 10,
+		Engine:       "gpt",
+		GPTModels:    []string{"gpt-4o-mini-transcribe"},
+		MaxDuration:  90,
+		MaxFileSize:  5 * 1024 * 1024,
+	}
+
+	router := setupTestRouter(cfg, "")
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/voice/config", nil)
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.Equal(t, "gt", resp["engine"])
+}
+
+func TestShortenModelName_GPT(t *testing.T) {
+	assert.Equal(t, "g4omt", shortenModelName("gpt-4o-mini-transcribe"))
+	assert.Equal(t, "g31pp", shortenModelName("gemini-3.1-pro-preview"))
+	assert.Equal(t, "g3fp", shortenModelName("gemini-3-flash-preview"))
+	assert.Equal(t, "g25p", shortenModelName("gemini-2.5-pro"))
+	assert.Equal(t, "unknown-model", shortenModelName("unknown-model"))
+}
+
+func TestShortenEngineName(t *testing.T) {
+	assert.Equal(t, "ge", shortenEngineName("gemini"))
+	assert.Equal(t, "gt", shortenEngineName("gpt"))
+	assert.Equal(t, "unknown", shortenEngineName("unknown"))
 }

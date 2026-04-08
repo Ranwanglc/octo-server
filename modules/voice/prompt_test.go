@@ -10,7 +10,7 @@ import (
 func TestBuildPrompt_NoContext(t *testing.T) {
 	prompt := buildPrompt("", "")
 	assert.Equal(t, transcribePrompt, prompt)
-	assert.Contains(t, prompt, "准确转写为文字")
+	assert.Contains(t, prompt, "语音转写器")
 	assert.NotContains(t, prompt, "已有文本")
 }
 
@@ -20,7 +20,7 @@ func TestBuildPrompt_WithContext(t *testing.T) {
 
 	assert.Contains(t, prompt, "已有文本")
 	assert.Contains(t, prompt, contextText)
-	assert.Contains(t, prompt, "修改或补充")
+	assert.Contains(t, prompt, "编辑指令")
 	assert.NotEqual(t, transcribePrompt, prompt)
 }
 
@@ -38,9 +38,9 @@ func TestBuildPrompt_WithChatContext_TranscribeMode(t *testing.T) {
 	chatCtx := "Alice: 你好\nBob: 你好啊"
 	prompt := buildPrompt("", chatCtx)
 
-	assert.Contains(t, prompt, "以下是当前聊天的最近对话记录")
+	assert.Contains(t, prompt, "以下聊天记录仅用于辅助识别专有名词拼写")
 	assert.Contains(t, prompt, chatCtx)
-	assert.Contains(t, prompt, "准确转写为文字")
+	assert.Contains(t, prompt, "语音转写器")
 	assert.NotContains(t, prompt, "已有文本")
 }
 
@@ -49,11 +49,11 @@ func TestBuildPrompt_WithChatContext_ModifyMode(t *testing.T) {
 	contextText := "existing text"
 	prompt := buildPrompt(contextText, chatCtx)
 
-	assert.Contains(t, prompt, "以下是当前聊天的最近对话记录")
+	assert.Contains(t, prompt, "以下聊天记录仅用于辅助识别专有名词拼写")
 	assert.Contains(t, prompt, chatCtx)
 	assert.Contains(t, prompt, "已有文本")
 	assert.Contains(t, prompt, contextText)
-	assert.Contains(t, prompt, "修改或补充")
+	assert.Contains(t, prompt, "编辑指令")
 
 	// Chat context should appear before the main prompt
 	chatCtxIdx := strings.Index(prompt, chatCtx)
@@ -63,6 +63,6 @@ func TestBuildPrompt_WithChatContext_ModifyMode(t *testing.T) {
 
 func TestBuildPrompt_EmptyChatContext(t *testing.T) {
 	prompt := buildPrompt("", "")
-	assert.NotContains(t, prompt, "以下是当前聊天的最近对话记录")
+	assert.NotContains(t, prompt, "以下聊天记录仅用于辅助识别专有名词拼写")
 	assert.Equal(t, transcribePrompt, prompt)
 }

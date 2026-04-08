@@ -5,6 +5,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
+	"go.uber.org/zap"
 )
 
 const (
@@ -16,6 +19,7 @@ const (
 )
 
 var defaultModels = []string{"gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-2.5-pro"}
+var defaultGPTModels = []string{"gpt-4o-mini-transcribe"}
 
 // VoiceConfig holds configuration for voice transcription
 type VoiceConfig struct {
@@ -23,15 +27,20 @@ type VoiceConfig struct {
 	LiteLLMKey   string
 	Timeout      int      // per-model timeout in seconds
 	TotalTimeout int      // total timeout across all model fallbacks in seconds
-	Models       []string // model fallback chain
+	Models       []string // model fallback chain (Gemini engine)
 	MaxDuration  int      // max audio duration in seconds
 	MaxFileSize  int64    // max file size in bytes
+	Engine       string   // "gemini" or "gpt"
+	GPTModels    []string // model fallback chain for GPT engine
+	Language     string   // language code for GPT engine, empty = auto-detect
 }
 
 // NewVoiceConfigFromEnv reads voice config from environment variables
 func NewVoiceConfigFromEnv() *VoiceConfig {
 	models := make([]string, len(defaultModels))
 	copy(models, defaultModels)
+	gptModels := make([]string, len(defaultGPTModels))
+	copy(gptModels, defaultGPTModels)
 
 	cfg := &VoiceConfig{
 		LiteLLMUrl:   os.Getenv("VOICE_LITELLM_URL"),
@@ -41,6 +50,8 @@ func NewVoiceConfigFromEnv() *VoiceConfig {
 		Models:       models,
 		MaxDuration:  defaultMaxDuration,
 		MaxFileSize:  defaultMaxFileSize,
+		Engine:       "gemini",
+		GPTModels:    gptModels,
 	}
 
 	if v := os.Getenv("VOICE_LITELLM_TIMEOUT"); v != "" {
@@ -81,6 +92,32 @@ func NewVoiceConfigFromEnv() *VoiceConfig {
 		}
 	}
 
+	if v := os.Getenv("VOICE_ENGINE"); v != "" {
+		if v == "gpt" || v == "gemini" {
+			cfg.Engine = v
+		} else {
+			lg := log.NewTLog("VoiceConfig")
+			lg.Warn("unknown VOICE_ENGINE value, defaulting to gemini",
+				zap.String("value", v))
+		}
+	}
+
+	if v := os.Getenv("VOICE_GPT_MODELS"); v != "" {
+		parts := strings.Split(v, ",")
+		trimmed := make([]string, 0, len(parts))
+		for _, m := range parts {
+			m = strings.TrimSpace(m)
+			if m != "" {
+				trimmed = append(trimmed, m)
+			}
+		}
+		if len(trimmed) > 0 {
+			cfg.GPTModels = trimmed
+		}
+	}
+
+	cfg.Language = os.Getenv("VOICE_LANGUAGE")
+
 	return cfg
 }
 
@@ -92,8 +129,15 @@ func (c *VoiceConfig) Validate() error {
 	if c.LiteLLMKey == "" {
 		return errors.New("VOICE_LITELLM_KEY is required")
 	}
-	if len(c.Models) == 0 {
-		return errors.New("VOICE_MODELS is required")
+	switch c.Engine {
+	case "gpt":
+		if len(c.GPTModels) == 0 {
+			return errors.New("VOICE_GPT_MODELS is required when VOICE_ENGINE=gpt")
+		}
+	default: // gemini
+		if len(c.Models) == 0 {
+			return errors.New("VOICE_MODELS is required")
+		}
 	}
 	return nil
 }

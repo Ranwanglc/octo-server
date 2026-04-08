@@ -95,6 +95,7 @@ func (v *Voice) transcribe(c *wkhttp.Context) {
 		"status": http.StatusOK,
 		"text":   text,
 		"m":      shortenModelName(model),
+		"engine": shortenEngineName(v.cfg.Engine),
 	})
 }
 
@@ -104,6 +105,7 @@ func (v *Voice) getConfig(c *wkhttp.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"enabled":      enabled,
 		"max_duration": v.cfg.MaxDuration,
+		"engine":       shortenEngineName(v.cfg.Engine),
 	})
 }
 
@@ -115,7 +117,20 @@ func shortenModelName(model string) string {
 		return "g3fp"
 	case "gemini-2.5-pro":
 		return "g25p"
+	case "gpt-4o-mini-transcribe":
+		return "g4omt"
 	default:
 		return model
+	}
+}
+
+func shortenEngineName(engine string) string {
+	switch engine {
+	case "gemini":
+		return "ge"
+	case "gpt":
+		return "gt"
+	default:
+		return engine
 	}
 }
