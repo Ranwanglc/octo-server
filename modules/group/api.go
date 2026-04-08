@@ -1386,6 +1386,9 @@ func (g *Group) addMembers(members []string, groupNo string, operator, operatorN
 		commitCallback()
 	}
 
+	// 同步新成员到群内所有子区的 IM 订阅（允许发消息）
+	g.addUsersToGroupThreads(groupNo, members)
+
 	return nil
 }
 
@@ -2018,6 +2021,9 @@ func (g *Group) groupScanJoin(c *wkhttp.Context) {
 		c.ResponseError(errors.New("调用IM的订阅接口失败！"))
 		return
 	}
+
+	// 同步新成员到群内所有子区的 IM 订阅（允许发消息）
+	g.addUsersToGroupThreads(groupNo, []string{scaner})
 
 	g.ctx.EventCommit(eventID)
 	if groupAvatarEventID != 0 {
@@ -2823,6 +2829,43 @@ func (g *Group) removeUserFromGroupThreads(groupNo, uid string) {
 			Subscribers: []string{uid},
 		}); rmErr != nil {
 			g.Error("移除子区IM订阅者失败", zap.Error(rmErr), zap.String("channelID", channelID), zap.String("uid", uid))
+		}
+	}
+}
+
+// addUsersToGroupThreads 新成员入群时，将其加入该群所有子区的 IM 订阅（允许发消息）
+func (g *Group) addUsersToGroupThreads(groupNo string, uids []string) {
+	if len(uids) == 0 {
+		return
+	}
+
+	// 查询该群的所有活跃子区
+	type threadInfo struct {
+		ShortID string `db:"short_id"`
+	}
+	var threads []threadInfo
+	_, err := g.db.session.Select("short_id").
+		From("thread").
+		Where("group_no=? AND status!=3", groupNo). // status=3 是已删除
+		Load(&threads)
+	if err != nil {
+		g.Error("查询群子区失败", zap.Error(err), zap.String("groupNo", groupNo))
+		return
+	}
+	if len(threads) == 0 {
+		return
+	}
+
+	// 将新成员加入所有子区的 IM 订阅
+	for _, t := range threads {
+		// 子区 channelID 格式: {groupNo}____{shortID} (与 thread.BuildChannelID 一致)
+		channelID := groupNo + "____" + t.ShortID
+		if addErr := g.ctx.IMAddSubscriber(&config.SubscriberAddReq{
+			ChannelID:   channelID,
+			ChannelType: common.ChannelTypeCommunityTopic.Uint8(),
+			Subscribers: uids,
+		}); addErr != nil {
+			g.Error("添加子区IM订阅者失败", zap.Error(addErr), zap.String("channelID", channelID), zap.Strings("uids", uids))
 		}
 	}
 }

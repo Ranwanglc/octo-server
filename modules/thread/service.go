@@ -168,13 +168,23 @@ func (s *Service) CreateThread(req *CreateThreadReq) (*ThreadResp, error) {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
-	// 创建 IM 频道，只添加创建者为订阅者（只有主动加入的成员才收到消息通知）
-	// IMDatasource.Subscribers 返回父群所有成员用于发送权限校验
+	// 获取父群所有成员作为订阅者（所有群成员都有发消息权限）
+	// 注意：thread_member 表记录主动加入的成员（决定通知推送），这里是 IM 发送权限
+	members, err := s.groupService.GetMembers(req.GroupNo)
+	if err != nil {
+		return nil, fmt.Errorf("get group members: %w", err)
+	}
+	subscribers := make([]string, 0, len(members))
+	for _, m := range members {
+		subscribers = append(subscribers, m.UID)
+	}
+
+	// 创建 IM 频道
 	channelID := BuildChannelID(req.GroupNo, shortID)
 	err = s.ctx.IMCreateOrUpdateChannel(&config.ChannelCreateReq{
 		ChannelID:   channelID,
 		ChannelType: common.ChannelTypeCommunityTopic.Uint8(),
-		Subscribers: []string{req.CreatorUID},
+		Subscribers: subscribers,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create IM channel: %w", err)
