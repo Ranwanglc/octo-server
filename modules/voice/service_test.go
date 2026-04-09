@@ -1141,8 +1141,8 @@ func TestCallGPTWithModelFallback_NoModels(t *testing.T) {
 	assert.Contains(t, err.Error(), "no GPT models configured")
 }
 
-// --- contextText length truncation (maxContextTextLength) ---
+// --- contextText length truncation (MaxContextTextLength) ---
 
 func TestMaxContextTextLength_Constant(t *testing.T) {
-	assert.Equal(t, 10000, maxContextTextLength)
+	assert.Equal(t, 10000, MaxContextTextLength)
 }
