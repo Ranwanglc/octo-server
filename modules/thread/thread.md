@@ -105,6 +105,20 @@ CREATE TABLE `thread_member` (
 | POST | `/v1/threads/{short_id}/join` | 加入子区 |
 | POST | `/v1/threads/{short_id}/leave` | 离开子区 |
 
+### Bot API（需要 Bot Token 认证）
+
+Bot 通过 `Authorization: Bearer bf_xxx` 认证，必须是群成员才能操作。
+
+| Method | Path | 说明 |
+|--------|------|------|
+| POST | `/v1/bot/groups/{group_no}/threads` | 创建子区 |
+| GET | `/v1/bot/groups/{group_no}/threads` | 列出子区 |
+| GET | `/v1/bot/groups/{group_no}/threads/{short_id}` | 获取详情 |
+| DELETE | `/v1/bot/groups/{group_no}/threads/{short_id}` | 删除子区 |
+| GET | `/v1/bot/groups/{group_no}/threads/{short_id}/members` | 成员列表 |
+| POST | `/v1/bot/groups/{group_no}/threads/{short_id}/join` | 加入子区 |
+| POST | `/v1/bot/groups/{group_no}/threads/{short_id}/leave` | 离开子区 |
+
 ### 请求/响应示例
 
 #### 创建子区
