@@ -39,6 +39,7 @@ type Conversation struct {
 	channelOffsetDB     *channelOffsetDB
 	deviceOffsetDB      *deviceOffsetDB
 	userLastOffsetDB    *userLastOffsetDB
+	groupCategoryDB     *groupCategoryDB
 	userService         user.IService
 	groupService        group.IService
 	service             IService
@@ -63,6 +64,7 @@ func NewConversation(ctx *config.Context) *Conversation {
 		channelOffsetDB:                newChannelOffsetDB(ctx),
 		deviceOffsetDB:                 newDeviceOffsetDB(ctx.DB()),
 		userLastOffsetDB:               newUserLastOffsetDB(ctx),
+		groupCategoryDB:                newGroupCategoryDB(ctx),
 		conversationExtraDB:            newConversationExtraDB(ctx),
 		userService:                    user.NewService(ctx),
 		groupService:                   group.NewService(ctx),
@@ -473,6 +475,20 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 		}
 	}
 
+	// ---------- 群组分类  ----------
+	groupCategoryMap := map[string]*GroupCategorySetting{}
+	if len(groupNos) > 0 {
+		categorySettings, err := co.groupCategoryDB.QueryCategorySettingsByGroupNos(groupNos, loginUID)
+		if err != nil {
+			co.Error("查询群组分类失败！", zap.Error(err))
+			// 不阻塞流程，category 查询失败时继续返回会话列表
+		} else if len(categorySettings) > 0 {
+			for _, setting := range categorySettings {
+				groupCategoryMap[setting.GroupNo] = setting
+			}
+		}
+	}
+
 	// ---------- 用户频道消息偏移  ----------
 	channelOffsetModelMap := map[string]*channelOffsetModel{}
 	if len(channelIDs) > 0 {
@@ -544,6 +560,13 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 			deviceOffsetM := deviceOffsetModelMap[channelKey]
 			extra := conversationExtraMap[channelKey]
 			syncUserConversationResp := newSyncUserConversationResp(conversation, extra, loginUID, co.messageExtraDB, co.messageReactionDB, co.messageUserExtraDB, mute, stick, channelOffsetM, deviceOffsetM, channelOffsetMessageSeq)
+			// 填充群组分类信息
+			if conversation.ChannelType == common.ChannelTypeGroup.Uint8() {
+				if categorySetting := groupCategoryMap[conversation.ChannelID]; categorySetting != nil {
+					syncUserConversationResp.CategoryID = categorySetting.CategoryID
+					syncUserConversationResp.CategorySort = categorySetting.CategorySort
+				}
+			}
 			if len(syncUserConversationResp.Recents) > 0 {
 				syncUserConversationResps = append(syncUserConversationResps, syncUserConversationResp)
 			}
@@ -1137,21 +1160,23 @@ func (u userResp) from(user *user.Detail, avatarPath string) userResp {
 
 // SyncUserConversationResp 最近会话离线返回
 type SyncUserConversationResp struct {
-	ChannelID       string                 `json:"channel_id"`         // 频道ID
-	ChannelType     uint8                  `json:"channel_type"`       // 频道类型
-	SpaceID         string                 `json:"space_id,omitempty"` // Space ID
-	Unread          int                    `json:"unread,omitempty"`   // 未读消息
-	SpaceUnread     *int                   `json:"space_unread,omitempty"`       // Space 维度未读（仅 Person 频道）
-	SpaceLastMessage *MsgSyncResp          `json:"space_last_message,omitempty"` // Space 维度最后一条消息（仅 Person 频道）
-	Mute            int                    `json:"mute,omitempty"`     // 免打扰
-	Stick           int                    `json:"stick,omitempty"`    //  置顶
-	Timestamp       int64                  `json:"timestamp"`          // 最后一次会话时间
-	LastMsgSeq      int64                  `json:"last_msg_seq"`       // 最后一条消息seq
-	LastClientMsgNo string                 `json:"last_client_msg_no"` // 最后一条客户端消息编号
-	OffsetMsgSeq    int64                  `json:"offset_msg_seq"`     // 偏移位的消息seq
-	Version         int64                  `json:"version,omitempty"`  // 数据版本
-	Recents         []*MsgSyncResp         `json:"recents,omitempty"`  // 最近N条消息
-	Extra           *conversationExtraResp `json:"extra,omitempty"`    // 扩展
+	ChannelID        string                 `json:"channel_id"`                   // 频道ID
+	ChannelType      uint8                  `json:"channel_type"`                 // 频道类型
+	SpaceID          string                 `json:"space_id,omitempty"`           // Space ID
+	CategoryID       *string                `json:"category_id,omitempty"`        // 用户自定义分类ID（仅群组）
+	CategorySort     int                    `json:"category_sort,omitempty"`      // 分类内排序（仅群组）
+	Unread           int                    `json:"unread,omitempty"`             // 未读消息
+	SpaceUnread      *int                   `json:"space_unread,omitempty"`       // Space 维度未读（仅 Person 频道）
+	SpaceLastMessage *MsgSyncResp           `json:"space_last_message,omitempty"` // Space 维度最后一条消息（仅 Person 频道）
+	Mute             int                    `json:"mute,omitempty"`               // 免打扰
+	Stick            int                    `json:"stick,omitempty"`              //  置顶
+	Timestamp        int64                  `json:"timestamp"`                    // 最后一次会话时间
+	LastMsgSeq       int64                  `json:"last_msg_seq"`                 // 最后一条消息seq
+	LastClientMsgNo  string                 `json:"last_client_msg_no"`           // 最后一条客户端消息编号
+	OffsetMsgSeq     int64                  `json:"offset_msg_seq"`               // 偏移位的消息seq
+	Version          int64                  `json:"version,omitempty"`            // 数据版本
+	Recents          []*MsgSyncResp         `json:"recents,omitempty"`            // 最近N条消息
+	Extra            *conversationExtraResp `json:"extra,omitempty"`              // 扩展
 }
 
 func newSyncUserConversationResp(resp *config.SyncUserConversationResp, extra *conversationExtraResp, loginUID string, messageExtraDB *messageExtraDB, messageReactionDB *messageReactionDB, messageUserExtraDB *messageUserExtraDB, mute int, stick int, channelOffsetM *channelOffsetModel, deviceOffsetM *deviceOffsetModel, channelOffsetMessageSeq uint32) *SyncUserConversationResp {

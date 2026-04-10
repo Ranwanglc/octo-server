@@ -12,12 +12,16 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/server"
 	"github.com/Mininglamp-OSS/octo-lib/testutil"
 	"github.com/stretchr/testify/assert"
+
+	// 导入依赖模块以确保迁移按正确顺序执行
+	_ "github.com/Mininglamp-OSS/octo-server/modules/robot"
 )
 
 func setupTestBotFather(t *testing.T) (*server.Server, *BotFather) {
 	s, ctx := testutil.NewTestServer()
+	// module.Setup 已注册所有模块路由，无需手动注册
+	// 创建 BotFather 实例仅用于访问 db 和 ctx
 	bf := New(ctx)
-	bf.Route(s.GetRoute())
 
 	// Clean tables
 	err := testutil.CleanAllTables(ctx)
@@ -39,9 +43,9 @@ func createTestRobot(t *testing.T, bf *BotFather, robotID, creatorUID string, ac
 
 func createTestUser(t *testing.T, bf *BotFather, uid, name string) {
 	_, err := bf.db.session.InsertInto("user").Columns(
-		"uid", "name", "username", "status",
+		"uid", "name", "username", "short_no", "status",
 	).Values(
-		uid, name, uid, 1,
+		uid, name, uid, "sn_"+uid, 1,
 	).Exec()
 	assert.NoError(t, err)
 }
@@ -50,8 +54,9 @@ func TestRobotApply_RequireApproval(t *testing.T) {
 	s, bf := setupTestBotFather(t)
 
 	// Create test data
-	ownerUID := testutil.UID
-	applicantUID := "applicant_001"
+	// ownerUID 必须不同于 testutil.UID，否则会触发"无需申请使用自己的AI"
+	ownerUID := "owner_001"
+	applicantUID := testutil.UID // testutil.Token 对应的用户
 	robotID := "test_robot_001"
 
 	createTestUser(t, bf, ownerUID, "Owner")

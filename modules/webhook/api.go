@@ -60,10 +60,34 @@ func New(ctx *config.Context) *Webhook {
 	vivo := ctx.GetConfig().Push.VIVO
 	firebase := ctx.GetConfig().Push.FIREBASE
 
-	if apns.Topic != "" && apns.Cert != "" {
+	// iOS APNs 推送：优先使用 p8 Token 认证，否则使用 p12 证书
+	p8Path, keyID, teamID := loadAPNsP8Config()
+	if p8Path != "" && keyID != "" && teamID != "" {
+		// 使用 p8 Token 认证，环境变量优先于 yaml 配置（覆盖 dmwork-lib 默认值）
+		topic := os.Getenv("DM_PUSH_APNS_TOPIC")
+		if topic == "" {
+			topic = apns.Topic
+		}
+		dev := apns.Dev
+		if envDev := os.Getenv("DM_PUSH_APNS_DEV"); envDev != "" {
+			dev = envDev == "true" || envDev == "1"
+		}
+		if topic != "" {
+			pushMap[common.DeviceTypeIOS] = map[string]Push{
+				topic: NewIOSPushWithToken(topic, dev, p8Path, keyID, teamID),
+			}
+			log.Info("APNs已配置(p8)", zap.String("topic", topic), zap.Bool("dev", dev))
+		} else {
+			log.Warn("APNs p8配置不完整，缺少topic")
+		}
+	} else if apns.Topic != "" && apns.Cert != "" {
+		// Fallback 到 p12 证书认证
 		pushMap[common.DeviceTypeIOS] = map[string]Push{
 			ctx.GetConfig().Push.APNS.Topic: NewIOSPush(apns.Topic, apns.Dev, apns.Cert, apns.Password),
 		}
+		log.Info("APNs已配置(p12)", zap.String("topic", apns.Topic), zap.Bool("dev", apns.Dev))
+	} else {
+		log.Warn("APNs未配置")
 	}
 	if mi.PackageName != "" {
 		pushMap[common.DeviceTypeMI] = map[string]Push{
@@ -411,6 +435,7 @@ func (w *Webhook) handleMsgOffline(data []byte) error {
 
 func (w *Webhook) pushTo(msgResp msgOfflineNotify, toUids []string) error {
 	setting := config.SettingFromUint8(msgResp.Setting)
+	w.Debug("pushTo开始", zap.Bool("signal", setting.Signal), zap.Uint8("settingRaw", msgResp.Setting), zap.Int("toUidsCount", len(toUids)))
 	isVideoCall := false
 	if !setting.Signal { // 只解析未加密的消息
 		contentMap, err := util.JsonToMap(string(msgResp.Payload))
@@ -447,7 +472,7 @@ func (w *Webhook) pushTo(msgResp msgOfflineNotify, toUids []string) error {
 	}
 
 	if !w.containSupportType(common.ContentType(msgResp.ContentType)) && !isVideoCall {
-		w.Debug("不推送：不支持的消息类型！", zap.Int("contentType", msgResp.ContentType))
+		w.Debug("不推送：不支持的消息类型！", zap.Int("contentType", msgResp.ContentType), zap.Bool("signal", setting.Signal))
 		return nil
 	}
 
@@ -502,6 +527,7 @@ func (w *Webhook) pushTo(msgResp msgOfflineNotify, toUids []string) error {
 	for _, toUID := range toUids {
 		if !isVideoCall {
 			if !w.allowPush(users, userSettings, groupSettings, toUID, fromUID) {
+				w.Debug("allowPush返回false，跳过", zap.String("toUID", toUID))
 				continue
 			}
 		} else {
@@ -521,6 +547,7 @@ func (w *Webhook) pushTo(msgResp msgOfflineNotify, toUids []string) error {
 			continue
 		}
 
+		w.Debug("提交推送任务", zap.String("toUID", toUID))
 		w.ctx.PushPool.Work <- &pool.Job{
 			Data: map[string]interface{}{
 				"toUser": toUser,

@@ -19,8 +19,8 @@ mode: "debug" #   运行模式 debug or release
 #webhookSecretKey: "" # 留空则不验证签名
 
 ##################### 悟空IM配置 ####################
-#wukongIM:
-#  apiURL: "" # 悟空IM的api地址 格式： http://xx.xx.xx.xx:5001
+wukongIM:
+  apiURL: "http://192.168.204.124:5001" # 悟空IM的api地址
 #  managerToken: "" # 悟空IM的管理者token 悟空IM配置了就需要填写，没配置就不需要
 
 ##################### db ####################
@@ -31,8 +31,8 @@ mode: "debug" #   运行模式 debug or release
 #  asynctaskRedisAddr: "" # 异步任务的redis地址 不写默认为RedisAddr的地址
 
 ##################### 外网配置 ####################
-#external:
-#  ip: "" # 外网ip
+external:
+  ip: "192.168.204.124" # 外网ip
 #  baseURL: "" # 外网访问地址 例如 http://192.0.2.1:8090
 #  webLoginURL: "" # web im的登录地址 例如 https://web.tangsengdaodao.com
 

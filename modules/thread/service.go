@@ -192,7 +192,17 @@ func (s *Service) CreateThread(req *CreateThreadReq) (*ThreadResp, error) {
 
 	// 拷贝源消息到子区作为首条消息
 	if req.SourceMessageID != nil && len(req.SourceMessagePayload) > 0 {
-		s.sendSourceMessage(channelID, req.CreatorUID, req.SourceMessagePayload)
+		// 从消息表查询原始发送者，防止客户端伪造
+		sourceFromUID, err := s.db.QueryMessageFromUID(req.GroupNo, *req.SourceMessageID)
+		if err != nil {
+			s.Warn("查询源消息发送者失败，使用创建者作为发送者",
+				zap.Error(err),
+				zap.Int64("messageID", *req.SourceMessageID))
+			sourceFromUID = req.CreatorUID
+		} else if sourceFromUID == "" {
+			sourceFromUID = req.CreatorUID
+		}
+		s.sendSourceMessage(channelID, sourceFromUID, req.SourceMessagePayload)
 	}
 
 	// 在父群发送子区创建消息
@@ -233,14 +243,15 @@ func (s *Service) sendThreadCreatedMessage(groupNo, shortID, name, creatorUID, c
 }
 
 // sendSourceMessage 将源消息拷贝到子区频道作为首条消息
-func (s *Service) sendSourceMessage(channelID, creatorUID string, payload json.RawMessage) {
+// fromUID 应该是经过服务端验证的原始消息发送者
+func (s *Service) sendSourceMessage(channelID, fromUID string, payload json.RawMessage) {
 	err := s.ctx.SendMessage(&config.MsgSendReq{
 		Header: config.MsgHeader{
 			NoPersist: 0,
 			RedDot:    1,
 			SyncOnce:  0,
 		},
-		FromUID:     creatorUID,
+		FromUID:     fromUID,
 		ChannelID:   channelID,
 		ChannelType: common.ChannelTypeCommunityTopic.Uint8(),
 		Payload:     payload,

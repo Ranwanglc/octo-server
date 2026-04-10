@@ -3,6 +3,7 @@ package webhook
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
@@ -11,6 +12,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/sideshow/apns2"
 	"github.com/sideshow/apns2/certificate"
+	"github.com/sideshow/apns2/token"
 )
 
 // IOSPayload iOS负载
@@ -30,16 +32,20 @@ func NewIOSPayload(payloadInfo *PayloadInfo) Payload {
 
 // IOSPush IOSPush
 type IOSPush struct {
-	client    *apns2.Client
-	clientMu  sync.Mutex
+	client      *apns2.Client
+	clientMu    sync.Mutex
 	topic       string
 	password    string
 	p12FilePath string
-	dev         bool // 是否是开发环境
+	// p8 Token 认证字段
+	p8FilePath string
+	keyID      string
+	teamID     string
+	dev        bool // 是否是开发环境
 	log.Log
 }
 
-// NewIOSPush NewIOSPush
+// NewIOSPush NewIOSPush (p12 证书方式)
 func NewIOSPush(topic string, dev bool, p12FilePath string, password string) *IOSPush {
 	return &IOSPush{
 		topic:       topic,
@@ -50,18 +56,61 @@ func NewIOSPush(topic string, dev bool, p12FilePath string, password string) *IO
 	}
 }
 
+// NewIOSPushWithToken 使用 p8 Token 认证方式创建 IOSPush
+func NewIOSPushWithToken(topic string, dev bool, p8FilePath, keyID, teamID string) *IOSPush {
+	return &IOSPush{
+		topic:      topic,
+		dev:        dev,
+		p8FilePath: p8FilePath,
+		keyID:      keyID,
+		teamID:     teamID,
+		Log:        log.NewTLog("IOSPush"),
+	}
+}
+
 func (p *IOSPush) createClient() (*apns2.Client, error) {
+	var client *apns2.Client
+
+	// 优先使用 p8 Token 认证
+	if p.p8FilePath != "" && p.keyID != "" && p.teamID != "" {
+		authKey, err := token.AuthKeyFromFile(p.p8FilePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load p8 auth key: %w", err)
+		}
+		apnsToken := &token.Token{
+			AuthKey: authKey,
+			KeyID:   p.keyID,
+			TeamID:  p.teamID,
+		}
+		if p.dev {
+			client = apns2.NewTokenClient(apnsToken).Development()
+		} else {
+			client = apns2.NewTokenClient(apnsToken).Production()
+		}
+		return client, nil
+	}
+
+	// Fallback 到 p12 证书认证
+	if p.p12FilePath == "" {
+		return nil, errors.New("no APNs credentials configured (need p8 or p12)")
+	}
 	cert, err := certificate.FromP12File(p.p12FilePath, p.password)
 	if err != nil {
 		return nil, err
 	}
-	var client *apns2.Client
 	if p.dev {
 		client = apns2.NewClient(cert).Development()
 	} else {
 		client = apns2.NewClient(cert).Production()
 	}
 	return client, nil
+}
+
+// loadAPNsP8Config 从环境变量加载 p8 配置
+func loadAPNsP8Config() (p8Path, keyID, teamID string) {
+	return os.Getenv("DM_PUSH_APNS_P8_PATH"),
+		os.Getenv("DM_PUSH_APNS_KEY_ID"),
+		os.Getenv("DM_PUSH_APNS_TEAM_ID")
 }
 
 // GetPayload 获取推送负载

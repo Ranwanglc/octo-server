@@ -19,6 +19,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/Mininglamp-OSS/octo-server/modules/file"
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
+	"github.com/Mininglamp-OSS/octo-server/modules/thread"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -43,6 +44,7 @@ type BotFather struct {
 	fileService      file.IService
 	groupService     group.IService
 	userDB           *user.DB
+	threadService    thread.IService
 	robotEventPrefix string
 	initOnce         sync.Once
 	msgSem           chan struct{} // 限制并发消息处理的信号量
@@ -60,6 +62,7 @@ func New(ctx *config.Context) *BotFather {
 		fileService:      file.NewService(ctx),
 		groupService:     group.NewService(ctx),
 		userDB:           user.NewDB(ctx),
+		threadService:    thread.NewService(ctx),
 		robotEventPrefix: "robotEvent:",
 		msgSem:           make(chan struct{}, 100), // 限制最多100个并发消息处理
 		Log:              log.NewTLog("BotFather"),
@@ -113,6 +116,14 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 		botAPI.PUT("/groups/:group_no/info", bf.botGroupUpdate)                   // Bot 编辑群
 		botAPI.POST("/groups/:group_no/members/add", bf.botGroupMemberAdd)       // Bot 添加群成员
 		botAPI.POST("/groups/:group_no/members/remove", bf.botGroupMemberRemove) // Bot 移除群成员
+		// Bot Thread API (#892)
+		botAPI.POST("/groups/:group_no/threads", bf.botCreateThread)
+		botAPI.GET("/groups/:group_no/threads", bf.botListThreads)
+		botAPI.GET("/groups/:group_no/threads/:short_id", bf.botGetThread)
+		botAPI.DELETE("/groups/:group_no/threads/:short_id", bf.botDeleteThread)
+		botAPI.GET("/groups/:group_no/threads/:short_id/members", bf.botListThreadMembers)
+		botAPI.POST("/groups/:group_no/threads/:short_id/join", bf.botJoinThread)
+		botAPI.POST("/groups/:group_no/threads/:short_id/leave", bf.botLeaveThread)
 		botAPI.POST("/setCommands", bf.setCommands)
 		// Bot File API (#433)
 		botAPI.POST("/file/upload", bf.botUploadFile)

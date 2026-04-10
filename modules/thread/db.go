@@ -1,6 +1,8 @@
 package thread
 
 import (
+	"fmt"
+	"hash/crc32"
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -256,4 +258,27 @@ func (d *DB) CountMembersBatch(threadIDs []int64) (map[int64]int, error) {
 		countMap[r.ThreadID] = r.Count
 	}
 	return countMap, nil
+}
+
+// QueryMessageFromUID 根据 channelID 和 messageID 查询消息发送者
+func (d *DB) QueryMessageFromUID(channelID string, messageID int64) (string, error) {
+	table := d.getMessageTable(channelID)
+	var fromUID string
+	_, err := d.session.Select("from_uid").From(table).
+		Where("message_id=? AND channel_id=?", messageID, channelID).
+		Load(&fromUID)
+	return fromUID, err
+}
+
+// getMessageTable 根据 channelID 计算消息分表名
+func (d *DB) getMessageTable(channelID string) string {
+	tableCount := d.ctx.GetConfig().TablePartitionConfig.MessageTableCount
+	if tableCount <= 0 {
+		return "message"
+	}
+	tableIndex := crc32.ChecksumIEEE([]byte(channelID)) % uint32(tableCount)
+	if tableIndex == 0 {
+		return "message"
+	}
+	return fmt.Sprintf("message%d", tableIndex)
 }
