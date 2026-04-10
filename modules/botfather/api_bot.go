@@ -13,7 +13,6 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/gin-gonic/gin"
-	"github.com/gocraft/dbr/v2"
 	"go.uber.org/zap"
 )
 
@@ -355,6 +354,16 @@ func (bf *BotFather) botSpaceMembers(c *wkhttp.Context) {
 			return
 		}
 		spaceID = spaceIDs[0]
+	} else {
+		// 校验 bot 是否属于该 Space
+		var count int
+		bf.ctx.DB().SelectBySql(
+			"SELECT COUNT(*) FROM space_member WHERE space_id=? AND uid=? AND status=1", spaceID, robotID,
+		).LoadOne(&count)
+		if count == 0 {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "bot is not a member of this space"})
+			return
+		}
 	}
 
 	if keyword != "" {
@@ -417,184 +426,23 @@ func (bf *BotFather) botGroupCreate(c *wkhttp.Context) {
 		}
 	}
 
-	// 查询 creator 用户信息
-	creatorUser, err := bf.userDB.QueryByUID(req.Creator)
-	if err != nil {
-		bf.Error("query creator info failed", zap.Error(err))
-		c.ResponseError(errors.New("failed to query creator info"))
-		return
-	}
-	if creatorUser == nil {
-		c.ResponseError(errors.New("creator user not found"))
-		return
-	}
-
-	// 查询所有成员信息
-	memberUsers, err := bf.userDB.QueryByUIDs(req.Members)
-	if err != nil {
-		bf.Error("query member info failed", zap.Error(err))
-		c.ResponseError(errors.New("failed to query member info"))
-		return
-	}
-
-	// 生成群编号和版本号
-	groupNo := util.GenerUUID()
-	version, err := bf.ctx.GenSeq(common.GroupSeqKey)
-	if err != nil {
-		bf.Error("generate group version failed", zap.Error(err))
-		c.ResponseError(errors.New("failed to create group"))
-		return
-	}
-
-	// 群名称：如果为空则用成员名拼接
-	groupName := strings.TrimSpace(req.Name)
-	if groupName == "" {
-		names := []string{creatorUser.Name}
-		for _, m := range memberUsers {
-			names = append(names, m.Name)
-			if len(names) >= 3 {
-				break
-			}
-		}
-		groupName = strings.Join(names, "、")
-	}
-	// 限制群名长度
-	nameRunes := []rune(groupName)
-	if len(nameRunes) > 20 {
-		groupName = string(nameRunes[:20])
-	}
-
-	// 开启事务
-	tx, err := bf.ctx.DB().Begin()
-	if err != nil {
-		bf.Error("begin transaction failed", zap.Error(err))
-		c.ResponseError(errors.New("failed to create group"))
-		return
-	}
-	defer tx.RollbackUnlessCommitted()
-
-	// 插入群记录
-	err = bf.groupDB.InsertTx(&group.Model{
-		GroupNo: groupNo,
-		Name:    groupName,
+	// 调用 Service 创建群
+	createResp, err := bf.groupService.CreateGroup(&group.CreateGroupServiceReq{
 		Creator: req.Creator,
-		Status:  group.GroupStatusNormal,
-		Version: version,
+		Members: req.Members,
+		Name:    req.Name,
 		SpaceID: req.SpaceID,
-	}, tx)
-	if err != nil {
-		bf.Error("insert group record failed", zap.Error(err))
-		c.ResponseError(errors.New("failed to create group"))
-		return
-	}
-
-	// 插入创建者为群主
-	creatorMemberVersion, _ := bf.ctx.GenSeq(common.GroupMemberSeqKey)
-	err = bf.groupDB.InsertMemberTx(&group.MemberModel{
-		GroupNo:   groupNo,
-		UID:       req.Creator,
-		Role:      group.MemberRoleCreator,
-		Version:   creatorMemberVersion,
-		Status:    int(common.GroupMemberStatusNormal),
-		InviteUID: req.Creator,
-		Robot:     creatorUser.Robot,
-		Vercode:   fmt.Sprintf("%s@%d", util.GenerUUID(), common.GroupMember),
-	}, tx)
-	if err != nil {
-		bf.Error("insert creator member failed", zap.Error(err))
-		c.ResponseError(errors.New("failed to create group"))
-		return
-	}
-
-	// 插入其他成员
-	// TODO: batch INSERT for better performance with large member lists
-	allMemberUIDs := []string{req.Creator}
-	memberVos := []*config.UserBaseVo{{UID: req.Creator, Name: creatorUser.Name}}
-	for _, memberUser := range memberUsers {
-		if memberUser.UID == req.Creator {
-			continue // 跳过创建者（已添加）
-		}
-		if memberUser.UID == robotID {
-			continue // 跳过 Bot 自己（下面单独处理）
-		}
-		memberVersion, _ := bf.ctx.GenSeq(common.GroupMemberSeqKey)
-		err = bf.groupDB.InsertMemberTx(&group.MemberModel{
-			GroupNo:   groupNo,
-			UID:       memberUser.UID,
-			Role:      group.MemberRoleCommon,
-			Version:   memberVersion,
-			Status:    int(common.GroupMemberStatusNormal),
-			InviteUID: req.Creator,
-			Robot:     memberUser.Robot,
-			Vercode:   fmt.Sprintf("%s@%d", util.GenerUUID(), common.GroupMember),
-		}, tx)
-		if err != nil {
-			bf.Error("insert member failed", zap.Error(err), zap.String("uid", memberUser.UID))
-			c.ResponseError(errors.New("failed to create group"))
-			return
-		}
-		allMemberUIDs = append(allMemberUIDs, memberUser.UID)
-		memberVos = append(memberVos, &config.UserBaseVo{UID: memberUser.UID, Name: memberUser.Name})
-	}
-
-	// Bot 自动加入群并设为 bot_admin
-	botMemberVersion, _ := bf.ctx.GenSeq(common.GroupMemberSeqKey)
-	err = bf.groupDB.InsertMemberTx(&group.MemberModel{
-		GroupNo:   groupNo,
-		UID:       robotID,
-		Role:      group.MemberRoleCommon,
-		Version:   botMemberVersion,
-		Status:    int(common.GroupMemberStatusNormal),
-		InviteUID: req.Creator,
-		Robot:     1,
-		Vercode:   fmt.Sprintf("%s@%d", util.GenerUUID(), common.GroupMember),
-	}, tx)
-	if err != nil {
-		bf.Error("insert bot member failed", zap.Error(err))
-	} else {
-		allMemberUIDs = append(allMemberUIDs, robotID)
-		memberVos = append(memberVos, &config.UserBaseVo{UID: robotID, Name: robotID})
-	}
-	// botNeedAdmin 标记：commit 后设置 bot_admin
-	botInGroup := err == nil
-
-	// 提交事务
-	if err := tx.Commit(); err != nil {
-		bf.Error("commit transaction failed", zap.Error(err))
-		c.ResponseError(errors.New("failed to create group"))
-		return
-	}
-
-	// 在 WuKongIM 创建频道（必须在发通知之前，放在 commit 之后避免孤儿频道）
-	err = bf.ctx.IMCreateOrUpdateChannel(&config.ChannelCreateReq{
-		ChannelID:   groupNo,
-		ChannelType: common.ChannelTypeGroup.Uint8(),
-		Subscribers: allMemberUIDs,
+		BotUID:  robotID,
 	})
 	if err != nil {
-		bf.Error("failed to create IM channel (group created in DB, channel can be retried)", zap.Error(err))
+		bf.Error("create group failed", zap.Error(err))
+		c.ResponseError(errors.New("failed to create group"))
+		return
 	}
-
-	// 设置 Bot 为 bot_admin（在 commit 后，因为 UpdateBotAdmin 不支持事务）
-	if botInGroup {
-		botAdminVersion, _ := bf.ctx.GenSeq(common.GroupMemberSeqKey)
-		if err := bf.groupDB.UpdateBotAdmin(groupNo, robotID, 1, botAdminVersion); err != nil {
-			bf.Error("set bot_admin failed", zap.Error(err))
-		}
-	}
-
-	// 频道就绪后发布群创建通知（通知客户端同步会话列表）
-	bf.ctx.SendGroupCreate(&config.MsgGroupCreateReq{
-		Creator:     req.Creator,
-		CreatorName: creatorUser.Name,
-		GroupNo:     groupNo,
-		Version:     version,
-		Members:     memberVos,
-	})
 
 	c.Response(map[string]interface{}{
-		"group_no": groupNo,
-		"name":     groupName,
+		"group_no": createResp.GroupNo,
+		"name":     createResp.Name,
 	})
 }
 
@@ -631,79 +479,19 @@ func (bf *BotFather) botGroupUpdate(c *wkhttp.Context) {
 		return
 	}
 
-	// 查询群信息
-	groupModel, err := bf.groupDB.QueryWithGroupNo(groupNo)
-	if err != nil || groupModel == nil {
-		c.ResponseError(errors.New("group not found"))
-		return
-	}
-	if groupModel.Status == group.GroupStatusDisband {
-		c.ResponseError(errors.New("group has been disbanded"))
-		return
-	}
-
-	// 生成新版本号
-	version, err := bf.ctx.GenSeq(common.GroupSeqKey)
+	// 调用 Service 更新群信息
+	err = bf.groupService.UpdateGroupInfo(&group.UpdateGroupInfoServiceReq{
+		GroupNo:      groupNo,
+		OperatorUID:  robotID,
+		OperatorName: botName,
+		Name:         req.Name,
+		Notice:       req.Notice,
+	})
 	if err != nil {
+		bf.Error("update group failed", zap.Error(err))
 		c.ResponseError(errors.New("failed to update group"))
 		return
 	}
-	groupModel.Version = version
-
-	// 更新字段
-	if req.Name != nil {
-		nameRunes := []rune(*req.Name)
-		if len(nameRunes) > 20 {
-			*req.Name = string(nameRunes[:20])
-		}
-		groupModel.Name = *req.Name
-	}
-	if req.Notice != nil {
-		groupModel.Notice = *req.Notice
-	}
-
-	// 事务更新
-	tx, err := bf.ctx.DB().Begin()
-	if err != nil {
-		c.ResponseError(errors.New("failed to update group"))
-		return
-	}
-	defer tx.RollbackUnlessCommitted()
-
-	err = bf.groupDB.UpdateTx(groupModel, tx)
-	if err != nil {
-		bf.Error("failed to update group", zap.Error(err))
-		c.ResponseError(errors.New("failed to update group"))
-		return
-	}
-
-	if err := tx.Commit(); err != nil {
-		c.ResponseError(errors.New("failed to update group"))
-		return
-	}
-
-	// 发布群更新事件（name 和 notice 分开发送，避免 attrKey 只保留最后一个）
-	if req.Name != nil {
-		bf.ctx.SendGroupUpdate(&config.MsgGroupUpdateReq{
-			GroupNo:      groupNo,
-			Operator:     robotID,
-			OperatorName: botName,
-			Attr:         common.GroupAttrKeyName,
-			Data:         map[string]string{"name": *req.Name},
-		})
-	}
-	if req.Notice != nil {
-		bf.ctx.SendGroupUpdate(&config.MsgGroupUpdateReq{
-			GroupNo:      groupNo,
-			Operator:     robotID,
-			OperatorName: botName,
-			Attr:         common.GroupAttrKeyNotice,
-			Data:         map[string]string{"notice": *req.Notice},
-		})
-	}
-
-	// 通知客户端刷新频道信息（群名/公告变更）
-	bf.ctx.SendChannelUpdateToGroup(groupNo)
 
 	c.Response(map[string]interface{}{"ok": true})
 }
@@ -729,139 +517,20 @@ func (bf *BotFather) botGroupMemberAdd(c *wkhttp.Context) {
 		return
 	}
 
-	// 查询群信息
-	groupModel, err := bf.groupDB.QueryWithGroupNo(groupNo)
-	if err != nil || groupModel == nil {
-		c.ResponseError(errors.New("group not found"))
-		return
-	}
-	if groupModel.Status == group.GroupStatusDisband {
-		c.ResponseError(errors.New("group has been disbanded"))
-		return
-	}
-
-	// 去重
-	uidSet := make(map[string]bool)
-	var uniqueUIDs []string
-	for _, uid := range req.Members {
-		uid = strings.TrimSpace(uid)
-		if uid != "" && !uidSet[uid] {
-			uidSet[uid] = true
-			uniqueUIDs = append(uniqueUIDs, uid)
-		}
-	}
-	if len(uniqueUIDs) == 0 {
-		c.ResponseError(errors.New("no valid members after deduplication"))
-		return
-	}
-
-	// 查询用户信息
-	memberUsers, err := bf.userDB.QueryByUIDs(uniqueUIDs)
+	// 调用 Service 添加群成员
+	addResp, err := bf.groupService.AddGroupMembers(&group.AddGroupMembersServiceReq{
+		GroupNo:      groupNo,
+		Members:      req.Members,
+		OperatorUID:  robotID,
+		OperatorName: botName,
+	})
 	if err != nil {
-		c.ResponseError(errors.New("failed to query member info"))
-		return
-	}
-
-	// 过滤已在群内的成员
-	existingMembers, err := bf.groupDB.QueryMembersWithUids(uniqueUIDs, groupNo)
-	if err != nil {
-		c.ResponseError(errors.New("failed to query group members"))
-		return
-	}
-	existingSet := make(map[string]bool)
-	for _, m := range existingMembers {
-		if m.IsDeleted == 0 {
-			existingSet[m.UID] = true
-		}
-	}
-
-	// 过滤黑名单
-	blacklistMembers, _ := bf.groupDB.QueryMembersWithStatus(groupNo, int(common.GroupMemberStatusBlacklist))
-	blacklistSet := make(map[string]bool)
-	for _, m := range blacklistMembers {
-		blacklistSet[m.UID] = true
-	}
-
-	tx, err := bf.ctx.DB().Begin()
-	if err != nil {
-		c.ResponseError(errors.New("failed to add members"))
-		return
-	}
-	defer tx.RollbackUnlessCommitted()
-
-	// TODO: batch INSERT for better performance with large member lists
-	var addedUIDs []string
-	var addedVos []*config.UserBaseVo
-	for _, memberUser := range memberUsers {
-		if existingSet[memberUser.UID] || blacklistSet[memberUser.UID] {
-			continue
-		}
-		memberVersion, _ := bf.ctx.GenSeq(common.GroupMemberSeqKey)
-
-		// 检查是否之前被删除过（需要恢复）
-		existDelete, _ := bf.groupDB.ExistMemberDelete(memberUser.UID, groupNo)
-		if existDelete {
-			// 恢复已删除的成员
-			_, err = tx.Update("group_member").SetMap(map[string]interface{}{
-				"role":       group.MemberRoleCommon,
-				"version":    memberVersion,
-				"is_deleted": 0,
-				"invite_uid": robotID,
-				"created_at": dbr.Expr("Now()"),
-			}).Where("group_no=? and uid=?", groupNo, memberUser.UID).Exec()
-		} else {
-			err = bf.groupDB.InsertMemberTx(&group.MemberModel{
-				GroupNo:   groupNo,
-				UID:       memberUser.UID,
-				Role:      group.MemberRoleCommon,
-				Version:   memberVersion,
-				Status:    int(common.GroupMemberStatusNormal),
-				InviteUID: robotID,
-				Robot:     memberUser.Robot,
-				Vercode:   fmt.Sprintf("%s@%d", util.GenerUUID(), common.GroupMember),
-			}, tx)
-		}
-		if err != nil {
-			bf.Error("add group member failed", zap.Error(err), zap.String("uid", memberUser.UID))
-			continue
-		}
-		addedUIDs = append(addedUIDs, memberUser.UID)
-		addedVos = append(addedVos, &config.UserBaseVo{UID: memberUser.UID, Name: memberUser.Name})
-	}
-
-	if err := tx.Commit(); err != nil {
+		bf.Error("add group members failed", zap.Error(err))
 		c.ResponseError(errors.New("failed to add members"))
 		return
 	}
 
-	// 添加 IM 订阅
-	if len(addedUIDs) > 0 {
-		bf.ctx.IMAddSubscriber(&config.SubscriberAddReq{
-			ChannelID:   groupNo,
-			ChannelType: common.ChannelTypeGroup.Uint8(),
-			Subscribers: addedUIDs,
-		})
-
-		// 发布成员添加事件
-		bf.ctx.SendGroupMemberAdd(&config.MsgGroupMemberAddReq{
-			Operator:     robotID,
-			OperatorName: botName,
-			GroupNo:      groupNo,
-			Members:      addedVos,
-		})
-
-		// 发送群成员更新 CMD，通知客户端刷新成员列表
-		bf.ctx.SendCMD(config.MsgCMDReq{
-			ChannelID:   groupNo,
-			ChannelType: common.ChannelTypeGroup.Uint8(),
-			CMD:         common.CMDGroupMemberUpdate,
-			Param: map[string]interface{}{
-				"group_no": groupNo,
-			},
-		})
-	}
-
-	c.Response(map[string]interface{}{"ok": true, "added": len(addedUIDs)})
+	c.Response(map[string]interface{}{"ok": true, "added": addResp.Added})
 }
 
 // botGroupMemberRemove 移除群成员 (POST /v1/bot/groups/:group_no/members/remove)
@@ -892,93 +561,32 @@ func (bf *BotFather) botGroupMemberRemove(c *wkhttp.Context) {
 		return
 	}
 
-	// 查询群信息
-	groupModel, err := bf.groupDB.QueryWithGroupNo(groupNo)
-	if err != nil || groupModel == nil {
-		c.ResponseError(errors.New("group not found"))
-		return
+	// Bot 不能移除自己
+	filteredMembers := make([]string, 0, len(req.Members))
+	for _, uid := range req.Members {
+		if uid != robotID {
+			filteredMembers = append(filteredMembers, uid)
+		}
 	}
-	if groupModel.Status == group.GroupStatusDisband {
-		c.ResponseError(errors.New("group has been disbanded"))
+	if len(filteredMembers) == 0 {
+		c.Response(map[string]interface{}{"ok": true, "removed": 0})
 		return
 	}
 
-	// 查询待移除成员的角色信息
-	targetMembers, err := bf.groupDB.QueryMembersWithUids(req.Members, groupNo)
+	// 调用 Service 移除群成员
+	removeResp, err := bf.groupService.RemoveGroupMembers(&group.RemoveGroupMembersServiceReq{
+		GroupNo:      groupNo,
+		Members:      filteredMembers,
+		OperatorUID:  robotID,
+		OperatorName: botName,
+	})
 	if err != nil {
-		c.ResponseError(errors.New("failed to query member info"))
-		return
-	}
-
-	tx, err := bf.ctx.DB().Begin()
-	if err != nil {
-		c.ResponseError(errors.New("failed to remove members"))
-		return
-	}
-	defer tx.RollbackUnlessCommitted()
-
-	var removedUIDs []string
-	var removedVos []*config.UserBaseVo
-	for _, m := range targetMembers {
-		if m.IsDeleted == 1 {
-			continue // 已删除的跳过
-		}
-		if m.UID == robotID {
-			continue // 不能移除自己
-		}
-		// Bot 只能移除普通成员（role=0），不能移除群主（role=1）或管理员（role=2）
-		if m.Role == group.MemberRoleCreator || m.Role == group.MemberRoleManager {
-			continue
-		}
-		memberVersion, _ := bf.ctx.GenSeq(common.GroupMemberSeqKey)
-		err = bf.groupDB.DeleteMemberTx(groupNo, m.UID, memberVersion, tx)
-		if err != nil {
-			bf.Error("remove group member failed", zap.Error(err), zap.String("uid", m.UID))
-			continue
-		}
-		removedUIDs = append(removedUIDs, m.UID)
-		// 查询用户名
-		memberUser, _ := bf.userDB.QueryByUID(m.UID)
-		name := m.UID
-		if memberUser != nil {
-			name = memberUser.Name
-		}
-		removedVos = append(removedVos, &config.UserBaseVo{UID: m.UID, Name: name})
-	}
-
-	if err := tx.Commit(); err != nil {
+		bf.Error("remove group members failed", zap.Error(err))
 		c.ResponseError(errors.New("failed to remove members"))
 		return
 	}
 
-	if len(removedUIDs) > 0 {
-		// 移除 IM 订阅
-		bf.ctx.IMRemoveSubscriber(&config.SubscriberRemoveReq{
-			ChannelID:   groupNo,
-			ChannelType: common.ChannelTypeGroup.Uint8(),
-			Subscribers: removedUIDs,
-		})
-
-		// 发布成员移除事件
-		bf.ctx.SendGroupMemberBeRemove(&config.MsgGroupMemberRemoveReq{
-			Operator:     robotID,
-			OperatorName: botName,
-			GroupNo:      groupNo,
-			Members:      removedVos,
-		})
-
-		// 发送群成员更新 CMD，通知客户端刷新成员列表
-		bf.ctx.SendCMD(config.MsgCMDReq{
-			ChannelID:   groupNo,
-			ChannelType: common.ChannelTypeGroup.Uint8(),
-			CMD:         common.CMDGroupMemberUpdate,
-			Param: map[string]interface{}{
-				"group_no": groupNo,
-			},
-		})
-	}
-
-	c.Response(map[string]interface{}{"ok": true, "removed": len(removedUIDs)})
+	c.Response(map[string]interface{}{"ok": true, "removed": removeResp.Removed})
 }
 
 // sendGroupMdNotification sends GROUP.md event notification from bot

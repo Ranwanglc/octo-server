@@ -42,7 +42,6 @@ type BotFather struct {
 	appService       app.IService
 	fileService      file.IService
 	groupService     group.IService
-	groupDB          *group.DB
 	userDB           *user.DB
 	robotEventPrefix string
 	initOnce         sync.Once
@@ -60,7 +59,6 @@ func New(ctx *config.Context) *BotFather {
 		appService:       app.NewService(ctx),
 		fileService:      file.NewService(ctx),
 		groupService:     group.NewService(ctx),
-		groupDB:          group.NewDB(ctx),
 		userDB:           user.NewDB(ctx),
 		robotEventPrefix: "robotEvent:",
 		msgSem:           make(chan struct{}, 100), // 限制最多100个并发消息处理

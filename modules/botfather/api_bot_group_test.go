@@ -595,3 +595,149 @@ func TestBotSpaceMembers_KeywordSearch(t *testing.T) {
 	assert.Equal(t, 1, len(members))
 	assert.Equal(t, "Alice", members[0]["name"])
 }
+
+// =====================================================================
+// Space 权限负例测试
+// =====================================================================
+
+// TestBotSpaceMembers_RejectOtherSpace 验证 bot 不能查询不属于自己的 Space
+func TestBotSpaceMembers_RejectOtherSpace(t *testing.T) {
+	handler, ctx := setupGroupTestEnv(t)
+	botToken := insertTestBot(t, ctx, grpTestBotID, testutil.UID)
+
+	// 创建一个 bot 不在的 Space
+	otherSpaceID := "other_space_reject"
+	ctx.DB().InsertInto("space").Columns("space_id", "name", "creator", "status").
+		Values(otherSpaceID, "Other Space", testutil.UID, 1).Exec()
+	// bot 不加入这个 Space
+
+	w := doRequest(handler, botReq("GET", fmt.Sprintf("/v1/bot/space/members?space_id=%s", otherSpaceID), botToken, nil))
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "not a member of this space")
+}
+
+// TestBotGroupCreate_RejectCreatorOutsideSpace 验证 creator 不在 Space 时应失败
+func TestBotGroupCreate_RejectCreatorOutsideSpace(t *testing.T) {
+	handler, ctx := setupGroupTestEnv(t)
+	botToken := insertTestBot(t, ctx, grpTestBotID, testutil.UID)
+	insertTestBotUser(t, ctx, grpTestBotID)
+	insertTestUser(t, ctx, "user_in_space", "InSpace")
+	insertTestUser(t, ctx, "user_outside", "OutSide")
+
+	spaceID := "space_create_test"
+	ctx.DB().InsertInto("space").Columns("space_id", "name", "creator", "status").
+		Values(spaceID, "Test Space", testutil.UID, 1).Exec()
+	// bot 和 user_in_space 在 Space 内
+	ctx.DB().InsertInto("space_member").Columns("space_id", "uid", "role", "status").
+		Values(spaceID, grpTestBotID, 0, 1).Exec()
+	ctx.DB().InsertInto("space_member").Columns("space_id", "uid", "role", "status").
+		Values(spaceID, "user_in_space", 0, 1).Exec()
+	// user_outside 不在 Space 内
+
+	// creator 不在 Space，应失败
+	w := doRequest(handler, botReq("POST", "/v1/bot/createGroup", botToken, map[string]interface{}{
+		"name":     "Reject Test",
+		"members":  []string{"user_in_space"},
+		"creator":  "user_outside",
+		"space_id": spaceID,
+	}))
+
+	assert.NotEqual(t, http.StatusOK, w.Code)
+}
+
+// TestBotGroupCreate_RejectMemberOutsideSpace 验证不在 Space 的成员不能加入群
+func TestBotGroupCreate_RejectMemberOutsideSpace(t *testing.T) {
+	handler, ctx := setupGroupTestEnv(t)
+	botToken := insertTestBot(t, ctx, grpTestBotID, testutil.UID)
+	insertTestBotUser(t, ctx, grpTestBotID)
+	insertTestUser(t, ctx, testutil.UID, "owner")
+	insertTestUser(t, ctx, "user_in", "InSpace")
+	insertTestUser(t, ctx, "user_out", "OutSpace")
+
+	spaceID := "space_member_test"
+	ctx.DB().InsertInto("space").Columns("space_id", "name", "creator", "status").
+		Values(spaceID, "Test Space", testutil.UID, 1).Exec()
+	ctx.DB().InsertInto("space_member").Columns("space_id", "uid", "role", "status").
+		Values(spaceID, grpTestBotID, 0, 1).Exec()
+	ctx.DB().InsertInto("space_member").Columns("space_id", "uid", "role", "status").
+		Values(spaceID, testutil.UID, 0, 1).Exec()
+	ctx.DB().InsertInto("space_member").Columns("space_id", "uid", "role", "status").
+		Values(spaceID, "user_in", 0, 1).Exec()
+	// user_out 不在 Space
+
+	// 创建群，members 包含 user_out（不在 Space）
+	w := doRequest(handler, botReq("POST", "/v1/bot/createGroup", botToken, map[string]interface{}{
+		"name":     "Space Filter",
+		"members":  []string{"user_in", "user_out"},
+		"creator":  testutil.UID,
+		"space_id": spaceID,
+	}))
+
+	// 应该成功，但 user_out 不在群内（被 Space 校验过滤）
+	assert.Equal(t, http.StatusOK, w.Code)
+	result := jsonResult(t, w)
+	groupNo := result["group_no"].(string)
+
+	var memberCount int
+	ctx.DB().SelectBySql("SELECT COUNT(*) FROM group_member WHERE group_no=? AND is_deleted=0", groupNo).LoadOne(&memberCount)
+	// creator + user_in + bot = 3（user_out 被过滤）
+	assert.Equal(t, 3, memberCount)
+}
+
+// TestBotGroupCreate_DefaultAllowViewHistoryMsg 验证 bot 建群 allow_view_history_msg=1
+func TestBotGroupCreate_DefaultAllowViewHistoryMsg(t *testing.T) {
+	handler, ctx := setupGroupTestEnv(t)
+	botToken := insertTestBot(t, ctx, grpTestBotID, testutil.UID)
+	insertTestBotUser(t, ctx, grpTestBotID)
+	insertTestUser(t, ctx, testutil.UID, "owner")
+	insertTestUser(t, ctx, "user_a", "Alice")
+
+	w := doRequest(handler, botReq("POST", "/v1/bot/createGroup", botToken, map[string]interface{}{
+		"name":    "HistoryMsg Test",
+		"members": []string{"user_a"},
+		"creator": testutil.UID,
+	}))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	result := jsonResult(t, w)
+	groupNo := result["group_no"].(string)
+
+	var allowViewHistoryMsg int
+	ctx.DB().SelectBySql("SELECT allow_view_history_msg FROM `group` WHERE group_no=?", groupNo).LoadOne(&allowViewHistoryMsg)
+	assert.Equal(t, 1, allowViewHistoryMsg)
+}
+
+// TestBotGroupMemberAdd_RejectMemberOutsideGroupSpace 验证不在群所属 Space 的成员不能被添加
+func TestBotGroupMemberAdd_RejectMemberOutsideGroupSpace(t *testing.T) {
+	handler, ctx := setupGroupTestEnv(t)
+	botToken := insertTestBot(t, ctx, grpTestBotID, testutil.UID)
+	insertTestBotUser(t, ctx, grpTestBotID)
+	insertTestUser(t, ctx, testutil.UID, "owner")
+	insertTestUser(t, ctx, "user_in", "InSpace")
+	insertTestUser(t, ctx, "user_out_add", "OutSpace")
+
+	spaceID := "space_add_test"
+	ctx.DB().InsertInto("space").Columns("space_id", "name", "creator", "status").
+		Values(spaceID, "Add Test Space", testutil.UID, 1).Exec()
+	ctx.DB().InsertInto("space_member").Columns("space_id", "uid", "role", "status").
+		Values(spaceID, grpTestBotID, 0, 1).Exec()
+	ctx.DB().InsertInto("space_member").Columns("space_id", "uid", "role", "status").
+		Values(spaceID, testutil.UID, 0, 1).Exec()
+	ctx.DB().InsertInto("space_member").Columns("space_id", "uid", "role", "status").
+		Values(spaceID, "user_in", 0, 1).Exec()
+
+	// 先创建群（在 Space 内）
+	groupNo := createGroupViaAPI(t, handler, botToken, []string{"user_in"})
+
+	// 更新群的 space_id（createGroupViaAPI 不传 space_id）
+	ctx.DB().UpdateBySql("UPDATE `group` SET space_id=? WHERE group_no=?", spaceID, groupNo).Exec()
+
+	// 尝试添加不在 Space 的用户
+	w := doRequest(handler, botReq("POST", fmt.Sprintf("/v1/bot/groups/%s/members/add", groupNo), botToken, map[string]interface{}{
+		"members": []string{"user_out_add"},
+	}))
+
+	// 应该失败：成员不在 Space 内
+	assert.NotEqual(t, http.StatusOK, w.Code)
+}

@@ -548,7 +548,6 @@ func (g *Group) list(c *wkhttp.Context) {
 // 创建群
 func (g *Group) groupCreate(c *wkhttp.Context) {
 	creator := c.MustGet("uid").(string)
-	creatorName := c.MustGet("name").(string)
 	var req groupReq
 	if err := c.BindJSON(&req); err != nil {
 		g.Error(common.ErrData.Error(), zap.Error(err))
@@ -571,37 +570,9 @@ func (g *Group) groupCreate(c *wkhttp.Context) {
 		return
 	}
 	realUids := make([]string, 0)
-	// Space 模式：校验所有成员都在 Space 内
-	if req.SpaceID != "" {
-		// 校验创建者
-		creatorOk, err := spacepkg.CheckMembership(g.ctx.DB(), req.SpaceID, creator)
-		if err != nil {
-			g.Error("校验创建者 Space 成员错误", zap.Error(err))
-			c.ResponseError(errors.New("校验成员关系错误"))
-			return
-		}
-		if !creatorOk {
-			c.ResponseError(errors.New("你不是该 Space 的成员"))
-			return
-		}
-		for _, uid := range req.Members {
-			ok, err := spacepkg.CheckMembership(g.ctx.DB(), req.SpaceID, uid)
-			if err != nil {
-				g.Error("校验成员 Space 成员错误", zap.Error(err), zap.String("uid", uid))
-				c.ResponseError(errors.New("校验成员关系错误"))
-				return
-			}
-			if ok {
-				realUids = append(realUids, uid)
-			}
-		}
-		if len(realUids) == 0 {
-			c.ResponseError(errors.New("所选成员都不在该 Space 内"))
-			return
-		}
-	} else if g.ctx.GetConfig().Group.CreateGroupVerifyFriendOn {
+	// 好友验证（Web 特有逻辑，Space 校验已移入 Service）
+	if req.SpaceID == "" && g.ctx.GetConfig().Group.CreateGroupVerifyFriendOn {
 		friends := make([]*model.FriendResp, 0)
-		// 验证好友关系
 		modules := register.GetModules(g.ctx)
 		for _, m := range modules {
 			if m.BussDataSource.GetFriends != nil {
@@ -655,219 +626,37 @@ func (g *Group) groupCreate(c *wkhttp.Context) {
 			return
 		}
 	}
+
+	// 调用 Service 创建群
+	createResp, err := g.groupService.CreateGroup(&CreateGroupServiceReq{
+		Creator: creator,
+		Members: realUids,
+		Name:    req.Name,
+		SpaceID: req.SpaceID,
+	})
+	if err != nil {
+		g.Error("创建群失败！", zap.Error(err))
+		c.ResponseError(errors.New("创建群失败！"))
+		return
+	}
+
+	// 消息自动删除（Web 特有逻辑）
 	creatorUser, err := g.userDB.QueryByUID(creator)
-	if err != nil {
-		g.Error("查询创建者信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("查询创建者信息失败！"))
-		return
-	}
-	if creatorUser == nil {
-		g.Error("创建者不存在！", zap.String("creator", creator))
-		c.ResponseError(errors.New("创建者不存在！"))
-		return
-	}
-
-	realUids = util.RemoveRepeatedElement(append(realUids, creator)) // 将创建者也加入成员内
-
-	// 查询成员用户信息
-	memberUserModels, err := g.userDB.QueryByUIDs(realUids)
-	if err != nil {
-		g.Error("查询成员用户信息失败！", zap.Error(err), zap.Strings("members", realUids))
-		c.ResponseError(errors.New("查询成员用户信息失败！"))
-		return
-	}
-	if memberUserModels == nil {
-		c.ResponseError(errors.New("成员用户信息不存在！"))
-		return
-	}
-	memberNames := make([]string, 0, len(memberUserModels))
-	for _, memberUserModel := range memberUserModels {
-		memberNames = append(memberNames, memberUserModel.Name)
-	}
-	groupName := req.Name
-	if groupName == "" {
-		groupName = strings.Join(memberNames, "、")
-	}
-
-	nameRuns := []rune(groupName)
-	if len(nameRuns) > 20 {
-		groupName = string(nameRuns[:20])
-	}
-
-	groupNo := util.GenerUUID()
-
-	version, err := g.ctx.GenSeq(common.GroupSeqKey)
-	if err != nil {
-		c.ResponseError(err)
-		return
-	}
-	channelServiceObj := register.GetService(ChannelServiceName)
-	var channelService chservice.IService
-	if channelServiceObj != nil {
-		channelService = channelServiceObj.(chservice.IService)
-	}
-	if channelService != nil {
-		if creatorUser.MsgExpireSecond > 0 {
-			err = channelService.CreateOrUpdateMsgAutoDelete(groupNo, common.ChannelTypeGroup.Uint8(), creatorUser.MsgExpireSecond)
-			if err != nil {
-				g.Warn("更新消息自动删除失败！", zap.Error(err))
+	if err == nil && creatorUser != nil && creatorUser.MsgExpireSecond > 0 {
+		channelServiceObj := register.GetService(ChannelServiceName)
+		var channelService chservice.IService
+		if channelServiceObj != nil {
+			channelService = channelServiceObj.(chservice.IService)
+		}
+		if channelService != nil {
+			if chErr := channelService.CreateOrUpdateMsgAutoDelete(createResp.GroupNo, common.ChannelTypeGroup.Uint8(), creatorUser.MsgExpireSecond); chErr != nil {
+				g.Warn("更新消息自动删除失败！", zap.Error(chErr))
 			}
 		}
 	}
-	// 事务
-	tx, err := g.ctx.DB().Begin()
-	if err != nil {
-		g.Error("开启事务失败！", zap.Error(err))
-		c.ResponseError(errors.New("开启事务失败！"))
-		return
-	}
-	defer func() {
-		if err := recover(); err != nil {
-			tx.RollbackUnlessCommitted()
-			fmt.Fprintf(os.Stderr, "recovered panic in goroutine: %v\n%s\n", err, debug.Stack())
-		}
-	}()
 
-	err = g.db.InsertTx(&Model{
-		GroupNo:             groupNo,
-		Name:                groupName,
-		Creator:             creator,
-		Status:              GroupStatusNormal,
-		Version:             version,
-		AllowViewHistoryMsg: int(common.GroupAllowViewHistoryMsgEnabled),
-		SpaceID:             req.SpaceID,
-	}, tx)
-	if err != nil {
-		g.Error("添加群失败！", zap.Error(err))
-		c.ResponseError(errors.New("添加群失败！"))
-		tx.RollbackUnlessCommitted()
-		return
-	}
-	realMemberUids := make([]string, 0) // 真实成员uid集合
-	userBaseVos := make([]*config.UserBaseVo, 0)
-	// 注销用户
-	destroyUserBaseVos := make([]*config.UserBaseVo, 0)
-	for _, memberUser := range memberUserModels {
-		if memberUser.IsDestroy == 1 {
-			destroyUserBaseVos = append(destroyUserBaseVos, &config.UserBaseVo{
-				UID:  memberUser.UID,
-				Name: memberUser.Name,
-			})
-			continue
-		}
-		memberVersion, err := g.ctx.GenSeq(common.GroupMemberSeqKey)
-		if err != nil {
-			c.ResponseError(err)
-			return
-		}
-		realMemberUids = append(realMemberUids, memberUser.UID)
-		var role = MemberRoleCommon
-		if memberUser.UID == creator {
-			role = MemberRoleCreator
-		}
-		err = g.db.InsertMemberTx(&MemberModel{
-			GroupNo:   groupNo,
-			UID:       memberUser.UID,
-			Role:      role,
-			Version:   memberVersion,
-			InviteUID: creator,
-			Robot:     memberUser.Robot,
-			Status:    int(common.GroupMemberStatusNormal),
-			Vercode:   fmt.Sprintf("%s@%d", util.GenerUUID(), common.GroupMember),
-		}, tx)
-		if err != nil {
-			tx.RollbackUnlessCommitted()
-			g.Error("添加成员失败！", zap.Error(err), zap.String("memberUid", memberUser.UID))
-			c.ResponseError(errors.New("添加成员失败！"))
-			return
-		}
-		userBaseVos = append(userBaseVos, &config.UserBaseVo{UID: memberUser.UID, Name: memberUser.Name})
-	}
-	if len(realMemberUids) <= 0 {
-		tx.RollbackUnlessCommitted()
-		g.Error("群成员不能为空！")
-		c.ResponseError(errors.New("群成员不能为空！"))
-		return
-	}
-	// 发布群创建事件
-	eventID, err := g.ctx.EventBegin(&wkevent.Data{
-		Event: event.GroupCreate,
-		Type:  wkevent.Message,
-		Data: &config.MsgGroupCreateReq{
-			GroupNo:     groupNo,
-			Creator:     creator,
-			CreatorName: creatorName,
-			Members:     userBaseVos,
-			Version:     version,
-		},
-	}, tx)
-	if err != nil {
-		tx.RollbackUnlessCommitted()
-		g.Error("开启事件失败！", zap.Error(err))
-		c.ResponseError(errors.New("开启事件失败！"))
-		return
-	}
-	var unableAddDestroyAccount int64 = 0
-	if len(destroyUserBaseVos) > 0 {
-		// 发布无法添加到群聊用户
-		unableAddDestroyAccount, err = g.ctx.EventBegin(&wkevent.Data{
-			Event: event.GroupUnableAddDestroyAccount,
-			Type:  wkevent.Message,
-			Data: &config.MsgGroupCreateReq{
-				GroupNo:     groupNo,
-				Creator:     creator,
-				CreatorName: creatorName,
-				Members:     destroyUserBaseVos,
-				Version:     version,
-			},
-		}, tx)
-		if err != nil {
-			tx.RollbackUnlessCommitted()
-			g.Error("开启无法添加到群聊事件失败！", zap.Error(err))
-			c.ResponseError(errors.New("开启无法添加到群聊事件失败！"))
-			return
-		}
-	}
-	groupAvatarEventID, err := g.ctx.EventBegin(&wkevent.Data{
-		Event: event.GroupAvatarUpdate,
-		Type:  wkevent.CMD,
-		Data: &config.CMDGroupAvatarUpdateReq{
-			GroupNo: groupNo,
-			Members: realMemberUids,
-		},
-	}, tx)
-	if err != nil {
-		tx.RollbackUnlessCommitted()
-		g.Error("开启群成员头像更新事件失败！", zap.Error(err))
-		c.ResponseError(errors.New("开启群成员头像更新事件失败！"))
-		return
-	}
-
-	// 创建IM频道
-	err = g.ctx.IMCreateOrUpdateChannel(&config.ChannelCreateReq{
-		ChannelID:   groupNo,
-		ChannelType: common.ChannelTypeGroup.Uint8(),
-		Subscribers: realMemberUids,
-	})
-	if err != nil {
-		tx.RollbackUnlessCommitted()
-		g.Error("创建IM频道失败！", zap.Error(err))
-		c.ResponseError(errors.New("创建IM频道失败！"))
-		return
-	}
-
-	if err := tx.Commit(); err != nil {
-		tx.RollbackUnlessCommitted()
-		g.Error("提交事务失败！", zap.Error(err))
-		c.ResponseError(errors.New("提交事务失败！"))
-		return
-	}
-	g.ctx.EventCommit(eventID)
-	g.ctx.EventCommit(groupAvatarEventID)
-	if unableAddDestroyAccount != 0 {
-		g.ctx.EventCommit(unableAddDestroyAccount)
-	}
-	groupModel, err := g.db.QueryWithGroupNo(groupNo)
+	// 查询群信息返回响应
+	groupModel, err := g.db.QueryWithGroupNo(createResp.GroupNo)
 	if err != nil {
 		g.Error("查询群信息失败！", zap.Error(err))
 		c.ResponseError(errors.New("查询群信息失败！"))
@@ -881,7 +670,7 @@ func (g *Group) groupCreate(c *wkhttp.Context) {
 		Screenshot:   1,
 	})
 	// 查询成员数
-	memberCount, mcErr := g.db.QueryMemberCount(groupNo)
+	memberCount, mcErr := g.db.QueryMemberCount(createResp.GroupNo)
 	if mcErr == nil {
 		resp.MemberCount = int(memberCount)
 	}
@@ -922,71 +711,86 @@ func (g *Group) groupUpdate(c *wkhttp.Context) {
 		return
 	}
 
-	version, err := g.ctx.GenSeq(common.GroupSeqKey)
-	if err != nil {
-		c.ResponseError(err)
-		return
-	}
-	group.Version = version
+	// invite 属性不走 Service（Service 只处理 name/notice），仍走原有逻辑
+	inviteValue, hasInvite := groupMap[common.GroupAttrKeyInvite]
+	nameValue, hasName := groupMap[common.GroupAttrKeyName]
+	noticeValue, hasNotice := groupMap[common.GroupAttrKeyNotice]
 
-	// TODO: 这里的写法只支持更新一个属性，如果是多个属性后面需要修改。
-	var attrKey string
-	for key, value := range groupMap {
-		attrKey = key
-		switch key {
-		case common.GroupAttrKeyName:
-			group.Name = value
-		case common.GroupAttrKeyNotice:
-			group.Notice = value
-		case common.GroupAttrKeyInvite:
-			invite, _ := strconv.ParseInt(value, 10, 64)
-			group.Invite = int(invite)
-		}
-	}
-	tx, err := g.ctx.DB().Begin()
-	if err != nil {
-		g.Error("开启事务失败！", zap.Error(err))
-		c.ResponseError(errors.New("开启事务失败！"))
-		return
-	}
-	defer func() {
-		if err := recover(); err != nil {
-			tx.Rollback()
-			fmt.Fprintf(os.Stderr, "recovered panic in goroutine: %v\n%s\n", err, debug.Stack())
-		}
-	}()
-	err = g.db.UpdateTx(group, tx)
-	if err != nil {
-		tx.Rollback()
-		g.Error("更新群信息失败！", zap.Error(err), zap.String("group_no", group.GroupNo), zap.Any("groupMap", groupMap))
-		c.ResponseError(errors.New("更新群信息失败！"))
-		return
-	}
-	// 发布群创建事件
-	eventID, err := g.ctx.EventBegin(&wkevent.Data{
-		Event: event.GroupUpdate,
-		Type:  wkevent.Message,
-		Data: &config.MsgGroupUpdateReq{
+	// 如果有 name 或 notice，走 Service
+	if hasName || hasNotice {
+		serviceReq := &UpdateGroupInfoServiceReq{
 			GroupNo:      groupNo,
-			Operator:     loginUID,
+			OperatorUID:  loginUID,
 			OperatorName: loginName,
-			Attr:         attrKey,
-			Data:         groupMap,
-		},
-	}, tx)
-	if err != nil {
-		tx.Rollback()
-		g.Error("开启事件失败！", zap.Error(err))
-		c.ResponseError(errors.New("开启事件失败！"))
-		return
+		}
+		if hasName {
+			serviceReq.Name = &nameValue
+		}
+		if hasNotice {
+			serviceReq.Notice = &noticeValue
+		}
+		if err := g.groupService.UpdateGroupInfo(serviceReq); err != nil {
+			g.Error("更新群信息失败！", zap.Error(err))
+			c.ResponseError(errors.New("更新群信息失败！"))
+			return
+		}
 	}
-	if err := tx.Commit(); err != nil {
-		tx.RollbackUnlessCommitted()
-		g.Error("提交事务失败！", zap.Error(err))
-		c.ResponseError(errors.New("提交事务失败！"))
-		return
+
+	// invite 属性单独处理（保留原有事务逻辑）
+	if hasInvite {
+		invite, _ := strconv.ParseInt(inviteValue, 10, 64)
+		group.Invite = int(invite)
+		version, err := g.ctx.GenSeq(common.GroupSeqKey)
+		if err != nil {
+			c.ResponseError(err)
+			return
+		}
+		group.Version = version
+
+		tx, err := g.ctx.DB().Begin()
+		if err != nil {
+			g.Error("开启事务失败！", zap.Error(err))
+			c.ResponseError(errors.New("开启事务失败！"))
+			return
+		}
+		defer func() {
+			if err := recover(); err != nil {
+				tx.Rollback()
+				fmt.Fprintf(os.Stderr, "recovered panic in goroutine: %v\n%s\n", err, debug.Stack())
+			}
+		}()
+		err = g.db.UpdateTx(group, tx)
+		if err != nil {
+			tx.Rollback()
+			g.Error("更新群信息失败！", zap.Error(err), zap.String("group_no", group.GroupNo))
+			c.ResponseError(errors.New("更新群信息失败！"))
+			return
+		}
+		eventID, err := g.ctx.EventBegin(&wkevent.Data{
+			Event: event.GroupUpdate,
+			Type:  wkevent.Message,
+			Data: &config.MsgGroupUpdateReq{
+				GroupNo:      groupNo,
+				Operator:     loginUID,
+				OperatorName: loginName,
+				Attr:         common.GroupAttrKeyInvite,
+				Data:         map[string]string{common.GroupAttrKeyInvite: inviteValue},
+			},
+		}, tx)
+		if err != nil {
+			tx.Rollback()
+			g.Error("开启事件失败！", zap.Error(err))
+			c.ResponseError(errors.New("开启事件失败！"))
+			return
+		}
+		if err := tx.Commit(); err != nil {
+			tx.RollbackUnlessCommitted()
+			g.Error("提交事务失败！", zap.Error(err))
+			c.ResponseError(errors.New("提交事务失败！"))
+			return
+		}
+		g.ctx.EventCommit(eventID)
 	}
-	g.ctx.EventCommit(eventID)
 
 	c.ResponseOK()
 }
@@ -1075,49 +879,17 @@ func (g *Group) memberAdd(c *wkhttp.Context) {
 		}
 	}
 
-	err = g.addMembers(req.Members, groupNo, operator, operatorName)
+	// 调用 Service 添加群成员
+	_, err = g.groupService.AddGroupMembers(&AddGroupMembersServiceReq{
+		GroupNo:      groupNo,
+		Members:      req.Members,
+		OperatorUID:  operator,
+		OperatorName: operatorName,
+	})
 	if err != nil {
 		c.ResponseError(err)
 		return
 	}
-
-	// memberCount, err := g.db.QueryMemberCount(groupNo)
-	// if err != nil {
-	// 	g.Error("查询群成员数量失败！", zap.Error(err))
-	// 	c.ResponseError(errors.New("查询群成员数量失败！"))
-	// 	return
-	// }
-	// 普通群自动升级
-	// if memberCount >= int64(g.ctx.GetConfig().GroupUpgradeWhenMemberCount) && group.GroupType == int(GroupTypeCommon) {
-
-	// 	var ban = 0
-	// 	if group.Status == GroupStatusDisabled {
-	// 		ban = 1
-	// 	}
-	// 	err = g.ctx.IMCreateOrUpdateChannel(&config.ChannelCreateReq{
-	// 		ChannelID:   groupNo,
-	// 		ChannelType: common.ChannelTypeGroup.Uint8(),
-	// 		Ban:         ban,
-	// 		Large:       1,
-	// 	})
-	// 	if err != nil {
-	// 		g.Error("更新频道信息失败！", zap.Error(err))
-	// 		c.ResponseError(errors.New("更新频道信息失败！"))
-	// 		return
-	// 	}
-
-	// 	err = g.db.UpdateGroupType(groupNo, GroupTypeSuper)
-	// 	if err != nil {
-	// 		g.Error("修改群为超级群失败！", zap.Error(err), zap.String("groupNo", groupNo))
-	// 		c.ResponseError(errors.New("修改群为超级群失败！"))
-	// 		return
-	// 	}
-	// 	// 发送群升级通知
-	// 	err = g.ctx.SendGroupUpgrade(groupNo)
-	// 	if err != nil {
-	// 		g.Warn("发送群升级通知失败！", zap.Error(err))
-	// 	}
-	// }
 
 	c.ResponseOK()
 
@@ -2321,18 +2093,18 @@ func (g *Group) memberRemove(c *wkhttp.Context) {
 			return
 		}
 	}
-	deleteMembers, err := g.db.QueryMembersWithUids(req.Members, groupNo)
-	if err != nil {
-		g.Error("查询被删除的群成员信息错误", zap.Error(err))
-		c.ResponseError(errors.New("查询被删除的群成员信息错误"))
-		return
-	}
-	if len(deleteMembers) == 0 {
-		c.ResponseError(errors.New("被删除者不在此群内"))
-		return
-	}
+	// Web 特有的权限检查：管理员不能删管理员/群主
 	if loginMember != nil {
-		// 验证权限
+		deleteMembers, err := g.db.QueryMembersWithUids(req.Members, groupNo)
+		if err != nil {
+			g.Error("查询被删除的群成员信息错误", zap.Error(err))
+			c.ResponseError(errors.New("查询被删除的群成员信息错误"))
+			return
+		}
+		if len(deleteMembers) == 0 {
+			c.ResponseError(errors.New("被删除者不在此群内"))
+			return
+		}
 		for _, member := range deleteMembers {
 			if loginMember.Role == int(common.GroupMemberRoleManager) {
 				if member.Role == int(common.GroupMemberRoleManager) {
@@ -2346,163 +2118,17 @@ func (g *Group) memberRemove(c *wkhttp.Context) {
 			}
 		}
 	}
-	realDeleteMemberModels, err := g.userDB.QueryByUIDs(req.Members)
-	if err != nil {
-		g.Error("查询成员用户信息失败！", zap.Error(err))
-		c.ResponseError(errors.New("查询成员用户信息失败！"))
-		return
-	}
-	memberCount, err := g.db.QueryMemberCount(groupNo)
-	if err != nil {
-		g.Error("查询群成员数量失败！", zap.Error(err))
-		c.ResponseError(errors.New("查询群成员数量失败！"))
-		return
-	}
 
-	userBaseVos := make([]*config.UserBaseVo, 0, len(realDeleteMemberModels))
-	for _, realMember := range realDeleteMemberModels {
-		userBaseVos = append(userBaseVos, &config.UserBaseVo{
-			UID:  realMember.UID,
-			Name: realMember.Name,
-		})
-	}
-	nowMemberCount := int(memberCount) - len(userBaseVos) // 当前成员数量
-
-	needGenGroupAvatar := false // 是否需要生成头像
-
-	if nowMemberCount < 9 && nowMemberCount > 0 {
-		needGenGroupAvatar = true
-	}
-	if !needGenGroupAvatar {
-		needGenGroupAvatar, err = g.db.membersInFirstNine(groupNo, req.Members)
-		if err != nil {
-			g.Error("查询最早加入的成员信息失败！", zap.Error(err))
-			c.ResponseError(errors.New("查询最早加入的成员信息失败！"))
-			return
-		}
-	}
-	groupIsUploadAvatar, err := g.db.queryGroupAvatarIsUpload(groupNo)
-	if err != nil {
-		g.Error("查询群头像是否用户上传过失败！", zap.String("group_no", groupNo), zap.Error(err))
-	}
-	if groupIsUploadAvatar == 1 {
-		needGenGroupAvatar = false
-	}
-
-	tx, err := g.db.session.Begin()
-	if err != nil {
-		g.Error("开启事务失败！", zap.Error(err))
-		c.ResponseError(errors.New("开启事务失败！"))
-		return
-	}
-	defer func() {
-		if err := recover(); err != nil {
-			tx.RollbackUnlessCommitted()
-			fmt.Fprintf(os.Stderr, "recovered panic in goroutine: %v\n%s\n", err, debug.Stack())
-		}
-	}()
-
-	for _, realMember := range realDeleteMemberModels {
-
-		version, err := g.ctx.GenSeq(common.GroupMemberSeqKey)
-		if err != nil {
-			tx.RollbackUnlessCommitted()
-			c.ResponseError(err)
-			return
-		}
-		err = g.db.DeleteMemberTx(groupNo, realMember.UID, version, tx)
-		if err != nil {
-			tx.RollbackUnlessCommitted()
-			g.Error("删除群成员失败！", zap.Error(err))
-			c.ResponseError(errors.New("删除群成员失败！"))
-			return
-		}
-	}
-
-	// 发布群成员删除事件
-	groupMemberRemoveReq := &config.MsgGroupMemberRemoveReq{
+	// 调用 Service 移除群成员
+	_, err = g.groupService.RemoveGroupMembers(&RemoveGroupMembersServiceReq{
 		GroupNo:      groupNo,
-		Operator:     operator,
+		Members:      req.Members,
+		OperatorUID:  operator,
 		OperatorName: operatorName,
-		Members:      userBaseVos,
-	}
-	eventID, err := g.ctx.EventBegin(&wkevent.Data{
-		Event: event.GroupMemberRemove,
-		Type:  wkevent.Message,
-		Data:  groupMemberRemoveReq,
-	}, tx)
-	if err != nil {
-		tx.RollbackUnlessCommitted()
-		g.Error("开启事件失败！", zap.Error(err))
-		c.ResponseError(errors.New("开启事件失败！"))
-		return
-	}
-
-	var groupAvatarEventID int64
-	if needGenGroupAvatar {
-		nineMemberUIDs := make([]string, 0, 9)
-		nownineMembers, err := g.db.QueryMembersFirstNineExclude(groupNo, req.Members)
-		if err != nil {
-			tx.Rollback()
-			g.Error("查询先存成员信息失败！", zap.String("group_no", groupNo), zap.Error(err))
-			c.ResponseError(errors.New("查询先存成员信息失败！"))
-			return
-		}
-		if len(nownineMembers) > 0 {
-			for _, nowninceMember := range nownineMembers {
-				nineMemberUIDs = append(nineMemberUIDs, nowninceMember.UID)
-			}
-		}
-		if len(nineMemberUIDs) > 0 {
-			groupAvatarEventID, err = g.ctx.EventBegin(&wkevent.Data{
-				Event: event.GroupAvatarUpdate,
-				Type:  wkevent.CMD,
-				Data: &config.CMDGroupAvatarUpdateReq{
-					GroupNo: groupNo,
-					Members: nineMemberUIDs,
-				},
-			}, tx)
-			if err != nil {
-				tx.Rollback()
-				g.Error("开启群成员头像更新事件失败！", zap.Error(err))
-				c.ResponseError(errors.New("开启群成员头像更新事件失败！"))
-				return
-			}
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		tx.RollbackUnlessCommitted()
-		g.Error("提交事务失败！", zap.Error(err))
-		c.ResponseError(errors.New("提交事务失败！"))
-		return
-	}
-	// 提交事件
-	g.ctx.EventCommit(eventID)
-	if groupAvatarEventID != 0 {
-		g.ctx.EventCommit(groupAvatarEventID)
-	}
-
-	// 调用IM的移除订阅者
-	err = g.ctx.IMRemoveSubscriber(&config.SubscriberRemoveReq{
-		ChannelID:   groupNo,
-		ChannelType: common.ChannelTypeGroup.Uint8(),
-		Subscribers: req.Members,
 	})
 	if err != nil {
-		g.Error("调用IM的移除订阅者接口失败！", zap.Error(err))
-		c.ResponseError(errors.New("调用IM的移除订阅者接口失败！"))
+		c.ResponseError(err)
 		return
-	}
-
-	// 移除被踢用户在该群所有子区的成员身份
-	for _, realMember := range realDeleteMemberModels {
-		g.removeUserFromGroupThreads(groupNo, realMember.UID)
-	}
-
-	//给被踢的成员发送被踢消息
-	err = g.ctx.SendGroupMemberBeRemove(groupMemberRemoveReq)
-	if err != nil {
-		g.Warn("发送群成员被踢消息失败！", zap.Error(err))
 	}
 
 	c.ResponseOK()
