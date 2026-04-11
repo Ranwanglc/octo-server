@@ -131,7 +131,6 @@ func (p *IOSPush) Push(deviceToken string, payload Payload) error {
 	iosPayload := payload.(*IOSPayload)
 	rtcPayload := payload.GetRTCPayload()
 	if rtcPayload != nil {
-		fmt.Println("音视频推送。。。。。")
 		data := map[string]interface{}{
 			"aps": map[string]interface{}{
 				"content-available": 1,
@@ -148,7 +147,6 @@ func (p *IOSPush) Push(deviceToken string, payload Payload) error {
 		}
 		notification.Payload = []byte(util.ToJson(data))
 	} else {
-		fmt.Println("普通推送。。。。。")
 		data := map[string]interface{}{
 			"aps": map[string]interface{}{
 				"alert": map[string]interface{}{

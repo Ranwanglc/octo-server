@@ -519,7 +519,6 @@ func (m *Manager) recordpersonal(c *wkhttp.Context) {
 				}
 			}
 		}
-		println("消息设备ID", deviceDBID)
 		messageId := strconv.FormatInt(msg.MessageID, 10)
 		list = append(list, &recordVO{
 			MessageID:   messageId,
@@ -655,7 +654,6 @@ func (m *Manager) record(c *wkhttp.Context) {
 				}
 			}
 		}
-		println("消息设备ID", deviceDBID)
 		messageId := strconv.FormatInt(msg.MessageID, 10)
 
 		list = append(list, &recordVO{

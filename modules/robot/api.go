@@ -898,7 +898,7 @@ func (s *simpleRobotMessageResp) from(messageResp *config.MessageResp) {
 	s.Timestamp = messageResp.Timestamp
 	var payloadMap map[string]interface{}
 	if err := util.ReadJsonByByte(messageResp.Payload, &payloadMap); err != nil {
-		fmt.Println("解码消息正文失败！", err)
+		log.Warn("解码消息正文失败", zap.Error(err))
 	}
 	s.Payload = payloadMap
 }

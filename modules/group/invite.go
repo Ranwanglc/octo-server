@@ -428,7 +428,6 @@ func (i InviteDetailResp) From(model *InviteDetailModel, items []*InviteItemDeta
 		}
 		resp.Items = itemResps
 	}
-	fmt.Println(resp)
 	return resp
 }
 

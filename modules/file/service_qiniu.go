@@ -66,7 +66,6 @@ func (s *ServiceQiniu) UploadFile(filePath string, contentType string, copyFileW
 	if err != nil {
 		s.Error("上传失败", zap.Error(err))
 	}
-	fmt.Println(ret.Key, ret.Hash)
 	return map[string]interface{}{
 		"path": ret.Key,
 	}, err

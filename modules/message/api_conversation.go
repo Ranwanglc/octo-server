@@ -643,7 +643,6 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 			break
 		}
 	}
-	println("查询到通话中的频道", len(callingChannels))
 	channelStates := make([]*ChannelState, 0)
 	if len(callingChannels) > 0 {
 		for _, channel := range callingChannels {
