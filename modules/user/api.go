@@ -1827,19 +1827,6 @@ func (u *User) addBlacklist(c *wkhttp.Context) {
 		}
 	}
 
-	// 请求im服务器设置黑名单
-	err = u.ctx.IMBlacklistAdd(config.ChannelBlacklistReq{
-		ChannelReq: config.ChannelReq{
-			ChannelID:   loginUID,
-			ChannelType: common.ChannelTypePerson.Uint8(),
-		},
-		UIDs: []string{uid},
-	})
-	if err != nil {
-		u.Error("设置黑名单失败！", zap.Error(err))
-		c.ResponseError(errors.New("设置黑名单失败！"))
-		return
-	}
 	//添加黑名单
 	version, err := u.ctx.GenSeq(common.UserSettingSeqKey)
 	if err != nil {
@@ -1882,6 +1869,18 @@ func (u *User) addBlacklist(c *wkhttp.Context) {
 		u.Error("提交数据库失败！", zap.Error(err))
 		c.ResponseError(errors.New("提交数据库失败！"))
 		return
+	}
+
+	// DB事务提交成功后，再请求IM服务器设置黑名单
+	err = u.ctx.IMBlacklistAdd(config.ChannelBlacklistReq{
+		ChannelReq: config.ChannelReq{
+			ChannelID:   loginUID,
+			ChannelType: common.ChannelTypePerson.Uint8(),
+		},
+		UIDs: []string{uid},
+	})
+	if err != nil {
+		u.Error("IM设置黑名单失败，DB已提交", zap.Error(err), zap.String("loginUID", loginUID), zap.String("uid", uid))
 	}
 
 	// 发送给被拉黑的人去更新拉黑人的频道
@@ -1964,7 +1963,7 @@ func (u *User) removeBlacklist(c *wkhttp.Context) {
 		return
 	}
 
-	// 请求im服务器移除黑名单
+	// DB事务提交成功后，再请求IM服务器移除黑名单
 	err = u.ctx.IMBlacklistRemove(config.ChannelBlacklistReq{
 		ChannelReq: config.ChannelReq{
 			ChannelID:   loginUID,
@@ -1973,9 +1972,7 @@ func (u *User) removeBlacklist(c *wkhttp.Context) {
 		UIDs: []string{uid},
 	})
 	if err != nil {
-		u.Error("设置黑名单失败！", zap.Error(err))
-		c.ResponseError(errors.New("设置黑名单失败！"))
-		return
+		u.Error("IM移除黑名单失败，DB已提交", zap.Error(err), zap.String("loginUID", loginUID), zap.String("uid", uid))
 	}
 
 	// 发送给被拉黑的人去更新拉黑人的频道
