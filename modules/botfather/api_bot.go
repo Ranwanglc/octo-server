@@ -414,10 +414,6 @@ func (bf *BotFather) botGroupCreate(c *wkhttp.Context) {
 		c.ResponseError(errors.New("members is required"))
 		return
 	}
-	// creator 可选，不传则默认 members[0] 为群主
-	if req.Creator == "" {
-		req.Creator = req.Members[0]
-	}
 
 	// 如果没传 space_id，自动使用 Bot 所在的第一个 Space
 	if req.SpaceID == "" {
@@ -447,6 +443,19 @@ func (bf *BotFather) botGroupCreate(c *wkhttp.Context) {
 	if len(humanMembers) == 0 {
 		c.ResponseError(errors.New("only human members can be added through bot API"))
 		return
+	}
+
+	// creator 校验：不能是 bot，默认值在过滤后的 humanMembers 上取
+	if req.Creator == "" {
+		req.Creator = humanMembers[0]
+	} else {
+		// 显式传了 creator，校验不能是 bot
+		var creatorRobot int
+		bf.ctx.DB().SelectBySql("SELECT IFNULL(robot,0) FROM user WHERE uid=?", req.Creator).LoadOne(&creatorRobot)
+		if creatorRobot == 1 {
+			c.ResponseError(errors.New("creator cannot be a bot"))
+			return
+		}
 	}
 
 	// 调用 Service 创建群
