@@ -2378,39 +2378,12 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 		}
 	}
 	// 生成群头像更新事件
-	var groupAvatarEventID int64
-	groupIsUploadAvatar, avatarErr := g.db.queryGroupAvatarIsUpload(groupNo)
+	groupAvatarEventID, avatarErr := beginAvatarUpdateEvent(g.ctx, g.db, groupNo, nil, []string{loginUID}, tx)
 	if avatarErr != nil {
-		g.Error("查询群头像是否用户上传过失败！", zap.String("group_no", groupNo), zap.Error(avatarErr))
-	}
-	if avatarErr == nil && groupIsUploadAvatar != 1 {
-		memberCount, countErr := g.db.QueryMemberCountTx(groupNo, tx)
-		if countErr != nil {
-			g.Error("查询群成员数量失败！", zap.String("group_no", groupNo), zap.Error(countErr))
-		}
-		if countErr == nil && memberCount < 9 {
-			remainingMembers, _ := g.db.QueryMembersFirstNine(groupNo)
-			avatarUIDs := make([]string, 0, len(remainingMembers))
-			for _, m := range remainingMembers {
-				if m.UID != loginUID {
-					avatarUIDs = append(avatarUIDs, m.UID)
-				}
-			}
-			groupAvatarEventID, err = g.ctx.EventBegin(&wkevent.Data{
-				Event: event.GroupAvatarUpdate,
-				Type:  wkevent.CMD,
-				Data: &config.CMDGroupAvatarUpdateReq{
-					GroupNo: groupNo,
-					Members: avatarUIDs,
-				},
-			}, tx)
-			if err != nil {
-				tx.Rollback()
-				g.Error("开启群头像更新事件失败！", zap.Error(err))
-				c.ResponseError(errors.New("开启群头像更新事件失败！"))
-				return
-			}
-		}
+		tx.Rollback()
+		g.Error("开启群头像更新事件失败！", zap.Error(avatarErr))
+		c.ResponseError(errors.New("开启群头像更新事件失败！"))
+		return
 	}
 	if err := tx.Commit(); err != nil {
 		tx.RollbackUnlessCommitted()

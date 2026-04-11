@@ -408,6 +408,13 @@ func (d *DB) QueryMembersFirstNine(groupNo string) ([]*MemberModel, error) {
 	return memberModels, err
 }
 
+// QueryMembersFirstNineTx 事务内查询最先加入群聊的九位群成员
+func (d *DB) QueryMembersFirstNineTx(groupNo string, tx *dbr.Tx) ([]*MemberModel, error) {
+	var memberModels []*MemberModel
+	_, err := tx.Select("*").From("group_member").Where("group_no=? and is_deleted=0", groupNo).OrderDir("created_at", true).Limit(9).Load(&memberModels)
+	return memberModels, err
+}
+
 // QueryMembersFirstNineExclude 查询最先加入群聊的九位群成员 【excludeUIDs】为排除的用户
 func (d *DB) QueryMembersFirstNineExclude(groupNo string, excludeUIDs []string) ([]*MemberModel, error) {
 	if len(excludeUIDs) <= 0 {

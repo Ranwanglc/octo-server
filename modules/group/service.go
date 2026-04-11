@@ -16,6 +16,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
+	"github.com/gocraft/dbr/v2"
 	"go.uber.org/zap"
 )
 
@@ -928,27 +929,17 @@ func (s *Service) CreateGroup(req *CreateGroupServiceReq) (*CreateGroupServiceRe
 	}
 
 	// 生成群头像事件（事务内）
-	var groupAvatarEventID int64
-	if s.ctx.Event != nil {
-		n := len(realMemberUIDs)
-		if n > 9 {
-			n = 9
-		}
-		avatarMembers := make([]string, n)
-		copy(avatarMembers, realMemberUIDs[:n])
-		groupAvatarEventID, err = s.ctx.EventBegin(&wkevent.Data{
-			Event: event.GroupAvatarUpdate,
-			Type:  wkevent.CMD,
-			Data: &config.CMDGroupAvatarUpdateReq{
-				GroupNo: groupNo,
-				Members: avatarMembers,
-			},
-		}, tx)
-		if err != nil {
-			tx.Rollback()
-			s.Error("begin group avatar update event failed", zap.Error(err))
-			return nil, fmt.Errorf("begin group avatar update event: %w", err)
-		}
+	n := len(realMemberUIDs)
+	if n > 9 {
+		n = 9
+	}
+	avatarMembers := make([]string, n)
+	copy(avatarMembers, realMemberUIDs[:n])
+	groupAvatarEventID, err := beginAvatarUpdateEvent(s.ctx, s.db, groupNo, avatarMembers, nil, tx)
+	if err != nil {
+		tx.Rollback()
+		s.Error("begin group avatar update event failed", zap.Error(err))
+		return nil, err
 	}
 
 	// 提交事务
@@ -1248,38 +1239,12 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 
 	// 生成群头像更新事件（事务内）
 	var groupAvatarEventID int64
-	if s.ctx.Event != nil && len(removedUIDs) > 0 {
-		groupIsUploadAvatar, avatarErr := s.db.queryGroupAvatarIsUpload(req.GroupNo)
-		if avatarErr != nil {
-			s.Error("query group avatar upload status failed", zap.Error(avatarErr))
-		}
-		if avatarErr == nil && groupIsUploadAvatar != 1 {
-			memberCount, countErr := s.db.QueryMemberCountTx(req.GroupNo, tx)
-			if countErr != nil {
-				s.Error("query member count in tx failed", zap.Error(countErr))
-			}
-			if countErr == nil && memberCount < 9 {
-				remainingMembers, _ := s.db.QueryMembersFirstNine(req.GroupNo)
-				avatarUIDs := make([]string, 0, len(remainingMembers))
-				for _, m := range remainingMembers {
-					if !contains(removedUIDs, m.UID) {
-						avatarUIDs = append(avatarUIDs, m.UID)
-					}
-				}
-				groupAvatarEventID, err = s.ctx.EventBegin(&wkevent.Data{
-					Event: event.GroupAvatarUpdate,
-					Type:  wkevent.CMD,
-					Data: &config.CMDGroupAvatarUpdateReq{
-						GroupNo: req.GroupNo,
-						Members: avatarUIDs,
-					},
-				}, tx)
-				if err != nil {
-					tx.Rollback()
-					s.Error("begin group avatar update event failed", zap.Error(err))
-					return nil, fmt.Errorf("begin group avatar update event: %w", err)
-				}
-			}
+	if len(removedUIDs) > 0 {
+		groupAvatarEventID, err = beginAvatarUpdateEvent(s.ctx, s.db, req.GroupNo, nil, removedUIDs, tx)
+		if err != nil {
+			tx.Rollback()
+			s.Error("begin group avatar update event failed", zap.Error(err))
+			return nil, err
 		}
 	}
 
@@ -1431,6 +1396,54 @@ func contains(slice []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// beginAvatarUpdateEvent 在事务内创建群头像更新事件（公共逻辑）。
+// memberUIDs 非空时直接使用（新建群场景）；为空时从事务内查询当前成员。
+// excludeUIDs 用于过滤已删除但事务外仍可见的成员。
+// 返回 eventID（0 表示无需更新）和 error。
+func beginAvatarUpdateEvent(ctx *config.Context, db *DB, groupNo string, memberUIDs []string, excludeUIDs []string, tx *dbr.Tx) (int64, error) {
+	if ctx.Event == nil {
+		return 0, nil
+	}
+
+	// 新建群不需要检查 is_upload_avatar
+	if len(memberUIDs) == 0 {
+		isUpload, err := db.queryGroupAvatarIsUpload(groupNo)
+		if err != nil {
+			return 0, nil
+		}
+		if isUpload == 1 {
+			return 0, nil
+		}
+
+		members, err := db.QueryMembersFirstNineTx(groupNo, tx)
+		if err != nil {
+			return 0, nil
+		}
+		for _, m := range members {
+			if !contains(excludeUIDs, m.UID) {
+				memberUIDs = append(memberUIDs, m.UID)
+			}
+		}
+	}
+
+	if len(memberUIDs) == 0 {
+		return 0, nil
+	}
+
+	eventID, err := ctx.EventBegin(&wkevent.Data{
+		Event: event.GroupAvatarUpdate,
+		Type:  wkevent.CMD,
+		Data: &config.CMDGroupAvatarUpdateReq{
+			GroupNo: groupNo,
+			Members: memberUIDs,
+		},
+	}, tx)
+	if err != nil {
+		return 0, fmt.Errorf("begin group avatar update event: %w", err)
+	}
+	return eventID, nil
 }
 
 // removeUserFromGroupThreads 移除用户在某群下所有子区的成员记录和 IM 订阅（直接 SQL）
