@@ -1,8 +1,10 @@
 package thread
 
 import (
+	"encoding/json"
 	"errors"
 
+	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
@@ -21,12 +23,67 @@ type Thread struct {
 
 // New 创建 Thread API 处理器
 func New(ctx *config.Context) *Thread {
-	return &Thread{
+	t := &Thread{
 		ctx:          ctx,
 		db:           NewDB(ctx),
 		service:      NewService(ctx),
 		groupService: group.NewService(ctx),
 		Log:          log.NewTLog("Thread"),
+	}
+
+	// 注册消息监听器：归档子区收到消息后自动解档
+	ctx.AddMessagesListener(t.onMessages)
+
+	return t
+}
+
+// onMessages 消息监听器
+func (t *Thread) onMessages(messages []*config.MessageResp) {
+	for _, msg := range messages {
+		// 只处理子区频道类型
+		if msg.ChannelType != common.ChannelTypeCommunityTopic.Uint8() {
+			continue
+		}
+
+		groupNo, shortID, err := ParseChannelID(msg.ChannelID)
+		if err != nil {
+			continue
+		}
+
+		thread, err := t.db.QueryByGroupNoAndShortID(groupNo, shortID)
+		if err != nil || thread == nil {
+			continue
+		}
+
+		// 归档状态收到消息，自动解档
+		if thread.Status == ThreadStatusArchived {
+			version, err := t.ctx.GenSeq(ThreadSeqKey)
+			if err != nil {
+				t.Error("生成版本号失败", zap.Error(err))
+				continue
+			}
+			if err := t.db.UpdateStatus(shortID, ThreadStatusActive, version); err != nil {
+				t.Error("自动解档失败", zap.Error(err), zap.String("shortID", shortID))
+			} else {
+				t.Info("归档子区收到消息，自动解档", zap.String("shortID", shortID))
+			}
+		}
+
+		// 更新消息统计
+		content := parsePayloadContent(msg.Payload)
+		if runeLen := len([]rune(content)); runeLen > 500 {
+			content = string([]rune(content)[:500])
+		}
+		if err := t.db.UpdateMessageStats(shortID, content, msg.FromUID); err != nil {
+			t.Error("更新消息统计失败", zap.Error(err), zap.String("shortID", shortID))
+		}
+
+		// 发送者不是子区成员，自动加入
+		if msg.FromUID != "" {
+			if err := t.service.JoinThread(groupNo, shortID, msg.FromUID); err != nil {
+				t.Error("自动加入子区失败", zap.Error(err), zap.String("uid", msg.FromUID))
+			}
+		}
 	}
 }
 
@@ -68,8 +125,9 @@ func (t *Thread) createThread(c *wkhttp.Context) {
 	}
 
 	var req struct {
-		Name            string `json:"name" binding:"required,max=100"`
-		SourceMessageID *int64 `json:"source_message_id"`
+		Name                 string          `json:"name" binding:"required,max=100"`
+		SourceMessageID      *int64          `json:"source_message_id"`
+		SourceMessagePayload json.RawMessage `json:"source_message_payload"`
 	}
 	if err := c.BindJSON(&req); err != nil {
 		t.Error("参数错误", zap.Error(err))
@@ -77,12 +135,29 @@ func (t *Thread) createThread(c *wkhttp.Context) {
 		return
 	}
 
+	// 校验 source_message_payload
+	if len(req.SourceMessagePayload) > 0 {
+		if req.SourceMessageID == nil {
+			c.ResponseError(errors.New("source_message_payload requires source_message_id"))
+			return
+		}
+		if len(req.SourceMessagePayload) > maxSourcePayloadBytes {
+			c.ResponseError(errors.New("source_message_payload too large"))
+			return
+		}
+		if !json.Valid(req.SourceMessagePayload) || string(req.SourceMessagePayload) == "null" {
+			c.ResponseError(errors.New("invalid source_message_payload"))
+			return
+		}
+	}
+
 	resp, err := t.service.CreateThread(&CreateThreadReq{
-		GroupNo:         groupNo,
-		Name:            req.Name,
-		CreatorUID:      loginUID,
-		CreatorName:     loginName,
-		SourceMessageID: req.SourceMessageID,
+		GroupNo:              groupNo,
+		Name:                 req.Name,
+		CreatorUID:           loginUID,
+		CreatorName:          loginName,
+		SourceMessageID:      req.SourceMessageID,
+		SourceMessagePayload: req.SourceMessagePayload,
 	})
 	if err != nil {
 		t.Error("创建子区失败", zap.Error(err), zap.String("groupNo", groupNo), zap.String("uid", loginUID))

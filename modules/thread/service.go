@@ -1,6 +1,7 @@
 package thread
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,6 +15,20 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"go.uber.org/zap"
 )
+
+// parsePayloadContent 从消息 payload 中提取 content 字段
+func parsePayloadContent(payload []byte) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	var m struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(payload, &m); err != nil {
+		return ""
+	}
+	return m.Content
+}
 
 // IService 子区服务接口
 type IService interface {
@@ -43,6 +58,8 @@ type IService interface {
 	GetMemberUIDs(groupNo, shortID string) ([]string, error)
 	// IsMember 检查是否是子区成员
 	IsMember(groupNo, shortID, uid string) (bool, error)
+	// RemoveUserFromGroupThreads 退群时移除用户在该群所有子区的成员身份和 IM 订阅
+	RemoveUserFromGroupThreads(groupNo, uid string) error
 }
 
 // Service 子区服务实现
@@ -67,26 +84,32 @@ func NewService(ctx *config.Context) IService {
 
 // CreateThreadReq 创建子区请求
 type CreateThreadReq struct {
-	GroupNo         string
-	Name            string
-	CreatorUID      string
-	CreatorName     string
-	SourceMessageID *int64
+	GroupNo              string
+	Name                 string
+	CreatorUID           string
+	CreatorName          string
+	SourceMessageID      *int64
+	SourceMessagePayload json.RawMessage // 源消息原始 payload，用于拷贝到子区
 }
 
 // ThreadResp 子区响应
 type ThreadResp struct {
-	ShortID         string `json:"short_id"`
-	GroupNo         string `json:"group_no"`
-	ChannelID       string `json:"channel_id"`
-	ChannelType     uint8  `json:"channel_type"`
-	Name            string `json:"name"`
-	CreatorUID      string `json:"creator_uid"`
-	SourceMessageID *int64 `json:"source_message_id,omitempty"`
-	Status          int    `json:"status"`
-	MemberCount     int    `json:"member_count"`
-	CreatedAt       string `json:"created_at"`
-	UpdatedAt       string `json:"updated_at"`
+	ShortID               string `json:"short_id"`
+	GroupNo               string `json:"group_no"`
+	GroupName             string `json:"group_name"`
+	ChannelID             string `json:"channel_id"`
+	ChannelType           uint8  `json:"channel_type"`
+	Name                  string `json:"name"`
+	CreatorUID            string `json:"creator_uid"`
+	SourceMessageID       *int64 `json:"source_message_id,omitempty"`
+	Status                int    `json:"status"`
+	MemberCount           int    `json:"member_count"`
+	MessageCount          int64  `json:"message_count"`
+	LastMessageContent    string `json:"last_message_content,omitempty"`
+	LastMessageSenderName string `json:"last_message_sender_name,omitempty"`
+	LastMessageAt         string `json:"last_message_at"`
+	CreatedAt             string `json:"created_at"`
+	UpdatedAt             string `json:"updated_at"`
 }
 
 // MemberResp 子区成员响应
@@ -163,31 +186,93 @@ func (s *Service) CreateThread(req *CreateThreadReq) (*ThreadResp, error) {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
-	// 创建 IM 频道，只添加创建者为订阅者（只有主动加入的成员才收到消息通知）
-	// IMDatasource.Subscribers 返回父群所有成员用于发送权限校验
+	// 获取父群所有成员作为订阅者（所有群成员都有发消息权限）
+	// 注意：thread_member 表记录主动加入的成员（决定通知推送），这里是 IM 发送权限
+	members, err := s.groupService.GetMembers(req.GroupNo)
+	if err != nil {
+		return nil, fmt.Errorf("get group members: %w", err)
+	}
+	subscribers := make([]string, 0, len(members))
+	for _, m := range members {
+		subscribers = append(subscribers, m.UID)
+	}
+
+	// 创建 IM 频道
 	channelID := BuildChannelID(req.GroupNo, shortID)
 	err = s.ctx.IMCreateOrUpdateChannel(&config.ChannelCreateReq{
 		ChannelID:   channelID,
 		ChannelType: common.ChannelTypeCommunityTopic.Uint8(),
-		Subscribers: []string{req.CreatorUID},
+		Subscribers: subscribers,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create IM channel: %w", err)
 	}
 
+	// 拷贝源消息到子区作为首条消息
+	if req.SourceMessageID != nil && len(req.SourceMessagePayload) > 0 {
+		// 从消息表查询原始发送者，防止客户端伪造
+		sourceFromUID, err := s.db.QueryMessageFromUID(req.GroupNo, *req.SourceMessageID)
+		if err != nil {
+			s.Warn("查询源消息发送者失败，使用创建者作为发送者",
+				zap.Error(err),
+				zap.Int64("messageID", *req.SourceMessageID))
+			sourceFromUID = req.CreatorUID
+		} else if sourceFromUID == "" {
+			sourceFromUID = req.CreatorUID
+		}
+		s.sendSourceMessage(channelID, sourceFromUID, req.SourceMessagePayload)
+	}
+
 	// 在父群发送子区创建消息
-	s.sendThreadCreatedMessage(req.GroupNo, shortID, req.Name, req.CreatorUID, req.CreatorName)
+	s.sendThreadCreatedMessage(req.GroupNo, shortID, req.Name, req.CreatorUID, req.CreatorName, req.SourceMessageID, req.SourceMessagePayload)
 
 	resp := s.toThreadRespWithID(thread)
 	resp.MemberCount = 1 // 创建者
 	return resp, nil
 }
 
-// sendThreadCreatedMessage 发送子区创建消息到父群
-func (s *Service) sendThreadCreatedMessage(groupNo, shortID, name, creatorUID, creatorName string) {
-	channelID := BuildChannelID(groupNo, shortID)
+// buildThreadCreatedPayload 构建子区创建通知消息的 payload
+func buildThreadCreatedPayload(shortID, name, channelID, creatorUID, creatorName string, sourceMessageID *int64, sourcePayload json.RawMessage) map[string]interface{} {
+	participants := []map[string]string{
+		{"uid": creatorUID, "name": creatorName},
+	}
 
-	// 发送可见的通知消息到父群
+	payload := map[string]interface{}{
+		"type":         ContentTypeThreadCreated,
+		"content":      fmt.Sprintf("%s 创建了子区「%s」", creatorName, name),
+		"from_uid":     creatorUID,
+		"from_name":    creatorName,
+		"short_id":     shortID,
+		"channel_id":   channelID,
+		"channel_type": common.ChannelTypeCommunityTopic.Uint8(),
+		"thread_name":  name,
+		"participants": participants,
+	}
+
+	if sourceMessageID != nil {
+		payload["source_message_id"] = *sourceMessageID
+	}
+
+	var messageCount int64
+	if len(sourcePayload) > 0 {
+		messageCount = 1
+		payload["last_message"] = map[string]interface{}{
+			"from_uid":  creatorUID,
+			"from_name": creatorName,
+			"content":   parsePayloadContent(sourcePayload),
+			"timestamp": time.Now().Unix(),
+		}
+	}
+	payload["message_count"] = messageCount
+
+	return payload
+}
+
+// sendThreadCreatedMessage 发送子区创建消息到父群
+func (s *Service) sendThreadCreatedMessage(groupNo, shortID, name, creatorUID, creatorName string, sourceMessageID *int64, sourcePayload json.RawMessage) {
+	channelID := BuildChannelID(groupNo, shortID)
+	payload := buildThreadCreatedPayload(shortID, name, channelID, creatorUID, creatorName, sourceMessageID, sourcePayload)
+
 	err := s.ctx.SendMessage(&config.MsgSendReq{
 		Header: config.MsgHeader{
 			NoPersist: 0,
@@ -196,19 +281,29 @@ func (s *Service) sendThreadCreatedMessage(groupNo, shortID, name, creatorUID, c
 		},
 		ChannelID:   groupNo,
 		ChannelType: common.ChannelTypeGroup.Uint8(),
-		Payload: []byte(util.ToJson(map[string]interface{}{
-			"type":         ContentTypeThreadCreated,
-			"content":      fmt.Sprintf("%s 创建了子区「%s」", creatorName, name),
-			"from_uid":     creatorUID,
-			"from_name":    creatorName,
-			"short_id":     shortID,
-			"channel_id":   channelID,
-			"channel_type": common.ChannelTypeCommunityTopic.Uint8(),
-			"thread_name":  name,
-		})),
+		Payload:     []byte(util.ToJson(payload)),
 	})
 	if err != nil {
 		s.Error("发送子区创建消息失败", zap.Error(err), zap.String("groupNo", groupNo))
+	}
+}
+
+// sendSourceMessage 将源消息拷贝到子区频道作为首条消息
+// fromUID 应该是经过服务端验证的原始消息发送者
+func (s *Service) sendSourceMessage(channelID, fromUID string, payload json.RawMessage) {
+	err := s.ctx.SendMessage(&config.MsgSendReq{
+		Header: config.MsgHeader{
+			NoPersist: 0,
+			RedDot:    1,
+			SyncOnce:  0,
+		},
+		FromUID:     fromUID,
+		ChannelID:   channelID,
+		ChannelType: common.ChannelTypeCommunityTopic.Uint8(),
+		Payload:     payload,
+	})
+	if err != nil {
+		s.Error("拷贝源消息到子区失败", zap.Error(err), zap.String("channelID", channelID))
 	}
 }
 
@@ -230,22 +325,49 @@ func (s *Service) GetThreads(groupNo string) ([]*ThreadResp, error) {
 			threadIDs = append(threadIDs, t.Id)
 		}
 	}
-	memberCounts, _ := s.db.CountMembersBatch(threadIDs)
+	memberCounts, err := s.db.CountMembersBatch(threadIDs)
+	if err != nil {
+		s.Warn("批量查询成员数量失败", zap.Error(err))
+		memberCounts = make(map[int64]int)
+	}
+
+	// 查询群名称
+	var groupName string
+	if groupInfo, err := s.groupService.GetGroupWithGroupNo(groupNo); err == nil && groupInfo != nil {
+		groupName = groupInfo.Name
+	}
+
+	// 批量查询最新消息发送者名称
+	senderUIDs := make([]string, 0)
+	for _, t := range threads {
+		if t.LastMessageSenderUID != "" {
+			senderUIDs = append(senderUIDs, t.LastMessageSenderUID)
+		}
+	}
+	senderNames := s.batchGetUserNames(senderUIDs)
 
 	results := make([]*ThreadResp, 0, len(threads))
 	for _, t := range threads {
 		resp := &ThreadResp{
-			ShortID:         t.ShortID,
-			GroupNo:         t.GroupNo,
-			ChannelID:       BuildChannelID(t.GroupNo, t.ShortID),
-			ChannelType:     common.ChannelTypeCommunityTopic.Uint8(),
-			Name:            t.Name,
-			CreatorUID:      t.CreatorUID,
-			SourceMessageID: t.SourceMessageID,
-			Status:          t.Status,
-			MemberCount:     memberCounts[t.Id],
-			CreatedAt:       util.ToyyyyMMddHHmmss(time.Time(t.CreatedAt)),
-			UpdatedAt:       util.ToyyyyMMddHHmmss(time.Time(t.UpdatedAt)),
+			ShortID:               t.ShortID,
+			GroupNo:               t.GroupNo,
+			GroupName:             groupName,
+			ChannelID:             BuildChannelID(t.GroupNo, t.ShortID),
+			ChannelType:           common.ChannelTypeCommunityTopic.Uint8(),
+			Name:                  t.Name,
+			CreatorUID:            t.CreatorUID,
+			SourceMessageID:       t.SourceMessageID,
+			Status:                t.Status,
+			MemberCount:           memberCounts[t.Id],
+			MessageCount:          t.MessageCount,
+			LastMessageContent:    t.LastMessageContent,
+			LastMessageSenderName: senderNames[t.LastMessageSenderUID],
+			LastMessageAt:         util.ToyyyyMMddHHmmss(time.Time(t.CreatedAt)), // 默认 created_at
+			CreatedAt:             util.ToyyyyMMddHHmmss(time.Time(t.CreatedAt)),
+			UpdatedAt:             util.ToyyyyMMddHHmmss(time.Time(t.UpdatedAt)),
+		}
+		if t.LastMessageAt != nil {
+			resp.LastMessageAt = util.ToyyyyMMddHHmmss(*t.LastMessageAt)
 		}
 		results = append(results, resp)
 	}
@@ -264,7 +386,11 @@ func (s *Service) GetThread(groupNo, shortID string) (*ThreadResp, error) {
 	if thread.Status == ThreadStatusDeleted {
 		return nil, errors.New("thread has been deleted")
 	}
-	return s.toThreadResp(thread), nil
+	resp := s.toThreadResp(thread)
+	if groupInfo, err := s.groupService.GetGroupWithGroupNo(groupNo); err == nil && groupInfo != nil {
+		resp.GroupName = groupInfo.Name
+	}
+	return resp, nil
 }
 
 // ArchiveThread 归档子区
@@ -423,19 +549,64 @@ func (s *Service) toThreadRespWithID(m *Model) *ThreadResp {
 		memberCount, _ = s.db.CountMembers(m.Id)
 	}
 
-	return &ThreadResp{
-		ShortID:         m.ShortID,
-		GroupNo:         m.GroupNo,
-		ChannelID:       BuildChannelID(m.GroupNo, m.ShortID),
-		ChannelType:     common.ChannelTypeCommunityTopic.Uint8(),
-		Name:            m.Name,
-		CreatorUID:      m.CreatorUID,
-		SourceMessageID: m.SourceMessageID,
-		Status:          m.Status,
-		MemberCount:     memberCount,
-		CreatedAt:       util.ToyyyyMMddHHmmss(time.Time(m.CreatedAt)),
-		UpdatedAt:       util.ToyyyyMMddHHmmss(time.Time(m.UpdatedAt)),
+	resp := &ThreadResp{
+		ShortID:            m.ShortID,
+		GroupNo:            m.GroupNo,
+		ChannelID:          BuildChannelID(m.GroupNo, m.ShortID),
+		ChannelType:        common.ChannelTypeCommunityTopic.Uint8(),
+		Name:               m.Name,
+		CreatorUID:         m.CreatorUID,
+		SourceMessageID:    m.SourceMessageID,
+		Status:             m.Status,
+		MemberCount:        memberCount,
+		MessageCount:       m.MessageCount,
+		LastMessageContent: m.LastMessageContent,
+		LastMessageAt:      util.ToyyyyMMddHHmmss(time.Time(m.CreatedAt)), // 默认 created_at
+		CreatedAt:          util.ToyyyyMMddHHmmss(time.Time(m.CreatedAt)),
+		UpdatedAt:          util.ToyyyyMMddHHmmss(time.Time(m.UpdatedAt)),
 	}
+	if m.LastMessageSenderUID != "" {
+		resp.LastMessageSenderName = s.getUserName(m.LastMessageSenderUID)
+	}
+	if m.LastMessageAt != nil {
+		resp.LastMessageAt = util.ToyyyyMMddHHmmss(*m.LastMessageAt)
+	}
+	return resp
+}
+
+// getUserName 根据 UID 获取用户名
+func (s *Service) getUserName(uid string) string {
+	users, err := s.userService.GetUsers([]string{uid})
+	if err != nil || len(users) == 0 {
+		return ""
+	}
+	return users[0].Name
+}
+
+// batchGetUserNames 批量获取用户名
+func (s *Service) batchGetUserNames(uids []string) map[string]string {
+	result := make(map[string]string, len(uids))
+	if len(uids) == 0 {
+		return result
+	}
+	// 去重
+	unique := make(map[string]struct{}, len(uids))
+	deduped := make([]string, 0, len(uids))
+	for _, uid := range uids {
+		if _, ok := unique[uid]; !ok {
+			unique[uid] = struct{}{}
+			deduped = append(deduped, uid)
+		}
+	}
+	users, err := s.userService.GetUsers(deduped)
+	if err != nil {
+		s.Warn("批量查询用户名失败", zap.Error(err))
+		return result
+	}
+	for _, u := range users {
+		result[u.UID] = u.Name
+	}
+	return result
 }
 
 // BuildChannelID 构建 channelID
@@ -533,17 +704,6 @@ func (s *Service) JoinThread(groupNo, shortID, uid string) error {
 		return fmt.Errorf("insert member: %w", err)
 	}
 
-	// 同步订阅者到 IM
-	channelID := BuildChannelID(groupNo, shortID)
-	err = s.ctx.IMAddSubscriber(&config.SubscriberAddReq{
-		ChannelID:   channelID,
-		ChannelType: common.ChannelTypeCommunityTopic.Uint8(),
-		Subscribers: []string{uid},
-	})
-	if err != nil {
-		s.Error("添加IM订阅者失败", zap.Error(err), zap.String("uid", uid))
-	}
-
 	return nil
 }
 
@@ -571,17 +731,6 @@ func (s *Service) LeaveThread(groupNo, shortID, uid string) error {
 	err = s.db.DeleteMember(threadID, uid)
 	if err != nil {
 		return fmt.Errorf("delete member: %w", err)
-	}
-
-	// 同步移除 IM 订阅者
-	channelID := BuildChannelID(groupNo, shortID)
-	err = s.ctx.IMRemoveSubscriber(&config.SubscriberRemoveReq{
-		ChannelID:   channelID,
-		ChannelType: common.ChannelTypeCommunityTopic.Uint8(),
-		Subscribers: []string{uid},
-	})
-	if err != nil {
-		s.Error("移除IM订阅者失败", zap.Error(err), zap.String("uid", uid))
 	}
 
 	return nil
@@ -642,4 +791,51 @@ func (s *Service) IsMember(groupNo, shortID, uid string) (bool, error) {
 		return false, fmt.Errorf("query thread id: %w", err)
 	}
 	return s.db.ExistMember(threadID, uid)
+}
+
+// RemoveUserFromGroupThreads 退群时移除用户在该群所有子区的成员身份和 IM 订阅
+func (s *Service) RemoveUserFromGroupThreads(groupNo, uid string) error {
+	// 查询用户在该群加入的所有子区
+	threads, err := s.db.QueryThreadsByGroupNoAndUID(groupNo, uid)
+	if err != nil {
+		return fmt.Errorf("query user threads in group: %w", err)
+	}
+	if len(threads) == 0 {
+		return nil
+	}
+
+	// 批量删除子区成员记录
+	tx, err := s.db.session.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	err = s.db.DeleteMembersByGroupNoAndUIDTx(groupNo, uid, tx)
+	if err != nil {
+		return fmt.Errorf("delete thread members: %w", err)
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+
+	// 移除 IM 订阅（事务外，失败仅记日志）
+	for _, t := range threads {
+		channelID := BuildChannelID(groupNo, t.ShortID)
+		rmErr := s.ctx.IMRemoveSubscriber(&config.SubscriberRemoveReq{
+			ChannelID:   channelID,
+			ChannelType: common.ChannelTypeCommunityTopic.Uint8(),
+			Subscribers: []string{uid},
+		})
+		if rmErr != nil {
+			s.Error("移除子区IM订阅者失败", zap.Error(rmErr), zap.String("groupNo", groupNo), zap.String("shortID", t.ShortID), zap.String("uid", uid))
+		}
+	}
+
+	return nil
 }

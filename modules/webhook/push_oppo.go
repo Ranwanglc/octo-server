@@ -83,7 +83,7 @@ func (o *OPPOPush) Push(deviceToken string, payload Payload) error {
 	}, nil)
 
 	if err != nil {
-		println("推送错误")
+		o.Warn("OPPO推送错误", zap.Error(err))
 		return err
 	}
 	if resp != nil && resp["code"] != nil {

@@ -89,7 +89,7 @@ func (v *VIVOPush) Push(deviceToken string, payload Payload) error {
 	})
 
 	if err != nil {
-		println("推送错误")
+		v.Warn("VIVO推送错误", zap.Error(err))
 		return err
 	}
 

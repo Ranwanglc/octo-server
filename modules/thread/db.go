@@ -1,6 +1,8 @@
 package thread
 
 import (
+	"fmt"
+	"hash/crc32"
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -25,13 +27,17 @@ func NewDB(ctx *config.Context) *DB {
 
 // Model 子区数据模型
 type Model struct {
-	ShortID         string `json:"short_id"`
-	GroupNo         string `json:"group_no"`
-	Name            string `json:"name"`
-	CreatorUID      string `json:"creator_uid"`
-	SourceMessageID *int64 `json:"source_message_id"`
-	Status          int    `json:"status"`
-	Version         int64  `json:"version"`
+	ShortID              string     `json:"short_id"`
+	GroupNo              string     `json:"group_no"`
+	Name                 string     `json:"name"`
+	CreatorUID           string     `json:"creator_uid"`
+	SourceMessageID      *int64     `json:"source_message_id"`
+	Status               int        `json:"status"`
+	Version              int64      `json:"version"`
+	MessageCount         int64      `json:"message_count"`
+	LastMessageAt        *time.Time `json:"last_message_at"`
+	LastMessageContent   string     `json:"last_message_content"`
+	LastMessageSenderUID string     `json:"last_message_sender_uid"`
 	db.BaseModel
 }
 
@@ -79,6 +85,46 @@ func (d *DB) QueryByGroupNo(groupNo string) ([]*Model, error) {
 		Limit(100).
 		Load(&models)
 	return models, err
+}
+
+// ThreadMetaRow 子区元数据（用于会话列表批量查询）
+type ThreadMetaRow struct {
+	ShortID         string `json:"short_id"`
+	SourceMessageID *int64 `json:"source_message_id"`
+	MessageCount    int64  `json:"message_count"`
+}
+
+// QueryThreadMetaByShortIDs 批量查询子区元数据（source_message_id, message_count）
+func (d *DB) QueryThreadMetaByShortIDs(shortIDs []string) (map[string]*ThreadMetaRow, error) {
+	result := make(map[string]*ThreadMetaRow)
+	if len(shortIDs) == 0 {
+		return result, nil
+	}
+	var rows []*ThreadMetaRow
+	_, err := d.session.Select("short_id", "source_message_id", "message_count").From("thread").
+		Where("short_id IN ?", shortIDs).
+		Load(&rows)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		result[row.ShortID] = row
+	}
+	return result, nil
+}
+
+// QuerySourceMessageIDsByShortIDs 批量查询子区的 source_message_id
+// 返回 map[shortID]*int64，nil 值表示无源消息
+func (d *DB) QuerySourceMessageIDsByShortIDs(shortIDs []string) (map[string]*int64, error) {
+	meta, err := d.QueryThreadMetaByShortIDs(shortIDs)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]*int64, len(meta))
+	for shortID, row := range meta {
+		result[shortID] = row.SourceMessageID
+	}
+	return result, nil
 }
 
 // QueryByGroupNoWithStatus 查询群下指定状态的子区（默认限制 100 条）
@@ -136,6 +182,25 @@ func (d *DB) QueryByID(id int64) (*Model, error) {
 	var model *Model
 	_, err := d.session.Select("*").From("thread").Where("id=?", id).Load(&model)
 	return model, err
+}
+
+// QueryThreadsByGroupNoAndUID 查询用户在某群下加入的所有子区
+func (d *DB) QueryThreadsByGroupNoAndUID(groupNo, uid string) ([]*Model, error) {
+	var models []*Model
+	_, err := d.session.Select("t.*").
+		From(dbr.I("thread").As("t")).
+		Join(dbr.I("thread_member").As("tm"), "t.id = tm.thread_id").
+		Where("t.group_no=? AND tm.uid=? AND t.status!=?", groupNo, uid, ThreadStatusDeleted).
+		Load(&models)
+	return models, err
+}
+
+// DeleteMembersByGroupNoAndUIDTx 事务中删除用户在某群下所有子区的成员记录
+func (d *DB) DeleteMembersByGroupNoAndUIDTx(groupNo, uid string, tx *dbr.Tx) error {
+	_, err := tx.DeleteFrom("thread_member").
+		Where("uid=? AND thread_id IN (SELECT id FROM thread WHERE group_no=?)", uid, groupNo).
+		Exec()
+	return err
 }
 
 // MemberModel 子区成员数据模型
@@ -237,4 +302,38 @@ func (d *DB) CountMembersBatch(threadIDs []int64) (map[int64]int, error) {
 		countMap[r.ThreadID] = r.Count
 	}
 	return countMap, nil
+}
+
+// UpdateMessageStats 原子更新消息统计（收到消息时调用）
+func (d *DB) UpdateMessageStats(shortID string, content string, senderUID string) error {
+	_, err := d.session.Update("thread").SetMap(map[string]interface{}{
+		"message_count":          dbr.Expr("message_count + 1"),
+		"last_message_at":        time.Now(),
+		"last_message_content":   content,
+		"last_message_sender_uid": senderUID,
+	}).Where("short_id=?", shortID).Exec()
+	return err
+}
+
+// QueryMessageFromUID 根据 channelID 和 messageID 查询消息发送者
+func (d *DB) QueryMessageFromUID(channelID string, messageID int64) (string, error) {
+	table := d.getMessageTable(channelID)
+	var fromUID string
+	_, err := d.session.Select("from_uid").From(table).
+		Where("message_id=? AND channel_id=?", messageID, channelID).
+		Load(&fromUID)
+	return fromUID, err
+}
+
+// getMessageTable 根据 channelID 计算消息分表名
+func (d *DB) getMessageTable(channelID string) string {
+	tableCount := d.ctx.GetConfig().TablePartitionConfig.MessageTableCount
+	if tableCount <= 0 {
+		return "message"
+	}
+	tableIndex := crc32.ChecksumIEEE([]byte(channelID)) % uint32(tableCount)
+	if tableIndex == 0 {
+		return "message"
+	}
+	return fmt.Sprintf("message%d", tableIndex)
 }

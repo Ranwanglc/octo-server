@@ -107,11 +107,12 @@ func TestCreateThread_WithSourceMessage(t *testing.T) {
 	s, ctx := setupTestData(t)
 	groupNo := createTestGroup(t, ctx)
 
-	// 创建子区（带来源消息）
+	// 创建子区（带来源消息和 payload）
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("POST", "/v1/groups/"+groupNo+"/threads", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
-		"name":              "从消息创建的子区",
-		"source_message_id": 12345,
+		"name":                   "从消息创建的子区",
+		"source_message_id":      12345,
+		"source_message_payload": map[string]interface{}{"type": 1, "content": "原始消息内容"},
 	}))))
 	req.Header.Set("token", testutil.Token)
 	s.GetRoute().ServeHTTP(w, req)
@@ -460,7 +461,7 @@ func TestIMDatasource_ChannelInfo(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotContains(t, info, "ban")
 
-	// 归档子区 - 应该 ban=1
+	// 归档子区 - 不应 ban（归档子区允许发消息，发消息后自动解档）
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("POST", "/v1/groups/"+groupNo+"/threads/"+shortID+"/archive", nil)
 	req.Header.Set("token", testutil.Token)
@@ -469,7 +470,8 @@ func TestIMDatasource_ChannelInfo(t *testing.T) {
 
 	info, err = mod.IMDatasource.ChannelInfo(channelID, 5)
 	assert.NoError(t, err)
-	assert.Equal(t, 1, info["ban"])
+	assert.NotContains(t, info, "ban")
+	assert.Equal(t, ThreadStatusArchived, info["status"])
 
 	// 删除子区 - 也应该 ban=1
 	// 先取消归档再删除
@@ -553,6 +555,105 @@ func TestBussDataSource_ChannelGet(t *testing.T) {
 	fakeID := BuildChannelID(groupNo, "9999999999999999999")
 	_, err = mod.BussDataSource.ChannelGet(fakeID, 5, testutil.UID)
 	assert.Equal(t, register.ErrDatasourceNotProcess, err)
+}
+
+// ==================== 统计字段测试 ====================
+
+// TestListThreads_WithStats 验证列表返回消息统计字段
+func TestListThreads_WithStats(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	// 创建子区
+	shortID := createThreadViaAPI(t, s, groupNo, "统计测试")
+
+	// 模拟收到消息，触发 onMessages 更新统计
+	api := New(ctx)
+	api.onMessages([]*config.MessageResp{
+		{
+			ChannelID:   BuildChannelID(groupNo, shortID),
+			ChannelType: 5,
+			FromUID:     testutil.UID,
+			Payload:     []byte(`{"type":1,"content":"你好世界"}`),
+		},
+	})
+
+	// 列出子区
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var threads []ThreadResp
+	util.ReadJsonByByte(w.Body.Bytes(), &threads)
+	assert.Len(t, threads, 1)
+
+	thread := threads[0]
+	assert.Equal(t, int64(1), thread.MessageCount)
+	assert.Equal(t, "你好世界", thread.LastMessageContent)
+	assert.NotEmpty(t, thread.LastMessageSenderName)
+	assert.NotEmpty(t, thread.LastMessageAt)
+	assert.NotEqual(t, thread.CreatedAt, thread.LastMessageAt, "last_message_at should differ from created_at when messages exist")
+}
+
+// TestGetThread_WithStats 验证详情返回消息统计字段
+func TestGetThread_WithStats(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	shortID := createThreadViaAPI(t, s, groupNo, "详情统计测试")
+
+	// 模拟收到消息
+	api := New(ctx)
+	api.onMessages([]*config.MessageResp{
+		{
+			ChannelID:   BuildChannelID(groupNo, shortID),
+			ChannelType: 5,
+			FromUID:     testutil.UID,
+			Payload:     []byte(`{"type":1,"content":"详情消息"}`),
+		},
+	})
+
+	// 获取子区详情
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads/"+shortID, nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp ThreadResp
+	util.ReadJsonByByte(w.Body.Bytes(), &resp)
+
+	assert.Equal(t, int64(1), resp.MessageCount)
+	assert.Equal(t, "详情消息", resp.LastMessageContent)
+	assert.NotEmpty(t, resp.LastMessageSenderName)
+	assert.NotEmpty(t, resp.LastMessageAt)
+}
+
+// TestCreateThread_ThreadCreatedMessagePayload 验证 ThreadCreated 消息包含 participants
+func TestCreateThread_ThreadCreatedMessagePayload(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	// 创建子区
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/groups/"+groupNo+"/threads", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"name": "参与者测试",
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// 验证返回的响应包含新的统计字段
+	var resp ThreadResp
+	util.ReadJsonByByte(w.Body.Bytes(), &resp)
+	assert.Equal(t, int64(0), resp.MessageCount)
+	assert.Equal(t, 1, resp.MemberCount)
+	assert.Equal(t, resp.CreatedAt, resp.LastMessageAt, "last_message_at should equal created_at when no messages")
 }
 
 // ==================== 修复验证测试 ====================
@@ -670,4 +771,89 @@ func TestCreateThread_CreatorAsMember(t *testing.T) {
 
 	// 验证创建者 UID
 	assert.Equal(t, testutil.UID, createResp.CreatorUID)
+}
+
+// ==================== 消息监听器测试 ====================
+
+// TestOnMessages_AutoUnarchive 验证归档子区收到消息后自动解档
+func TestOnMessages_AutoUnarchive(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	// 创建并归档子区
+	shortID := createThreadViaAPI(t, s, groupNo, "自动解档测试")
+	archiveThread(t, s, groupNo, shortID)
+
+	// 验证已归档
+	db := NewDB(ctx)
+	thread, _ := db.QueryByGroupNoAndShortID(groupNo, shortID)
+	assert.Equal(t, ThreadStatusArchived, thread.Status)
+
+	// 模拟收到消息
+	api := New(ctx)
+	api.onMessages([]*config.MessageResp{
+		{
+			ChannelID:   BuildChannelID(groupNo, shortID),
+			ChannelType: 5, // ChannelTypeCommunityTopic
+			FromUID:     testutil.UID,
+		},
+	})
+
+	// 验证自动解档
+	thread, _ = db.QueryByGroupNoAndShortID(groupNo, shortID)
+	assert.Equal(t, ThreadStatusActive, thread.Status)
+}
+
+// TestOnMessages_AutoJoin 验证发送者不是子区成员时自动加入
+func TestOnMessages_AutoJoin(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	// 创建子区（testutil.UID 是创建者，自动成为成员）
+	shortID := createThreadViaAPI(t, s, groupNo, "自动加入测试")
+
+	// 验证 user2 不是子区成员
+	db := NewDB(ctx)
+	thread, _ := db.QueryByGroupNoAndShortID(groupNo, shortID)
+	isMember, _ := db.ExistMember(thread.Id, "user2")
+	assert.False(t, isMember)
+
+	// 模拟 user2 发送消息
+	api := New(ctx)
+	api.onMessages([]*config.MessageResp{
+		{
+			ChannelID:   BuildChannelID(groupNo, shortID),
+			ChannelType: 5, // ChannelTypeCommunityTopic
+			FromUID:     "user2",
+		},
+	})
+
+	// 验证 user2 自动加入子区
+	isMember, _ = db.ExistMember(thread.Id, "user2")
+	assert.True(t, isMember, "user2 should be auto-joined as member")
+}
+
+// TestOnMessages_IgnoreNonThreadChannel 验证忽略非子区频道
+func TestOnMessages_IgnoreNonThreadChannel(t *testing.T) {
+	_, ctx := setupTestData(t)
+
+	api := New(ctx)
+
+	// 不应 panic 或报错
+	api.onMessages([]*config.MessageResp{
+		{
+			ChannelID:   "some-group-id",
+			ChannelType: 2, // ChannelTypeGroup
+			FromUID:     testutil.UID,
+		},
+	})
+}
+
+// archiveThread 归档子区
+func archiveThread(t *testing.T, s *server.Server, groupNo, shortID string) {
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", fmt.Sprintf("/v1/groups/%s/threads/%s/archive", groupNo, shortID), nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
 }

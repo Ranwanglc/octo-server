@@ -590,13 +590,13 @@ func (u *User) userUpdateWithField(c *wkhttp.Context) {
 				c.ResponseError(errors.New("用户短编号只能修改一次"))
 				return
 			}
-			if len(fmt.Sprintf("%s", value)) < 6 || len(fmt.Sprintf("%s", value)) > 20 {
+			if len(fmt.Sprintf("%v", value)) < 6 || len(fmt.Sprintf("%v", value)) > 20 {
 				c.ResponseError(errors.New("短号须以字母开头，仅支持使用6～20个字母、数字、下划线、减号自由组合"))
 				return
 			}
 			isLetter := true
 			isIncludeNum := false
-			for index, r := range fmt.Sprintf("%s", value) {
+			for index, r := range fmt.Sprintf("%v", value) {
 				if !unicode.IsLetter(r) && index == 0 {
 					isLetter = false
 					break
@@ -617,7 +617,7 @@ func (u *User) userUpdateWithField(c *wkhttp.Context) {
 				c.ResponseError(errors.New("短号须以字母开头，仅支持使用6～20个字母、数字、下划线、减号自由组合"))
 				return
 			}
-			users, err = u.db.QueryUserWithOnlyShortNo(fmt.Sprintf("%s", value))
+			users, err = u.db.QueryUserWithOnlyShortNo(fmt.Sprintf("%v", value))
 			if err != nil {
 				u.Error("通过short_no查询用户失败！", zap.Error(err), zap.String("shortNo", key))
 				c.ResponseError(errors.New("通过short_no查询用户失败！"))
@@ -640,7 +640,7 @@ func (u *User) userUpdateWithField(c *wkhttp.Context) {
 					fmt.Fprintf(os.Stderr, "recovered panic in goroutine: %v\n%s\n", err, debug.Stack())
 				}
 			}()
-			err = u.db.UpdateUsersWithFieldTx(key, fmt.Sprintf("%s", value), loginUID, tx)
+			err = u.db.UpdateUsersWithFieldTx(key, fmt.Sprintf("%v", value), loginUID, tx)
 			if err != nil {
 				c.ResponseError(errors.New("修改用户资料失败"))
 				tx.Rollback()
@@ -664,12 +664,19 @@ func (u *User) userUpdateWithField(c *wkhttp.Context) {
 			return
 		}
 		//修改用户信息
-		if key == "name" && value != nil && value.(string) == "" { // 修改名字
-			c.ResponseError(errors.New("名字不能为空！"))
-			return
+		if key == "name" {
+			nameStr := fmt.Sprintf("%s", value)
+			if nameStr == "" {
+				c.ResponseError(errors.New("名字不能为空！"))
+				return
+			}
+			if err := ValidateName(nameStr); err != nil {
+				c.ResponseError(err)
+				return
+			}
 		}
 
-		err = u.db.UpdateUsersWithField(key, fmt.Sprintf("%s", value), loginUID)
+		err = u.db.UpdateUsersWithField(key, fmt.Sprintf("%v", value), loginUID)
 		if err != nil {
 			u.Error("修改用户资料失败", zap.Error(err))
 			c.ResponseError(errors.New("修改用户资料失败"))
@@ -677,7 +684,7 @@ func (u *User) userUpdateWithField(c *wkhttp.Context) {
 		}
 		if key == "name" {
 			// 将重新设置token设置到缓存（这里主要是更新登录者的name）
-			err = u.ctx.Cache().Set(u.ctx.GetConfig().Cache.TokenCachePrefix+c.GetHeader("token"), fmt.Sprintf("%s@%s@%s", loginUID, value, c.GetLoginRole()))
+			err = u.ctx.Cache().Set(u.ctx.GetConfig().Cache.TokenCachePrefix+c.GetHeader("token"), fmt.Sprintf("%s@%v@%s", loginUID, value, c.GetLoginRole()))
 			if err != nil {
 				u.Error("重新设置token缓存失败！", zap.Error(err))
 				c.ResponseError(errors.New("重新设置token缓存失败！"))
@@ -1820,19 +1827,6 @@ func (u *User) addBlacklist(c *wkhttp.Context) {
 		}
 	}
 
-	// 请求im服务器设置黑名单
-	err = u.ctx.IMBlacklistAdd(config.ChannelBlacklistReq{
-		ChannelReq: config.ChannelReq{
-			ChannelID:   loginUID,
-			ChannelType: common.ChannelTypePerson.Uint8(),
-		},
-		UIDs: []string{uid},
-	})
-	if err != nil {
-		u.Error("设置黑名单失败！", zap.Error(err))
-		c.ResponseError(errors.New("设置黑名单失败！"))
-		return
-	}
 	//添加黑名单
 	version, err := u.ctx.GenSeq(common.UserSettingSeqKey)
 	if err != nil {
@@ -1875,6 +1869,18 @@ func (u *User) addBlacklist(c *wkhttp.Context) {
 		u.Error("提交数据库失败！", zap.Error(err))
 		c.ResponseError(errors.New("提交数据库失败！"))
 		return
+	}
+
+	// DB事务提交成功后，再请求IM服务器设置黑名单
+	err = u.ctx.IMBlacklistAdd(config.ChannelBlacklistReq{
+		ChannelReq: config.ChannelReq{
+			ChannelID:   loginUID,
+			ChannelType: common.ChannelTypePerson.Uint8(),
+		},
+		UIDs: []string{uid},
+	})
+	if err != nil {
+		u.Error("IM设置黑名单失败，DB已提交", zap.Error(err), zap.String("loginUID", loginUID), zap.String("uid", uid))
 	}
 
 	// 发送给被拉黑的人去更新拉黑人的频道
@@ -1957,7 +1963,7 @@ func (u *User) removeBlacklist(c *wkhttp.Context) {
 		return
 	}
 
-	// 请求im服务器移除黑名单
+	// DB事务提交成功后，再请求IM服务器移除黑名单
 	err = u.ctx.IMBlacklistRemove(config.ChannelBlacklistReq{
 		ChannelReq: config.ChannelReq{
 			ChannelID:   loginUID,
@@ -1966,9 +1972,7 @@ func (u *User) removeBlacklist(c *wkhttp.Context) {
 		UIDs: []string{uid},
 	})
 	if err != nil {
-		u.Error("设置黑名单失败！", zap.Error(err))
-		c.ResponseError(errors.New("设置黑名单失败！"))
-		return
+		u.Error("IM移除黑名单失败，DB已提交", zap.Error(err), zap.String("loginUID", loginUID), zap.String("uid", uid))
 	}
 
 	// 发送给被拉黑的人去更新拉黑人的频道
@@ -2998,6 +3002,9 @@ func (r registerReq) CheckRegister() error {
 	if strings.TrimSpace(r.Name) == "" {
 		return errors.New("用户名不能为空！")
 	}
+	if err := ValidateName(r.Name); err != nil {
+		return err
+	}
 	if strings.TrimSpace(r.Zone) == "" {
 		return errors.New("区号不能为空！")
 	}
@@ -3133,4 +3140,14 @@ func newLoginUserDetailResp(m *Model, token string, ctx *config.Context) *loginU
 			MuteOfApp:         m.MuteOfApp,
 		},
 	}
+}
+
+// ValidateName checks that a display name does not contain the @ character,
+// which is used as delimiter in token cache entries (uid@name@role).
+// Allowing @ in names would enable privilege escalation via role injection.
+func ValidateName(name string) error {
+	if strings.Contains(name, "@") {
+		return errors.New("名字不能包含@字符！")
+	}
+	return nil
 }

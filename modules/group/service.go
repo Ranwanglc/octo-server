@@ -2,13 +2,18 @@ package group
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
+	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"go.uber.org/zap"
 )
 
@@ -78,6 +83,15 @@ type IService interface {
 	IsBotAdmin(groupNo string, uid string) (bool, error)
 	// GetBotMemberUIDs returns UIDs of robot members in the group
 	GetBotMemberUIDs(groupNo string) ([]string, error)
+
+	// CreateGroup 创建群（统一入口，Web 和 Bot 共用）
+	CreateGroup(req *CreateGroupServiceReq) (*CreateGroupServiceResp, error)
+	// AddGroupMembers 添加群成员
+	AddGroupMembers(req *AddGroupMembersServiceReq) (*AddGroupMembersServiceResp, error)
+	// RemoveGroupMembers 移除群成员
+	RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*RemoveGroupMembersServiceResp, error)
+	// UpdateGroupInfo 更新群信息
+	UpdateGroupInfo(req *UpdateGroupInfoServiceReq) error
 }
 
 // Service Service
@@ -87,6 +101,7 @@ type Service struct {
 	managerDB *managerDB
 	log.Log
 	settingDB *settingDB
+	userDB    *user.DB
 }
 
 // NewService NewService
@@ -97,6 +112,7 @@ func NewService(ctx *config.Context) IService {
 		managerDB: newManagerDB(ctx.DB()),
 		Log:       log.NewTLog("groupService"),
 		settingDB: newSettingDB(ctx),
+		userDB:    user.NewDB(ctx),
 	}
 }
 
@@ -656,4 +672,787 @@ func GetGroupMdMaxSize() int {
 		}
 	}
 	return 10240
+}
+
+// ---------- Service Request/Response types ----------
+
+// CreateGroupServiceReq 创建群请求
+type CreateGroupServiceReq struct {
+	Creator string   // 创建者 UID
+	Members []string // 成员 UID 列表（不含创建者，Service 内部会自动加入）
+	Name    string   // 群名称（可为空，Service 会自动生成）
+	SpaceID string   // Space ID（可为空）
+	BotUID  string   // Bot UID（可为空；非空时自动加入群并设为 bot_admin）
+}
+
+// CreateGroupServiceResp 创建群响应
+type CreateGroupServiceResp struct {
+	GroupNo        string   // 群编号
+	Name           string   // 群名称
+	SkippedMembers []string // 因不在 Space 而被过滤的成员 UID
+}
+
+// AddGroupMembersServiceReq 添加群成员请求
+type AddGroupMembersServiceReq struct {
+	GroupNo      string   // 群编号
+	Members      []string // 待添加成员 UID 列表
+	OperatorUID  string   // 操作者 UID
+	OperatorName string   // 操作者名称
+}
+
+// AddGroupMembersServiceResp 添加群成员响应
+type AddGroupMembersServiceResp struct {
+	Added int // 实际添加成功的数量
+}
+
+// RemoveGroupMembersServiceReq 移除群成员请求
+type RemoveGroupMembersServiceReq struct {
+	GroupNo      string   // 群编号
+	Members      []string // 待移除成员 UID 列表
+	OperatorUID  string   // 操作者 UID
+	OperatorName string   // 操作者名称
+}
+
+// RemoveGroupMembersServiceResp 移除群成员响应
+type RemoveGroupMembersServiceResp struct {
+	Removed     int      // 实际移除数量
+	RemovedUIDs []string // 实际移除的 UID 列表
+}
+
+// UpdateGroupInfoServiceReq 更新群信息请求
+type UpdateGroupInfoServiceReq struct {
+	GroupNo      string  // 群编号
+	OperatorUID  string  // 操作者 UID
+	OperatorName string  // 操作者名称
+	Name         *string // 新群名（nil 表示不更新）
+	Notice       *string // 新公告（nil 表示不更新）
+}
+
+// ---------- Service method implementations ----------
+
+// CreateGroup 创建群（统一入口，Web 和 Bot 共用）
+func (s *Service) CreateGroup(req *CreateGroupServiceReq) (*CreateGroupServiceResp, error) {
+	if req.Creator == "" {
+		return nil, errors.New("creator is required")
+	}
+	if len(req.Members) == 0 {
+		return nil, errors.New("members is required")
+	}
+
+	var skippedMembers []string
+
+	// Space 校验
+	if req.SpaceID != "" {
+		// 校验 Bot 是否属于目标 Space
+		if req.BotUID != "" {
+			botOk, err := spacepkg.CheckMembership(s.ctx.DB(), req.SpaceID, req.BotUID)
+			if err != nil {
+				s.Error("check bot space membership failed", zap.Error(err))
+				return nil, errors.New("failed to check space membership")
+			}
+			if !botOk {
+				return nil, errors.New("bot is not a member of this space")
+			}
+		}
+		creatorOk, err := spacepkg.CheckMembership(s.ctx.DB(), req.SpaceID, req.Creator)
+		if err != nil {
+			s.Error("check creator space membership failed", zap.Error(err))
+			return nil, errors.New("failed to check space membership")
+		}
+		if !creatorOk {
+			return nil, errors.New("creator is not a member of this space")
+		}
+		validMembers := make([]string, 0, len(req.Members))
+		for _, uid := range req.Members {
+			ok, err := spacepkg.CheckMembership(s.ctx.DB(), req.SpaceID, uid)
+			if err != nil {
+				s.Error("check member space membership failed", zap.Error(err), zap.String("uid", uid))
+				return nil, errors.New("failed to check space membership")
+			}
+			if ok {
+				validMembers = append(validMembers, uid)
+			} else {
+				skippedMembers = append(skippedMembers, uid)
+			}
+		}
+		if len(validMembers) == 0 {
+			return nil, errors.New("none of the members belong to this space")
+		}
+		req.Members = validMembers
+	}
+
+	// 查询创建者用户信息
+	creatorUser, err := s.userDB.QueryByUID(req.Creator)
+	if err != nil {
+		s.Error("query creator info failed", zap.Error(err))
+		return nil, errors.New("failed to query creator info")
+	}
+	if creatorUser == nil {
+		return nil, errors.New("creator user not found")
+	}
+
+	// 成员去重，加入创建者，过滤空值
+	allUIDs := make([]string, 0, len(req.Members)+1)
+	allUIDs = append(allUIDs, req.Creator)
+	seen := map[string]bool{req.Creator: true}
+	for _, uid := range req.Members {
+		uid = strings.TrimSpace(uid)
+		if uid != "" && !seen[uid] {
+			seen[uid] = true
+			allUIDs = append(allUIDs, uid)
+		}
+	}
+
+	// 查询成员用户信息
+	memberUsers, err := s.userDB.QueryByUIDs(allUIDs)
+	if err != nil {
+		s.Error("query member info failed", zap.Error(err))
+		return nil, errors.New("failed to query member info")
+	}
+	if len(memberUsers) == 0 {
+		return nil, errors.New("no valid member found")
+	}
+
+	// 群名生成
+	groupName := strings.TrimSpace(req.Name)
+	if groupName == "" {
+		names := make([]string, 0, len(memberUsers))
+		for _, u := range memberUsers {
+			names = append(names, u.Name)
+		}
+		groupName = strings.Join(names, "、")
+	}
+	nameRunes := []rune(groupName)
+	if len(nameRunes) > 20 {
+		groupName = string(nameRunes[:20])
+	}
+
+	// 生成群编号和版本号
+	groupNo := util.GenerUUID()
+	version, err := s.ctx.GenSeq(common.GroupSeqKey)
+	if err != nil {
+		s.Error("generate group version failed", zap.Error(err))
+		return nil, errors.New("failed to generate group version")
+	}
+
+	// 开启事务
+	tx, err := s.ctx.DB().Begin()
+	if err != nil {
+		s.Error("begin transaction failed", zap.Error(err))
+		return nil, errors.New("failed to begin transaction")
+	}
+	defer tx.RollbackUnlessCommitted()
+
+	// 插入群记录
+	err = s.db.InsertTx(&Model{
+		GroupNo:             groupNo,
+		Name:                groupName,
+		Creator:             req.Creator,
+		Status:              GroupStatusNormal,
+		Version:             version,
+		AllowViewHistoryMsg: int(common.GroupAllowViewHistoryMsgEnabled),
+		SpaceID:             req.SpaceID,
+	}, tx)
+	if err != nil {
+		s.Error("insert group record failed", zap.Error(err))
+		return nil, errors.New("failed to insert group record")
+	}
+
+	// 插入成员
+	realMemberUIDs := make([]string, 0, len(memberUsers))
+	memberVos := make([]*config.UserBaseVo, 0, len(memberUsers))
+	for _, memberUser := range memberUsers {
+		if memberUser.IsDestroy == 1 {
+			continue
+		}
+		// Bot UID 单独处理（下面添加）
+		if req.BotUID != "" && memberUser.UID == req.BotUID {
+			continue
+		}
+		memberVersion, err := s.ctx.GenSeq(common.GroupMemberSeqKey)
+		if err != nil {
+			s.Error("generate member version failed", zap.Error(err))
+			return nil, err
+		}
+		role := MemberRoleCommon
+		if memberUser.UID == req.Creator {
+			role = MemberRoleCreator
+		}
+		err = s.db.InsertMemberTx(&MemberModel{
+			GroupNo:   groupNo,
+			UID:       memberUser.UID,
+			Role:      role,
+			Version:   memberVersion,
+			InviteUID: req.Creator,
+			Robot:     memberUser.Robot,
+			Status:    int(common.GroupMemberStatusNormal),
+			Vercode:   fmt.Sprintf("%s@%d", util.GenerUUID(), common.GroupMember),
+		}, tx)
+		if err != nil {
+			s.Error("insert member failed", zap.Error(err), zap.String("uid", memberUser.UID))
+			return nil, errors.New("failed to insert group member")
+		}
+		realMemberUIDs = append(realMemberUIDs, memberUser.UID)
+		memberVos = append(memberVos, &config.UserBaseVo{UID: memberUser.UID, Name: memberUser.Name})
+	}
+	if len(realMemberUIDs) == 0 {
+		return nil, errors.New("no valid member to add")
+	}
+
+	// Bot 加入群
+	if req.BotUID != "" {
+		botMemberVersion, err := s.ctx.GenSeq(common.GroupMemberSeqKey)
+		if err != nil {
+			s.Error("generate bot member version failed", zap.Error(err))
+			return nil, err
+		}
+		err = s.db.InsertMemberTx(&MemberModel{
+			GroupNo:   groupNo,
+			UID:       req.BotUID,
+			Role:      MemberRoleCommon,
+			Version:   botMemberVersion,
+			InviteUID: req.Creator,
+			Robot:     1,
+			Status:    int(common.GroupMemberStatusNormal),
+			Vercode:   fmt.Sprintf("%s@%d", util.GenerUUID(), common.GroupMember),
+		}, tx)
+		if err != nil {
+			s.Error("insert bot member failed", zap.Error(err))
+			// Bot 加入失败不阻断建群
+		} else {
+			realMemberUIDs = append(realMemberUIDs, req.BotUID)
+			memberVos = append(memberVos, &config.UserBaseVo{UID: req.BotUID, Name: req.BotUID})
+		}
+	}
+
+	// 提交事务
+	if err := tx.Commit(); err != nil {
+		s.Error("commit transaction failed", zap.Error(err))
+		return nil, errors.New("failed to commit transaction")
+	}
+
+	// 事务提交后设置 Bot 为 bot_admin
+	if req.BotUID != "" {
+		botAdminVersion, _ := s.ctx.GenSeq(common.GroupMemberSeqKey)
+		if err := s.db.UpdateBotAdmin(groupNo, req.BotUID, 1, botAdminVersion); err != nil {
+			s.Error("set bot_admin failed", zap.Error(err))
+		}
+	}
+
+	// 创建 IM 频道
+	err = s.ctx.IMCreateOrUpdateChannel(&config.ChannelCreateReq{
+		ChannelID:   groupNo,
+		ChannelType: common.ChannelTypeGroup.Uint8(),
+		Subscribers: realMemberUIDs,
+	})
+	if err != nil {
+		s.Error("create IM channel failed", zap.Error(err))
+	}
+
+	// 发送群创建通知
+	s.ctx.SendGroupCreate(&config.MsgGroupCreateReq{
+		Creator:     req.Creator,
+		CreatorName: creatorUser.Name,
+		GroupNo:     groupNo,
+		Version:     version,
+		Members:     memberVos,
+	})
+
+	return &CreateGroupServiceResp{
+		GroupNo:        groupNo,
+		Name:           groupName,
+		SkippedMembers: skippedMembers,
+	}, nil
+}
+
+// AddGroupMembers 添加群成员
+func (s *Service) AddGroupMembers(req *AddGroupMembersServiceReq) (*AddGroupMembersServiceResp, error) {
+	if req.GroupNo == "" {
+		return nil, errors.New("group_no is required")
+	}
+	if len(req.Members) == 0 {
+		return nil, errors.New("members is required")
+	}
+
+	// 群存在性 + 状态检查
+	groupModel, err := s.db.QueryWithGroupNo(req.GroupNo)
+	if err != nil {
+		s.Error("query group failed", zap.Error(err))
+		return nil, errors.New("failed to query group")
+	}
+	if groupModel == nil || groupModel.Status == GroupStatusDisband {
+		return nil, errors.New("group not found or disbanded")
+	}
+
+	// 成员去重、过滤空值
+	seen := make(map[string]bool)
+	var uniqueUIDs []string
+	for _, uid := range req.Members {
+		uid = strings.TrimSpace(uid)
+		if uid != "" && !seen[uid] {
+			seen[uid] = true
+			uniqueUIDs = append(uniqueUIDs, uid)
+		}
+	}
+	if len(uniqueUIDs) == 0 {
+		return nil, errors.New("no valid members after deduplication")
+	}
+
+	// Space 成员校验：若群属于某个 Space，待加入成员必须也在该 Space 内
+	if groupModel.SpaceID != "" {
+		var validUIDs []string
+		for _, uid := range uniqueUIDs {
+			ok, err := spacepkg.CheckMembership(s.ctx.DB(), groupModel.SpaceID, uid)
+			if err != nil {
+				s.Error("check space membership failed", zap.Error(err), zap.String("uid", uid))
+				continue
+			}
+			if ok {
+				validUIDs = append(validUIDs, uid)
+			}
+		}
+		if len(validUIDs) == 0 {
+			return nil, errors.New("none of the members belong to the group's space")
+		}
+		uniqueUIDs = validUIDs
+	}
+
+	// 查询用户信息
+	memberUsers, err := s.userDB.QueryByUIDs(uniqueUIDs)
+	if err != nil {
+		s.Error("query member info failed", zap.Error(err))
+		return nil, errors.New("failed to query member info")
+	}
+
+	// 过滤已在群内的成员
+	existingMembers, err := s.db.QueryMembersWithUids(uniqueUIDs, req.GroupNo)
+	if err != nil {
+		s.Error("query existing members failed", zap.Error(err))
+		return nil, errors.New("failed to query existing members")
+	}
+	existingSet := make(map[string]bool)
+	for _, m := range existingMembers {
+		if m.IsDeleted == 0 {
+			existingSet[m.UID] = true
+		}
+	}
+
+	// 过滤黑名单
+	blacklistMembers, _ := s.db.QueryMembersWithStatus(req.GroupNo, int(common.GroupMemberStatusBlacklist))
+	blacklistSet := make(map[string]bool)
+	for _, m := range blacklistMembers {
+		blacklistSet[m.UID] = true
+	}
+
+	// 开启事务
+	tx, err := s.ctx.DB().Begin()
+	if err != nil {
+		s.Error("begin transaction failed", zap.Error(err))
+		return nil, errors.New("failed to begin transaction")
+	}
+	defer tx.RollbackUnlessCommitted()
+
+	var addedUIDs []string
+	var addedVos []*config.UserBaseVo
+	for _, memberUser := range memberUsers {
+		if memberUser.IsDestroy == 1 {
+			continue
+		}
+		if existingSet[memberUser.UID] || blacklistSet[memberUser.UID] {
+			continue
+		}
+		memberVersion, err := s.ctx.GenSeq(common.GroupMemberSeqKey)
+		if err != nil {
+			s.Error("generate member version failed", zap.Error(err))
+			return nil, err
+		}
+
+		// 检查是否之前被删除过（需要恢复）
+		existDelete, _ := s.db.ExistMemberDelete(memberUser.UID, req.GroupNo)
+		newMember := &MemberModel{
+			GroupNo:   req.GroupNo,
+			UID:       memberUser.UID,
+			Role:      MemberRoleCommon,
+			Version:   memberVersion,
+			Status:    int(common.GroupMemberStatusNormal),
+			InviteUID: req.OperatorUID,
+			Robot:     memberUser.Robot,
+			Vercode:   fmt.Sprintf("%s@%d", util.GenerUUID(), common.GroupMember),
+		}
+		if existDelete {
+			err = s.db.recoverMemberTx(newMember, tx)
+		} else {
+			err = s.db.InsertMemberTx(newMember, tx)
+		}
+		if err != nil {
+			s.Error("add group member failed", zap.Error(err), zap.String("uid", memberUser.UID))
+			continue
+		}
+		addedUIDs = append(addedUIDs, memberUser.UID)
+		addedVos = append(addedVos, &config.UserBaseVo{UID: memberUser.UID, Name: memberUser.Name})
+	}
+
+	// 提交事务
+	if err := tx.Commit(); err != nil {
+		s.Error("commit transaction failed", zap.Error(err))
+		return nil, errors.New("failed to commit transaction")
+	}
+
+	// IM 操作（事务提交之后）
+	if len(addedUIDs) > 0 {
+		// 添加 IM 订阅
+		if err := s.ctx.IMAddSubscriber(&config.SubscriberAddReq{
+			ChannelID:   req.GroupNo,
+			ChannelType: common.ChannelTypeGroup.Uint8(),
+			Subscribers: addedUIDs,
+		}); err != nil {
+			s.Error("add IM subscriber failed", zap.Error(err))
+		}
+
+		// 发布成员添加事件
+		s.ctx.SendGroupMemberAdd(&config.MsgGroupMemberAddReq{
+			Operator:     req.OperatorUID,
+			OperatorName: req.OperatorName,
+			GroupNo:      req.GroupNo,
+			Members:      addedVos,
+		})
+
+		// 发送群成员更新 CMD
+		s.ctx.SendCMD(config.MsgCMDReq{
+			ChannelID:   req.GroupNo,
+			ChannelType: common.ChannelTypeGroup.Uint8(),
+			CMD:         common.CMDGroupMemberUpdate,
+			Param: map[string]interface{}{
+				"group_no": req.GroupNo,
+			},
+		})
+
+		// 同步新成员到群内所有子区的 IM 订阅（直接 SQL 查 thread 表）
+		s.addUsersToGroupThreads(req.GroupNo, addedUIDs)
+
+		// 检查新增成员中是否有 Bot，推送 bot_joined_group 事件
+		addedUIDSet := make(map[string]bool, len(addedUIDs))
+		for _, uid := range addedUIDs {
+			addedUIDSet[uid] = true
+		}
+		go s.notifyBotJoinedGroup(memberUsers, addedUIDSet, req.GroupNo, req.OperatorUID, req.OperatorName)
+	}
+
+	return &AddGroupMembersServiceResp{
+		Added: len(addedUIDs),
+	}, nil
+}
+
+// RemoveGroupMembers 移除群成员
+func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*RemoveGroupMembersServiceResp, error) {
+	if req.GroupNo == "" {
+		return nil, errors.New("group_no is required")
+	}
+	if len(req.Members) == 0 {
+		return nil, errors.New("members is required")
+	}
+
+	// 群存在性检查
+	groupModel, err := s.db.QueryWithGroupNo(req.GroupNo)
+	if err != nil {
+		s.Error("query group failed", zap.Error(err))
+		return nil, errors.New("failed to query group")
+	}
+	if groupModel == nil || groupModel.Status == GroupStatusDisband {
+		return nil, errors.New("group not found or disbanded")
+	}
+
+	// 查询待移除成员信息
+	targetMembers, err := s.db.QueryMembersWithUids(req.Members, req.GroupNo)
+	if err != nil {
+		s.Error("query target members failed", zap.Error(err))
+		return nil, errors.New("failed to query member info")
+	}
+	if len(targetMembers) == 0 {
+		return nil, errors.New("none of the members are in this group")
+	}
+
+	// 过滤：跳过群主、管理员、已删除的成员
+	var removableMembers []*MemberModel
+	for _, m := range targetMembers {
+		if m.IsDeleted == 1 || m.Role == MemberRoleCreator || m.Role == MemberRoleManager {
+			continue
+		}
+		removableMembers = append(removableMembers, m)
+	}
+	if len(removableMembers) == 0 {
+		return &RemoveGroupMembersServiceResp{Removed: 0}, nil
+	}
+
+	// 开启事务
+	tx, err := s.ctx.DB().Begin()
+	if err != nil {
+		s.Error("begin transaction failed", zap.Error(err))
+		return nil, errors.New("failed to begin transaction")
+	}
+	defer tx.RollbackUnlessCommitted()
+
+	var removedUIDs []string
+	var removedVos []*config.UserBaseVo
+	for _, m := range removableMembers {
+		memberVersion, err := s.ctx.GenSeq(common.GroupMemberSeqKey)
+		if err != nil {
+			s.Error("generate member version failed", zap.Error(err))
+			return nil, err
+		}
+		err = s.db.DeleteMemberTx(req.GroupNo, m.UID, memberVersion, tx)
+		if err != nil {
+			s.Error("delete group member failed", zap.Error(err), zap.String("uid", m.UID))
+			continue
+		}
+		removedUIDs = append(removedUIDs, m.UID)
+		// 查询用户名
+		memberUser, _ := s.userDB.QueryByUID(m.UID)
+		name := m.UID
+		if memberUser != nil {
+			name = memberUser.Name
+		}
+		removedVos = append(removedVos, &config.UserBaseVo{UID: m.UID, Name: name})
+	}
+
+	// 提交事务
+	if err := tx.Commit(); err != nil {
+		s.Error("commit transaction failed", zap.Error(err))
+		return nil, errors.New("failed to commit transaction")
+	}
+
+	// IM 操作（事务提交之后）
+	if len(removedUIDs) > 0 {
+		// 移除 IM 订阅
+		if err := s.ctx.IMRemoveSubscriber(&config.SubscriberRemoveReq{
+			ChannelID:   req.GroupNo,
+			ChannelType: common.ChannelTypeGroup.Uint8(),
+			Subscribers: removedUIDs,
+		}); err != nil {
+			s.Error("remove IM subscriber failed", zap.Error(err))
+		}
+
+		// 发送被踢消息
+		removeReq := &config.MsgGroupMemberRemoveReq{
+			Operator:     req.OperatorUID,
+			OperatorName: req.OperatorName,
+			GroupNo:      req.GroupNo,
+			Members:      removedVos,
+		}
+		if err := s.ctx.SendGroupMemberBeRemove(removeReq); err != nil {
+			s.Error("send group member remove notification failed", zap.Error(err))
+		}
+
+		// 发送群成员更新 CMD
+		s.ctx.SendCMD(config.MsgCMDReq{
+			ChannelID:   req.GroupNo,
+			ChannelType: common.ChannelTypeGroup.Uint8(),
+			CMD:         common.CMDGroupMemberUpdate,
+			Param: map[string]interface{}{
+				"group_no": req.GroupNo,
+			},
+		})
+
+		// 移除被踢用户在该群所有子区的成员身份（直接 SQL 查 thread 表）
+		for _, uid := range removedUIDs {
+			s.removeUserFromGroupThreads(req.GroupNo, uid)
+		}
+	}
+
+	return &RemoveGroupMembersServiceResp{
+		Removed:     len(removedUIDs),
+		RemovedUIDs: removedUIDs,
+	}, nil
+}
+
+// UpdateGroupInfo 更新群信息
+func (s *Service) UpdateGroupInfo(req *UpdateGroupInfoServiceReq) error {
+	if req.GroupNo == "" {
+		return errors.New("group_no is required")
+	}
+	if req.Name == nil && req.Notice == nil {
+		return errors.New("at least one of name or notice is required")
+	}
+
+	// 群存在性 + 状态检查
+	groupModel, err := s.db.QueryWithGroupNo(req.GroupNo)
+	if err != nil {
+		s.Error("query group failed", zap.Error(err))
+		return errors.New("failed to query group")
+	}
+	if groupModel == nil || groupModel.Status == GroupStatusDisband {
+		return errors.New("group not found or disbanded")
+	}
+
+	// 生成新版本号
+	version, err := s.ctx.GenSeq(common.GroupSeqKey)
+	if err != nil {
+		s.Error("generate group version failed", zap.Error(err))
+		return errors.New("failed to generate group version")
+	}
+	groupModel.Version = version
+
+	// 更新字段
+	if req.Name != nil {
+		nameRunes := []rune(*req.Name)
+		if len(nameRunes) > 20 {
+			*req.Name = string(nameRunes[:20])
+		}
+		groupModel.Name = *req.Name
+	}
+	if req.Notice != nil {
+		groupModel.Notice = *req.Notice
+	}
+
+	// 事务更新
+	tx, err := s.ctx.DB().Begin()
+	if err != nil {
+		s.Error("begin transaction failed", zap.Error(err))
+		return errors.New("failed to begin transaction")
+	}
+	defer tx.RollbackUnlessCommitted()
+
+	err = s.db.UpdateTx(groupModel, tx)
+	if err != nil {
+		s.Error("update group failed", zap.Error(err))
+		return errors.New("failed to update group")
+	}
+
+	if err := tx.Commit(); err != nil {
+		s.Error("commit transaction failed", zap.Error(err))
+		return errors.New("failed to commit transaction")
+	}
+
+	// 发布群更新事件（name 和 notice 分开发送）
+	if req.Name != nil {
+		s.ctx.SendGroupUpdate(&config.MsgGroupUpdateReq{
+			GroupNo:      req.GroupNo,
+			Operator:     req.OperatorUID,
+			OperatorName: req.OperatorName,
+			Attr:         common.GroupAttrKeyName,
+			Data:         map[string]string{common.GroupAttrKeyName: *req.Name},
+		})
+	}
+	if req.Notice != nil {
+		s.ctx.SendGroupUpdate(&config.MsgGroupUpdateReq{
+			GroupNo:      req.GroupNo,
+			Operator:     req.OperatorUID,
+			OperatorName: req.OperatorName,
+			Attr:         common.GroupAttrKeyNotice,
+			Data:         map[string]string{common.GroupAttrKeyNotice: *req.Notice},
+		})
+	}
+
+	// 通知客户端刷新频道信息
+	s.ctx.SendChannelUpdateToGroup(req.GroupNo)
+
+	return nil
+}
+
+// ---------- Service internal helpers (thread sync, no thread package import) ----------
+
+// removeUserFromGroupThreads 移除用户在某群下所有子区的成员记录和 IM 订阅（直接 SQL）
+func (s *Service) removeUserFromGroupThreads(groupNo, uid string) {
+	type threadInfo struct {
+		ShortID string `db:"short_id"`
+	}
+	var threads []threadInfo
+	_, err := s.ctx.DB().Select("thread.short_id").
+		From("thread").
+		Join("thread_member", "thread.id = thread_member.thread_id").
+		Where("thread.group_no=? AND thread_member.uid=? AND thread.status!=3", groupNo, uid).
+		Load(&threads)
+	if err != nil {
+		s.Error("query user threads failed", zap.Error(err), zap.String("groupNo", groupNo), zap.String("uid", uid))
+		return
+	}
+	if len(threads) == 0 {
+		return
+	}
+
+	// 删除成员记录
+	_, err = s.ctx.DB().DeleteFrom("thread_member").
+		Where("uid=? AND thread_id IN (SELECT id FROM thread WHERE group_no=?)", uid, groupNo).
+		Exec()
+	if err != nil {
+		s.Error("delete thread member failed", zap.Error(err), zap.String("groupNo", groupNo), zap.String("uid", uid))
+		return
+	}
+
+	// 移除 IM 订阅
+	for _, t := range threads {
+		channelID := groupNo + "____" + t.ShortID
+		if rmErr := s.ctx.IMRemoveSubscriber(&config.SubscriberRemoveReq{
+			ChannelID:   channelID,
+			ChannelType: common.ChannelTypeCommunityTopic.Uint8(),
+			Subscribers: []string{uid},
+		}); rmErr != nil {
+			s.Error("remove thread IM subscriber failed", zap.Error(rmErr), zap.String("channelID", channelID), zap.String("uid", uid))
+		}
+	}
+}
+
+// addUsersToGroupThreads 新成员入群时，将其加入该群所有子区的 IM 订阅（直接 SQL）
+func (s *Service) addUsersToGroupThreads(groupNo string, uids []string) {
+	if len(uids) == 0 {
+		return
+	}
+
+	type threadInfo struct {
+		ShortID string `db:"short_id"`
+	}
+	var threads []threadInfo
+	_, err := s.ctx.DB().Select("short_id").
+		From("thread").
+		Where("group_no=? AND status!=3", groupNo).
+		Load(&threads)
+	if err != nil {
+		s.Error("query group threads failed", zap.Error(err), zap.String("groupNo", groupNo))
+		return
+	}
+	if len(threads) == 0 {
+		return
+	}
+
+	for _, t := range threads {
+		channelID := groupNo + "____" + t.ShortID
+		if addErr := s.ctx.IMAddSubscriber(&config.SubscriberAddReq{
+			ChannelID:   channelID,
+			ChannelType: common.ChannelTypeCommunityTopic.Uint8(),
+			Subscribers: uids,
+		}); addErr != nil {
+			s.Error("add thread IM subscriber failed", zap.Error(addErr), zap.String("channelID", channelID), zap.Strings("uids", uids))
+		}
+	}
+}
+
+// notifyBotJoinedGroup 向 Bot 的事件队列推送 bot_joined_group 事件
+func (s *Service) notifyBotJoinedGroup(memberUsers []*user.Model, addedUIDSet map[string]bool, groupNo, operator, operatorName string) {
+	for _, memberUser := range memberUsers {
+		if memberUser.Robot != 1 || !addedUIDSet[memberUser.UID] {
+			continue
+		}
+		robotID := memberUser.UID
+		seq, err := s.ctx.GenSeq(fmt.Sprintf("%s%s", common.RobotEventSeqKey, robotID))
+		if err != nil {
+			s.Error("generate bot event seq failed", zap.Error(err), zap.String("robotID", robotID))
+			continue
+		}
+		eventData := map[string]interface{}{
+			"event_id":   seq,
+			"event_type": "bot_joined_group",
+			"event_data": map[string]interface{}{
+				"group_no":      groupNo,
+				"operator":      operator,
+				"operator_name": operatorName,
+			},
+		}
+		key := fmt.Sprintf("robotEvent:%s", robotID)
+		err = s.ctx.GetRedisConn().ZAdd(key, float64(seq), util.ToJson(eventData))
+		if err != nil {
+			s.Error("push bot_joined_group event failed", zap.Error(err), zap.String("robotID", robotID))
+			continue
+		}
+		s.Info("pushed bot_joined_group event", zap.String("robotID", robotID), zap.String("groupNo", groupNo))
+	}
 }

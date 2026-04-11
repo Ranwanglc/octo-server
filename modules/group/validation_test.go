@@ -214,6 +214,26 @@ func TestMemberRoleValues_Order(t *testing.T) {
 	assert.Less(t, MemberRoleCommon, MemberRoleCreator)
 }
 
+func TestResolveGroupNo(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		expect string
+	}{
+		{"regular group", "abc123def456", "abc123def456"},
+		{"thread channel", "abc123____shortid", "abc123"},
+		{"separator at start", "____shortid", "____shortid"},
+		{"empty string", "", ""},
+		{"separator only", "____", "____"},
+		{"multiple separators", "abc____def____ghi", "abc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expect, resolveGroupNo(tt.input))
+		})
+	}
+}
+
 func TestInviteReq_Check_WithRemark(t *testing.T) {
 	tests := []struct {
 		name    string

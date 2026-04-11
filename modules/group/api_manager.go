@@ -326,19 +326,6 @@ func (m *Manager) forbidden(c *wkhttp.Context) {
 		}
 		whitelistUIDs = managerOrCreaterUIDs
 	}
-	// 群全员禁言
-	err = m.ctx.IMWhitelistSet(config.ChannelWhitelistReq{
-		ChannelReq: config.ChannelReq{
-			ChannelID:   groupModel.GroupNo,
-			ChannelType: common.ChannelTypeGroup.Uint8(),
-		},
-		UIDs: whitelistUIDs,
-	})
-	if err != nil {
-		m.Error("设置禁言失败！", zap.Error(err))
-		c.ResponseError(errors.New(err.Error()))
-		return
-	}
 
 	tx, err := m.ctx.DB().Begin()
 	if err != nil {
@@ -388,6 +375,20 @@ func (m *Manager) forbidden(c *wkhttp.Context) {
 		return
 	}
 	m.ctx.EventCommit(eventID)
+
+	// 群全员禁言 - DB commit 成功后再调用 IM API
+	err = m.ctx.IMWhitelistSet(config.ChannelWhitelistReq{
+		ChannelReq: config.ChannelReq{
+			ChannelID:   groupModel.GroupNo,
+			ChannelType: common.ChannelTypeGroup.Uint8(),
+		},
+		UIDs: whitelistUIDs,
+	})
+	if err != nil {
+		m.Error("设置禁言失败！", zap.Error(err))
+		c.ResponseError(errors.New(err.Error()))
+		return
+	}
 
 	c.ResponseOK()
 }

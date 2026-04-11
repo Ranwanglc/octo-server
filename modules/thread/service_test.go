@@ -1,8 +1,14 @@
 package thread
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
+	"github.com/Mininglamp-OSS/octo-lib/testutil"
+	"github.com/Mininglamp-OSS/octo-server/modules/group"
+	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -141,6 +147,59 @@ func TestIsValidGroupNo(t *testing.T) {
 	}
 }
 
+// ==================== parsePayloadContent 测试 ====================
+
+func TestParsePayloadContent(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload []byte
+		want    string
+	}{
+		{
+			name:    "normal_text_message",
+			payload: []byte(`{"type":1,"content":"你好世界"}`),
+			want:    "你好世界",
+		},
+		{
+			name:    "empty_content",
+			payload: []byte(`{"type":1,"content":""}`),
+			want:    "",
+		},
+		{
+			name:    "no_content_field",
+			payload: []byte(`{"type":1}`),
+			want:    "",
+		},
+		{
+			name:    "content_is_number",
+			payload: []byte(`{"type":1,"content":123}`),
+			want:    "",
+		},
+		{
+			name:    "nil_payload",
+			payload: nil,
+			want:    "",
+		},
+		{
+			name:    "empty_payload",
+			payload: []byte{},
+			want:    "",
+		},
+		{
+			name:    "invalid_json",
+			payload: []byte(`not json`),
+			want:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parsePayloadContent(tt.payload)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 // ==================== 状态常量测试 ====================
 
 func TestThreadStatusConstants(t *testing.T) {
@@ -148,4 +207,258 @@ func TestThreadStatusConstants(t *testing.T) {
 	assert.Equal(t, 1, ThreadStatusActive)
 	assert.Equal(t, 2, ThreadStatusArchived)
 	assert.Equal(t, 3, ThreadStatusDeleted)
+}
+
+// ==================== DB 层 QueryThreadMetaByShortIDs 测试 ====================
+
+func TestQueryThreadMetaByShortIDs(t *testing.T) {
+	_, ctx := testutil.NewTestServer()
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	db := NewDB(ctx)
+
+	// 插入三个 thread：两个有 source_message_id，一个没有
+	shortID1 := fmt.Sprintf("%d", ctx.UserIDGen.Generate().Int64())
+	shortID2 := fmt.Sprintf("%d", ctx.UserIDGen.Generate().Int64())
+	shortID3 := fmt.Sprintf("%d", ctx.UserIDGen.Generate().Int64())
+
+	srcMsgID1 := int64(100001)
+	srcMsgID2 := int64(100002)
+
+	err = db.Insert(&Model{
+		ShortID:         shortID1,
+		GroupNo:         "00000000000000000000000000000001",
+		Name:            "有源消息1",
+		CreatorUID:      "u1",
+		SourceMessageID: &srcMsgID1,
+		Status:          ThreadStatusActive,
+		Version:         1,
+	})
+	assert.NoError(t, err)
+
+	err = db.Insert(&Model{
+		ShortID:         shortID2,
+		GroupNo:         "00000000000000000000000000000001",
+		Name:            "有源消息2",
+		CreatorUID:      "u1",
+		SourceMessageID: &srcMsgID2,
+		Status:          ThreadStatusActive,
+		Version:         1,
+	})
+	assert.NoError(t, err)
+
+	err = db.Insert(&Model{
+		ShortID:    shortID3,
+		GroupNo:    "00000000000000000000000000000001",
+		Name:       "无源消息",
+		CreatorUID: "u1",
+		Status:     ThreadStatusActive,
+		Version:    1,
+	})
+	assert.NoError(t, err)
+
+	// 模拟消息统计更新
+	err = db.UpdateMessageStats(shortID1, "hello", "u1")
+	assert.NoError(t, err)
+	err = db.UpdateMessageStats(shortID1, "world", "u2")
+	assert.NoError(t, err)
+
+	// 批量查询元数据
+	result, err := db.QueryThreadMetaByShortIDs([]string{shortID1, shortID2, shortID3})
+	assert.NoError(t, err)
+	assert.Len(t, result, 3)
+
+	// shortID1: 有 source_message_id，message_count=2
+	assert.NotNil(t, result[shortID1].SourceMessageID)
+	assert.Equal(t, srcMsgID1, *result[shortID1].SourceMessageID)
+	assert.Equal(t, int64(2), result[shortID1].MessageCount)
+
+	// shortID2: 有 source_message_id，message_count=0
+	assert.NotNil(t, result[shortID2].SourceMessageID)
+	assert.Equal(t, srcMsgID2, *result[shortID2].SourceMessageID)
+	assert.Equal(t, int64(0), result[shortID2].MessageCount)
+
+	// shortID3: 无 source_message_id，message_count=0
+	assert.Nil(t, result[shortID3].SourceMessageID)
+	assert.Equal(t, int64(0), result[shortID3].MessageCount)
+
+	// 空列表不报错
+	emptyResult, err := db.QueryThreadMetaByShortIDs([]string{})
+	assert.NoError(t, err)
+	assert.Len(t, emptyResult, 0)
+
+	// 不存在的 shortID 不在结果中
+	unknownResult, err := db.QueryThreadMetaByShortIDs([]string{"999999999999999"})
+	assert.NoError(t, err)
+	assert.Len(t, unknownResult, 0)
+
+	// 向后兼容：QuerySourceMessageIDsByShortIDs 仍然工作
+	srcResult, err := db.QuerySourceMessageIDsByShortIDs([]string{shortID1, shortID3})
+	assert.NoError(t, err)
+	assert.Len(t, srcResult, 2)
+	assert.Equal(t, srcMsgID1, *srcResult[shortID1])
+	assert.Nil(t, srcResult[shortID3])
+}
+
+// ==================== DB 层 UpdateMessageStats 测试 ====================
+
+func TestUpdateMessageStats(t *testing.T) {
+	_, ctx := testutil.NewTestServer()
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	db := NewDB(ctx)
+
+	// 插入 thread
+	shortID := fmt.Sprintf("%d", ctx.UserIDGen.Generate().Int64())
+	err = db.Insert(&Model{
+		ShortID:    shortID,
+		GroupNo:    "00000000000000000000000000000001",
+		Name:       "统计测试",
+		CreatorUID: "u1",
+		Status:     ThreadStatusActive,
+		Version:    1,
+	})
+	assert.NoError(t, err)
+
+	// 初始状态
+	thread, err := db.QueryByShortID(shortID)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(0), thread.MessageCount)
+	assert.Nil(t, thread.LastMessageAt)
+	assert.Empty(t, thread.LastMessageContent)
+	assert.Empty(t, thread.LastMessageSenderUID)
+
+	// 更新一次
+	err = db.UpdateMessageStats(shortID, "你好世界", "sender1")
+	assert.NoError(t, err)
+
+	thread, err = db.QueryByShortID(shortID)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(1), thread.MessageCount)
+	assert.NotNil(t, thread.LastMessageAt)
+	assert.Equal(t, "你好世界", thread.LastMessageContent)
+	assert.Equal(t, "sender1", thread.LastMessageSenderUID)
+
+	// 再更新一次，message_count 应递增
+	err = db.UpdateMessageStats(shortID, "第二条消息", "sender2")
+	assert.NoError(t, err)
+
+	thread, err = db.QueryByShortID(shortID)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(2), thread.MessageCount)
+	assert.Equal(t, "第二条消息", thread.LastMessageContent)
+	assert.Equal(t, "sender2", thread.LastMessageSenderUID)
+}
+
+// ==================== RemoveUserFromGroupThreads 测试 ====================
+
+func setupServiceTestData(t *testing.T) (*Service, string) {
+	_, ctx := testutil.NewTestServer()
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	// 创建测试用户
+	userDB := user.NewDB(ctx)
+	err = userDB.Insert(&user.Model{UID: testutil.UID, Name: "用户1", ShortNo: "u10000"})
+	assert.NoError(t, err)
+	err = userDB.Insert(&user.Model{UID: "user2", Name: "用户2", ShortNo: "u10002"})
+	assert.NoError(t, err)
+
+	// 创建测试群
+	groupNo := strings.ReplaceAll(util.GenerUUID(), "-", "")
+	groupDB := group.NewDB(ctx)
+	err = groupDB.Insert(&group.Model{GroupNo: groupNo, Name: "测试群", Creator: testutil.UID, Status: 1, Version: 1})
+	assert.NoError(t, err)
+	err = groupDB.InsertMember(&group.MemberModel{GroupNo: groupNo, UID: testutil.UID, Role: group.MemberRoleCreator, Status: 1, Version: 1, Vercode: util.GenerUUID()})
+	assert.NoError(t, err)
+	err = groupDB.InsertMember(&group.MemberModel{GroupNo: groupNo, UID: "user2", Role: group.MemberRoleCommon, Status: 1, Version: 1, Vercode: util.GenerUUID()})
+	assert.NoError(t, err)
+
+	svc := NewService(ctx).(*Service)
+	return svc, groupNo
+}
+
+func TestRemoveUserFromGroupThreads(t *testing.T) {
+	svc, groupNo := setupServiceTestData(t)
+
+	// 创建两个子区
+	thread1, err := svc.CreateThread(&CreateThreadReq{GroupNo: groupNo, Name: "子区1", CreatorUID: testutil.UID, CreatorName: "用户1"})
+	assert.NoError(t, err)
+	thread2, err := svc.CreateThread(&CreateThreadReq{GroupNo: groupNo, Name: "子区2", CreatorUID: testutil.UID, CreatorName: "用户1"})
+	assert.NoError(t, err)
+
+	// user2 加入两个子区
+	err = svc.JoinThread(groupNo, thread1.ShortID, "user2")
+	assert.NoError(t, err)
+	err = svc.JoinThread(groupNo, thread2.ShortID, "user2")
+	assert.NoError(t, err)
+
+	// 确认 user2 是两个子区的成员
+	isMember1, _ := svc.IsMember(groupNo, thread1.ShortID, "user2")
+	isMember2, _ := svc.IsMember(groupNo, thread2.ShortID, "user2")
+	assert.True(t, isMember1)
+	assert.True(t, isMember2)
+
+	// 执行批量移除
+	err = svc.RemoveUserFromGroupThreads(groupNo, "user2")
+	assert.NoError(t, err)
+
+	// 验证 user2 已从所有子区移除
+	isMember1, _ = svc.IsMember(groupNo, thread1.ShortID, "user2")
+	isMember2, _ = svc.IsMember(groupNo, thread2.ShortID, "user2")
+	assert.False(t, isMember1)
+	assert.False(t, isMember2)
+
+	// 验证创建者(testutil.UID)不受影响
+	isCreator1, _ := svc.IsMember(groupNo, thread1.ShortID, testutil.UID)
+	isCreator2, _ := svc.IsMember(groupNo, thread2.ShortID, testutil.UID)
+	assert.True(t, isCreator1)
+	assert.True(t, isCreator2)
+}
+
+func TestRemoveUserFromGroupThreads_NoThreads(t *testing.T) {
+	svc, groupNo := setupServiceTestData(t)
+
+	// user2 没加入任何子区，调用应无副作用
+	err := svc.RemoveUserFromGroupThreads(groupNo, "user2")
+	assert.NoError(t, err)
+}
+
+func TestRemoveUserFromGroupThreads_OnlyAffectsTargetGroup(t *testing.T) {
+	svc, groupNo1 := setupServiceTestData(t)
+
+	// 创建第二个群
+	groupNo2 := strings.ReplaceAll(util.GenerUUID(), "-", "")
+	groupDB := group.NewDB(svc.ctx)
+	err := groupDB.Insert(&group.Model{GroupNo: groupNo2, Name: "群2", Creator: testutil.UID, Status: 1, Version: 1})
+	assert.NoError(t, err)
+	err = groupDB.InsertMember(&group.MemberModel{GroupNo: groupNo2, UID: testutil.UID, Role: group.MemberRoleCreator, Status: 1, Version: 1, Vercode: util.GenerUUID()})
+	assert.NoError(t, err)
+	err = groupDB.InsertMember(&group.MemberModel{GroupNo: groupNo2, UID: "user2", Role: group.MemberRoleCommon, Status: 1, Version: 1, Vercode: util.GenerUUID()})
+	assert.NoError(t, err)
+
+	// 两个群各创建一个子区，user2 都加入
+	t1, err := svc.CreateThread(&CreateThreadReq{GroupNo: groupNo1, Name: "群1子区", CreatorUID: testutil.UID, CreatorName: "用户1"})
+	assert.NoError(t, err)
+	t2, err := svc.CreateThread(&CreateThreadReq{GroupNo: groupNo2, Name: "群2子区", CreatorUID: testutil.UID, CreatorName: "用户1"})
+	assert.NoError(t, err)
+
+	err = svc.JoinThread(groupNo1, t1.ShortID, "user2")
+	assert.NoError(t, err)
+	err = svc.JoinThread(groupNo2, t2.ShortID, "user2")
+	assert.NoError(t, err)
+
+	// 只移除群1的子区成员
+	err = svc.RemoveUserFromGroupThreads(groupNo1, "user2")
+	assert.NoError(t, err)
+
+	// 群1子区已移除
+	isMember1, _ := svc.IsMember(groupNo1, t1.ShortID, "user2")
+	assert.False(t, isMember1)
+
+	// 群2子区不受影响
+	isMember2, _ := svc.IsMember(groupNo2, t2.ShortID, "user2")
+	assert.True(t, isMember2)
 }

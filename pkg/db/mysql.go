@@ -31,8 +31,7 @@ func NewMySQL(addr string, sqlDir string, migration bool) *dbr.Session {
 	if migration {
 		err = Migration(sqlDir, session)
 		if err != nil {
-			fmt.Println("Migration error", addr, err)
-			panic(err)
+			panic(fmt.Sprintf("Migration error at %s: %v", addr, err))
 		}
 	}
 

@@ -19,7 +19,9 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/Mininglamp-OSS/octo-server/modules/file"
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
+	"github.com/Mininglamp-OSS/octo-server/modules/thread"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	"github.com/Mininglamp-OSS/octo-server/modules/voice"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
@@ -42,6 +44,11 @@ type BotFather struct {
 	appService       app.IService
 	fileService      file.IService
 	groupService     group.IService
+	userDB           *user.DB
+	threadService    thread.IService
+	voiceDB          *voice.VoiceDB
+	voiceSvc         *voice.VoiceService
+	voiceCfg         *voice.VoiceConfig
 	robotEventPrefix string
 	initOnce         sync.Once
 	msgSem           chan struct{} // 限制并发消息处理的信号量
@@ -50,6 +57,7 @@ type BotFather struct {
 
 // New 创建BotFather实例
 func New(ctx *config.Context) *BotFather {
+	voiceCfg := voice.NewVoiceConfigFromEnv()
 	bf := &BotFather{
 		ctx:              ctx,
 		db:               newBotfatherDB(ctx),
@@ -58,6 +66,11 @@ func New(ctx *config.Context) *BotFather {
 		appService:       app.NewService(ctx),
 		fileService:      file.NewService(ctx),
 		groupService:     group.NewService(ctx),
+		userDB:           user.NewDB(ctx),
+		threadService:    thread.NewService(ctx),
+		voiceDB:          voice.NewVoiceDB(ctx),
+		voiceSvc:         voice.NewVoiceService(voiceCfg),
+		voiceCfg:         voiceCfg,
 		robotEventPrefix: "robotEvent:",
 		msgSem:           make(chan struct{}, 100), // 限制最多100个并发消息处理
 		Log:              log.NewTLog("BotFather"),
@@ -106,6 +119,19 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 		botAPI.GET("/groups/:group_no/members", bf.getGroupMembers)
 		botAPI.GET("/groups/:group_no/md", bf.getGroupMd)          // 获取GROUP.md
 		botAPI.PUT("/groups/:group_no/md", bf.updateGroupMd)       // 更新GROUP.md
+		botAPI.GET("/space/members", bf.botSpaceMembers)                              // Bot 查询 Space 成员
+		botAPI.POST("/createGroup", bf.botGroupCreate)                               // Bot 创建群
+		botAPI.PUT("/groups/:group_no/info", bf.botGroupUpdate)                   // Bot 编辑群
+		botAPI.POST("/groups/:group_no/members/add", bf.botGroupMemberAdd)       // Bot 添加群成员
+		botAPI.POST("/groups/:group_no/members/remove", bf.botGroupMemberRemove) // Bot 移除群成员
+		// Bot Thread API (#892)
+		botAPI.POST("/groups/:group_no/threads", bf.botCreateThread)
+		botAPI.GET("/groups/:group_no/threads", bf.botListThreads)
+		botAPI.GET("/groups/:group_no/threads/:short_id", bf.botGetThread)
+		botAPI.DELETE("/groups/:group_no/threads/:short_id", bf.botDeleteThread)
+		botAPI.GET("/groups/:group_no/threads/:short_id/members", bf.botListThreadMembers)
+		botAPI.POST("/groups/:group_no/threads/:short_id/join", bf.botJoinThread)
+		botAPI.POST("/groups/:group_no/threads/:short_id/leave", bf.botLeaveThread)
 		botAPI.POST("/setCommands", bf.setCommands)
 		// Bot File API (#433)
 		botAPI.POST("/file/upload", bf.botUploadFile)
@@ -114,6 +140,11 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 		botAPI.GET("/upload/credentials", bf.botUploadCredentials) // STS 临时密钥签发
 		botAPI.POST("/message/edit", bf.botMessageEdit)            // Bot 编辑消息
 		botAPI.GET("/user/info", bf.getUserInfo)                    // 查询用户基本信息 (#852)
+		// Voice context API
+		botAPI.PUT("/voice/context", bf.botPutVoiceContext)
+		botAPI.GET("/voice/context", bf.botGetVoiceContext)
+		botAPI.DELETE("/voice/context", bf.botDeleteVoiceContext)
+		botAPI.POST("/voice/transcribe", bf.botTranscribe)
 	}
 
 	// Bot File API（独立路由组，避免 GIN wildcard 冲突）

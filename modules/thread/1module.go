@@ -79,8 +79,8 @@ func init() {
 					}
 
 					channelInfoMap := map[string]interface{}{}
-					// 已删除或归档的子区标记为禁用
-					if thread.Status == ThreadStatusDeleted || thread.Status == ThreadStatusArchived {
+					// 已删除的子区标记为禁用（归档子区允许发消息，发消息后自动解档）
+					if thread.Status == ThreadStatusDeleted {
 						channelInfoMap["ban"] = 1
 					}
 					channelInfoMap["status"] = thread.Status
@@ -185,6 +185,7 @@ func newChannelRespWithThread(thread *Model) *model.ChannelResp {
 	extraMap["group_no"] = thread.GroupNo
 	extraMap["creator_uid"] = thread.CreatorUID
 	extraMap["status"] = thread.Status
+	extraMap["message_count"] = thread.MessageCount
 	if thread.SourceMessageID != nil {
 		extraMap["source_message_id"] = *thread.SourceMessageID
 	}
