@@ -1169,7 +1169,7 @@ func TestJoinApproveDetail_ValidAuthCode(t *testing.T) {
 		"space_id": spaceId,
 		"type":     "spaceJoinApprove",
 	})
-	err = testCtx.GetRedisConn().SetAndExpire(fmt.Sprintf("authcode:%s", authCode), authData, time.Minute*5)
+	err = testCtx.GetRedisConn().SetAndExpire(fmt.Sprintf("%s%s", common.AuthCodeCachePrefix, authCode), authData, time.Minute*5)
 	assert.NoError(t, err)
 
 	// GET 审批详情
@@ -1221,7 +1221,7 @@ func TestJoinApproveSure_Approve(t *testing.T) {
 		"reviewer_uid": testutil.UID,
 		"type":         "spaceJoinApprove",
 	})
-	err = testCtx.GetRedisConn().SetAndExpire(fmt.Sprintf("authcode:%s", authCode), authData, time.Minute*5)
+	err = testCtx.GetRedisConn().SetAndExpire(fmt.Sprintf("%s%s", common.AuthCodeCachePrefix, authCode), authData, time.Minute*5)
 	assert.NoError(t, err)
 
 	// POST 审批通过
@@ -1237,7 +1237,7 @@ func TestJoinApproveSure_Approve(t *testing.T) {
 	assert.NotNil(t, member)
 
 	// 验证 auth_code 已失效（一次性）
-	val, _ := testCtx.GetRedisConn().GetString(fmt.Sprintf("authcode:%s", authCode))
+	val, _ := testCtx.GetRedisConn().GetString(fmt.Sprintf("%s%s", common.AuthCodeCachePrefix, authCode))
 	assert.Empty(t, val, "auth_code 应该已被删除")
 }
 
@@ -1264,7 +1264,7 @@ func TestJoinApproveSure_Reject(t *testing.T) {
 		"reviewer_uid": testutil.UID,
 		"type":         "spaceJoinApprove",
 	})
-	err = testCtx.GetRedisConn().SetAndExpire(fmt.Sprintf("authcode:%s", authCode), authData, time.Minute*5)
+	err = testCtx.GetRedisConn().SetAndExpire(fmt.Sprintf("%s%s", common.AuthCodeCachePrefix, authCode), authData, time.Minute*5)
 	assert.NoError(t, err)
 
 	w := httptest.NewRecorder()
