@@ -3,6 +3,7 @@ package space
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1236,9 +1237,9 @@ func TestJoinApproveSure_Approve(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, member)
 
-	// 验证 auth_code 已失效（一次性）
+	// auth_code 保留不删除，审批后仍可查看详情
 	val, _ := testCtx.GetRedisConn().GetString(fmt.Sprintf("%s%s", common.AuthCodeCachePrefix, authCode))
-	assert.Empty(t, val, "auth_code 应该已被删除")
+	assert.NotEmpty(t, val, "auth_code 应保留到自然过期")
 }
 
 func TestJoinApproveSure_Reject(t *testing.T) {
@@ -1326,8 +1327,8 @@ func TestRejectJoinApply_CrossSpaceBlocked(t *testing.T) {
 	assert.Equal(t, 0, apply.Status, "申请状态不应被修改")
 }
 
-// Bug: auth_code 应先消费再操作，防止并发穿透
-func TestJoinApproveSure_AuthCodeConsumedBeforeAction(t *testing.T) {
+// auth_code 不再删除，依靠 DB status 防止重放
+func TestJoinApproveSure_ReplayBlockedByDBStatus(t *testing.T) {
 	s, f, err := setup(t)
 
 	spaceId := "test-space-authcode-order"
@@ -1362,15 +1363,80 @@ func TestJoinApproveSure_AuthCodeConsumedBeforeAction(t *testing.T) {
 	s.GetRoute().ServeHTTP(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	// auth_code 应已被消费
+	// auth_code 应保留（不再删除）
 	val, _ := testCtx.GetRedisConn().GetString(
 		fmt.Sprintf("%s%s", common.AuthCodeCachePrefix, authCode))
-	assert.Empty(t, val, "auth_code 应在操作前被消费")
+	assert.NotEmpty(t, val, "auth_code 应保留到自然过期")
 
-	// 用同一个 auth_code 再次请求应失败
+	// 用同一个 auth_code 再次请求应被 DB status 拦截
 	w2 := httptest.NewRecorder()
 	req2, _ := http.NewRequest("POST",
 		"/v1/space/join-approve/sure?auth_code="+authCode+"&action=approve", nil)
 	s.GetRoute().ServeHTTP(w2, req2)
-	assert.Equal(t, http.StatusBadRequest, w2.Code, "重放应被拒绝")
+	assert.Equal(t, http.StatusBadRequest, w2.Code, "重放应被 DB status 拒绝")
+	assert.Contains(t, w2.Body.String(), "已被处理")
+}
+
+// Fix: 审批后 detail 仍可查看，返回 reviewer 信息
+func TestJoinApproveDetail_AfterApproval_ShowsReviewer(t *testing.T) {
+	s, f, err := setup(t)
+
+	spaceId := "test-space-detail-after"
+	applicantUID := "applicant-detail-after"
+	reviewerUID := testutil.UID
+	reviewerName := "审批管理员"
+
+	err = f.db.insertSpaceNoTx(&SpaceModel{
+		SpaceId: spaceId, Name: "详情回看", Creator: reviewerUID, JoinMode: 1, Status: 1,
+	})
+	assert.NoError(t, err)
+	err = f.db.insertMemberNoTx(&MemberModel{
+		SpaceId: spaceId, UID: reviewerUID, Role: 2, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	// 插入 reviewer 用户记录
+	_, err = testCtx.DB().InsertBySql(
+		"INSERT IGNORE INTO `user` (uid, name) VALUES (?, ?)", reviewerUID, reviewerName,
+	).Exec()
+	assert.NoError(t, err)
+
+	applyID, err := f.db.upsertJoinApply(&spaceJoinApplyModel{
+		SpaceId: spaceId, UID: applicantUID, InviteCode: "inv-detail",
+	})
+	assert.NoError(t, err)
+
+	authCode := "test-auth-detail-after"
+	authData := util.ToJson(map[string]interface{}{
+		"apply_id":     applyID,
+		"space_id":     spaceId,
+		"reviewer_uid": reviewerUID,
+		"type":         "spaceJoinApprove",
+	})
+	err = testCtx.GetRedisConn().SetAndExpire(
+		fmt.Sprintf("%s%s", common.AuthCodeCachePrefix, authCode), authData, time.Minute*5)
+	assert.NoError(t, err)
+
+	// 先审批通过
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST",
+		"/v1/space/join-approve/sure?auth_code="+authCode+"&action=approve", nil)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// 用同一个 auth_code 查看详情 — 应返回已通过状态和审批人
+	w2 := httptest.NewRecorder()
+	req2, _ := http.NewRequest("GET",
+		"/v1/space/join-approve/detail?auth_code="+authCode, nil)
+	s.GetRoute().ServeHTTP(w2, req2)
+	assert.Equal(t, http.StatusOK, w2.Code)
+
+	var resp map[string]interface{}
+	err = json.Unmarshal(w2.Body.Bytes(), &resp)
+	assert.NoError(t, err)
+
+	statusVal, _ := resp["status"].(float64)
+	assert.Equal(t, float64(1), statusVal, "状态应为已通过")
+	assert.Equal(t, reviewerUID, resp["reviewer_uid"], "应返回审批人UID")
+	assert.Equal(t, reviewerName, resp["reviewer_name"], "应返回审批人名称")
 }

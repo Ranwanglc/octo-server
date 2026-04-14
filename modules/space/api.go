@@ -1068,6 +1068,7 @@ func (s *Space) joinApplies(c *wkhttp.Context) {
 			ApplicantName: applicantName,
 			Remark:        apply.Remark,
 			Status:        apply.Status,
+			ReviewerUID:   apply.ReviewerUID,
 			CreatedAt:     apply.CreatedAt.String(),
 		})
 	}
@@ -1375,14 +1376,25 @@ func (s *Space) joinApproveDetail(c *wkhttp.Context) {
 		applicantName = userInfo.Name
 	}
 
+	var reviewerName string
+	if apply.ReviewerUID != "" {
+		var rInfo struct{ Name string }
+		cnt, _ := s.ctx.DB().SelectBySql("SELECT IFNULL(name,'') as name FROM `user` WHERE uid=?", apply.ReviewerUID).Load(&rInfo)
+		if cnt > 0 && rInfo.Name != "" {
+			reviewerName = rInfo.Name
+		}
+	}
+
 	c.Response(map[string]interface{}{
-		"apply_id":       apply.Id,
-		"space_id":       spaceId,
-		"space_name":     spaceName,
-		"uid":            apply.UID,
-		"applicant_name": applicantName,
+		"apply_id":        apply.Id,
+		"space_id":        spaceId,
+		"space_name":      spaceName,
+		"uid":             apply.UID,
+		"applicant_name":  applicantName,
 		"applicant_email": userInfo.Email,
-		"status":         apply.Status,
+		"status":          apply.Status,
+		"reviewer_uid":    apply.ReviewerUID,
+		"reviewer_name":   reviewerName,
 	})
 }
 
@@ -1405,8 +1417,8 @@ func (s *Space) joinApproveSure(c *wkhttp.Context) {
 		c.ResponseError(errors.New("授权码无效或已过期"))
 		return
 	}
-	// 立即删除 auth_code（一次性消费，最小化并发窗口）
-	_ = s.ctx.GetRedisConn().Del(cacheKey)
+	// 保留 auth_code 让其自然过期，审批后仍可查看详情
+	// DB 层 WHERE status=0 已原子防重
 
 	var authMap map[string]interface{}
 	if err := util.ReadJsonByByte([]byte(authInfo), &authMap); err != nil {
