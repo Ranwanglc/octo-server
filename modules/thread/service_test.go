@@ -426,6 +426,85 @@ func TestRemoveUserFromGroupThreads_NoThreads(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// ==================== UpdateName 测试 ====================
+
+func TestUpdateName(t *testing.T) {
+	svc, groupNo := setupServiceTestData(t)
+
+	// 创建子区
+	thread, err := svc.CreateThread(&CreateThreadReq{GroupNo: groupNo, Name: "原始名称", CreatorUID: testutil.UID, CreatorName: "用户1"})
+	assert.NoError(t, err)
+
+	// 创建者修改名称
+	err = svc.UpdateName(groupNo, thread.ShortID, testutil.UID, "新名称")
+	assert.NoError(t, err)
+
+	// 验证名称已更新
+	updated, err := svc.GetThread(groupNo, thread.ShortID)
+	assert.NoError(t, err)
+	assert.Equal(t, "新名称", updated.Name)
+}
+
+func TestUpdateName_NotFound(t *testing.T) {
+	svc, groupNo := setupServiceTestData(t)
+
+	err := svc.UpdateName(groupNo, "999999999999999", testutil.UID, "新名称")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestUpdateName_Deleted(t *testing.T) {
+	svc, groupNo := setupServiceTestData(t)
+
+	thread, err := svc.CreateThread(&CreateThreadReq{GroupNo: groupNo, Name: "待删除", CreatorUID: testutil.UID, CreatorName: "用户1"})
+	assert.NoError(t, err)
+
+	// 删除子区
+	err = svc.DeleteThread(groupNo, thread.ShortID, testutil.UID)
+	assert.NoError(t, err)
+
+	// 删除后不能修改名称
+	err = svc.UpdateName(groupNo, thread.ShortID, testutil.UID, "新名称")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "deleted")
+}
+
+func TestUpdateName_NoPermission(t *testing.T) {
+	svc, groupNo := setupServiceTestData(t)
+
+	// testutil.UID 创建子区
+	thread, err := svc.CreateThread(&CreateThreadReq{GroupNo: groupNo, Name: "原始名称", CreatorUID: testutil.UID, CreatorName: "用户1"})
+	assert.NoError(t, err)
+
+	// user2 不是创建者也不是管理员，不能修改
+	err = svc.UpdateName(groupNo, thread.ShortID, "user2", "新名称")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no permission")
+}
+
+func TestUpdateName_EmptyName(t *testing.T) {
+	svc, groupNo := setupServiceTestData(t)
+
+	thread, err := svc.CreateThread(&CreateThreadReq{GroupNo: groupNo, Name: "原始名称", CreatorUID: testutil.UID, CreatorName: "用户1"})
+	assert.NoError(t, err)
+
+	err = svc.UpdateName(groupNo, thread.ShortID, testutil.UID, "")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "name")
+}
+
+func TestUpdateName_TooLong(t *testing.T) {
+	svc, groupNo := setupServiceTestData(t)
+
+	thread, err := svc.CreateThread(&CreateThreadReq{GroupNo: groupNo, Name: "原始名称", CreatorUID: testutil.UID, CreatorName: "用户1"})
+	assert.NoError(t, err)
+
+	longName := strings.Repeat("a", 101)
+	err = svc.UpdateName(groupNo, thread.ShortID, testutil.UID, longName)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "name")
+}
+
 func TestRemoveUserFromGroupThreads_OnlyAffectsTargetGroup(t *testing.T) {
 	svc, groupNo1 := setupServiceTestData(t)
 

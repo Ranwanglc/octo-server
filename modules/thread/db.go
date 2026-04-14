@@ -162,6 +162,16 @@ func (d *DB) UpdateStatus(shortID string, status int, version int64) error {
 	return err
 }
 
+// UpdateName 更新子区名称
+func (d *DB) UpdateName(shortID string, name string, version int64) error {
+	_, err := d.session.Update("thread").SetMap(map[string]interface{}{
+		"name":       name,
+		"version":    version,
+		"updated_at": time.Now(),
+	}).Where("short_id=?", shortID).Exec()
+	return err
+}
+
 // Update 更新子区信息
 func (d *DB) Update(m *Model) error {
 	_, err := d.session.Update("thread").SetMap(map[string]interface{}{

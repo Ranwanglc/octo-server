@@ -557,6 +557,91 @@ func TestBussDataSource_ChannelGet(t *testing.T) {
 	assert.Equal(t, register.ErrDatasourceNotProcess, err)
 }
 
+// ==================== 修改子区名称测试 ====================
+
+func TestUpdateThreadName(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	// 创建子区
+	shortID := createThreadViaAPI(t, s, groupNo, "原始名称")
+
+	// 修改名称
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/"+shortID, bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"name": "新名称",
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// 验证名称已更新
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("GET", "/v1/groups/"+groupNo+"/threads/"+shortID, nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"name":"新名称"`)
+}
+
+func TestUpdateThreadName_EmptyName(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	shortID := createThreadViaAPI(t, s, groupNo, "原始名称")
+
+	// 空名称
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/"+shortID, bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"name": "",
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestUpdateThreadName_InvalidShortID(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/invalid", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"name": "新名称",
+	}))))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "invalid short_id format")
+}
+
+func TestUpdateThreadName_NoPermission(t *testing.T) {
+	s, ctx := setupTestData(t)
+	groupNo := createTestGroup(t, ctx)
+
+	// testutil.UID 创建子区
+	shortID := createThreadViaAPI(t, s, groupNo, "原始名称")
+
+	// 为 user2 设置 token
+	user2Token := "token_user2"
+	err := ctx.Cache().Set(ctx.GetConfig().Cache.TokenCachePrefix+user2Token, "user2@test")
+	assert.NoError(t, err)
+
+	// user2 修改名称（非创建者、非管理员）
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/groups/"+groupNo+"/threads/"+shortID, bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"name": "新名称",
+	}))))
+	req.Header.Set("token", user2Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "no permission")
+}
+
 // ==================== 统计字段测试 ====================
 
 // TestListThreads_WithStats 验证列表返回消息统计字段

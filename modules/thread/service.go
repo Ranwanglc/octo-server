@@ -34,6 +34,8 @@ func parsePayloadContent(payload []byte) string {
 type IService interface {
 	// CreateThread 创建子区
 	CreateThread(req *CreateThreadReq) (*ThreadResp, error)
+	// UpdateName 修改子区名称
+	UpdateName(groupNo, shortID, operatorUID, name string) error
 	// GetThreads 获取群下的所有子区
 	GetThreads(groupNo string) ([]*ThreadResp, error)
 	// GetThread 获取子区详情
@@ -317,6 +319,43 @@ func (s *Service) sendSourceMessage(channelID, fromUID string, payload json.RawM
 	if err != nil {
 		s.Error("拷贝源消息到子区失败", zap.Error(err), zap.String("channelID", channelID))
 	}
+}
+
+// UpdateName 修改子区名称
+func (s *Service) UpdateName(groupNo, shortID, operatorUID, name string) error {
+	if name == "" || len([]rune(name)) > 100 {
+		return errors.New("name is required and must not exceed 100 characters")
+	}
+
+	thread, err := s.db.QueryByGroupNoAndShortID(groupNo, shortID)
+	if err != nil {
+		return fmt.Errorf("query thread: %w", err)
+	}
+	if thread == nil {
+		return errors.New("thread not found")
+	}
+	if thread.Status == ThreadStatusDeleted {
+		return errors.New("thread has been deleted")
+	}
+
+	if thread.CreatorUID != operatorUID {
+		isManager, err := s.groupService.IsCreatorOrManager(groupNo, operatorUID)
+		if err != nil {
+			return fmt.Errorf("check permission: %w", err)
+		}
+		if !isManager {
+			return errors.New("no permission to update")
+		}
+	}
+
+	version, err := s.ctx.GenSeq(ThreadSeqKey)
+	if err != nil {
+		return fmt.Errorf("generate sequence: %w", err)
+	}
+	if err := s.db.UpdateName(shortID, name, version); err != nil {
+		return fmt.Errorf("update thread name: %w", err)
+	}
+	return nil
 }
 
 // GetThreads 获取群下的所有子区
