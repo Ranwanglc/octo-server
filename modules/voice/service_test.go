@@ -1402,3 +1402,52 @@ func TestQwenTranscribe_AppendMode(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "原有文本新内容", text) // CJK join, no space
 }
+
+func TestQwenTranscribe_AudioDataURI(t *testing.T) {
+	// Qwen (DashScope) requires data URI format for input_audio.data
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req chatCompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+
+		audioData := req.Messages[0].Content[1].InputAudio.Data
+		assert.True(t, strings.HasPrefix(audioData, "data:;base64,"),
+			"qwen audio data should have data URI prefix, got: %s", audioData)
+
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "ok"}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newQwenTestConfig(server.URL)
+	svc := NewVoiceService(cfg)
+
+	_, _, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "", "")
+	assert.NoError(t, err)
+}
+
+func TestGeminiTranscribe_AudioRawBase64(t *testing.T) {
+	// Gemini should use raw base64 without data URI prefix
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req chatCompletionRequest
+		json.NewDecoder(r.Body).Decode(&req)
+
+		audioData := req.Messages[0].Content[1].InputAudio.Data
+		assert.False(t, strings.HasPrefix(audioData, "data:"),
+			"gemini audio data should be raw base64, got: %s", audioData)
+
+		resp := chatCompletionResponse{
+			Choices: []choice{{Message: responseMessage{Content: "ok"}}},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := newTestConfig(server.URL)
+	cfg.Models = []string{"gemini-model"}
+	svc := NewVoiceService(cfg)
+
+	_, _, err := svc.Transcribe([]byte("fake-audio"), "audio/wav", "", "")
+	assert.NoError(t, err)
+}

@@ -252,6 +252,11 @@ func (s *VoiceService) callGPTWithModelFallback(audioData []byte, mimeType strin
 func (s *VoiceService) callChatCompletion(totalCtx context.Context, model string, audioData []byte, mimeType string, prompt string) (string, error) {
 	b64Audio := base64.StdEncoding.EncodeToString(audioData)
 
+	// DashScope (Qwen) requires data URI format: "data:;base64,{base64}"
+	if s.config.Engine == EngineQwen {
+		b64Audio = "data:;base64," + b64Audio
+	}
+
 	// Only use reasoning_effort=low for Gemini 3.1 Pro (reduces latency without hurting quality)
 	var reasoningEffort string
 	if s.config.Engine == EngineGemini && strings.Contains(model, "3.1-pro") {
