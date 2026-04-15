@@ -52,10 +52,11 @@ type moveGroupToCategoryReq struct {
 // ---------- Response ----------
 
 type categoryResp struct {
-	CategoryID *string                `json:"category_id"`
-	Name       string                 `json:"name"`
-	Sort       int                    `json:"sort"`
-	Groups     []groupInCategoryResp  `json:"groups"`
+	CategoryID *string               `json:"category_id"`
+	Name       string                `json:"name"`
+	Sort       int                   `json:"sort"`
+	IsDefault  bool                  `json:"is_default"`
+	Groups     []groupInCategoryResp `json:"groups"`
 }
 
 type groupInCategoryResp struct {

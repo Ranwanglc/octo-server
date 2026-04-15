@@ -112,6 +112,7 @@ func (c *Category) create(ctx *wkhttp.Context) {
 		CategoryID: &categoryID,
 		Name:       req.Name,
 		Sort:       nextSort,
+		IsDefault:  false,
 		Groups:     make([]groupInCategoryResp, 0),
 	})
 }
@@ -211,6 +212,7 @@ func (c *Category) list(ctx *wkhttp.Context) {
 				CategoryID: &catID,
 				Name:       cat.Name,
 				Sort:       cat.Sort,
+				IsDefault:  true,
 				Groups:     uncategorized,
 			})
 		} else {
@@ -222,6 +224,7 @@ func (c *Category) list(ctx *wkhttp.Context) {
 				CategoryID: &catID,
 				Name:       cat.Name,
 				Sort:       cat.Sort,
+				IsDefault:  false,
 				Groups:     catGroups,
 			})
 		}
