@@ -490,21 +490,43 @@ func (h *commandHandler) handleQuickstart(fromUID string) {
 	apiKeyFormatted := "`" + apiKey + "`"
 	h.reply(fromUID, fmt.Sprintf(`🚀 **Quickstart**
 
-将下面的提示词复制发送给你的 OpenClaw：
+📋 把下面内容发给你当前正在聊天的 OpenClaw 模型：
 
 ---
-Read %s/v1/bot/skill.md to learn the DMWork Bot API (includes User API, multi-bot config, and OpenClaw setup).
 
-My User API Key: %s
-API server: %s
+[DMWORK QUICKSTART]
 
-Create a bot, get the bot_token, then follow the skill.md instructions to connect.
-All User API endpoints require: Authorization: Bearer %s
+User API Key: %s
+API Server: %s
+
+先阅读：
+- CLI Guide: %s/v1/bot/cli-guide.md
+- Bot API: %s/v1/bot/skill.md
+
+要求：
+1. 检查 DMWork 插件状态：npx -y openclaw-channel-dmwork info
+   未安装则安装：npx -y openclaw-channel-dmwork install --skip-config
+   如果已安装，询问用户是否需要更新
+2. 获取当前 agent 标识：执行 /status，如果无法解析请询问用户
+3. 创建 bot：POST %s/v1/user/bots（Authorization: Bearer %s）
+   Body: {"username": "<agent标识规范化>", "name": "<agent显示名>"}
+   username 冲突则追加 1、2、3 后缀重试
+4. 拿到 bot_token 和 robot_id 后配置：npx -y openclaw-channel-dmwork install --bot-token <bot_token> --api-url %s --account-id <robot_id>
+5. 绑定：openclaw agents bind <agent标识> dmwork <robot_id>
+6. 重启：openclaw gateway restart
+7. 验证：npx -y openclaw-channel-dmwork doctor --account-id <robot_id>
+8. 记住 Bot API 文档：%s/v1/bot/skill.md
+
 ---
 
-💡 User API Key 可反复使用，用于管理你的所有 Bot（Bot 会自动加入你当前的 Space）%s
+💡 User API Key 可反复使用，用于管理你的所有 Bot%s
 🔑 你的 API Key: %s`,
-		apiURL, apiKey, apiURL, apiKey, spaceInfo, apiKeyFormatted))
+		apiKey, apiURL,
+		apiURL, apiURL,
+		apiURL, apiKey,
+		apiURL,
+		apiURL,
+		spaceInfo, apiKeyFormatted))
 }
 
 func (h *commandHandler) handleHelp(fromUID string) {
@@ -1100,14 +1122,43 @@ func (h *commandHandler) sendCreatedPrompt(toUID string, name string, bot *robot
 		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
 	}
 
-	msg := fmt.Sprintf("✅ 机器人「**%s**」创建成功！\n\n**Bot Name:** %s  \n**Bot Token:** %s  \n**API Server:** %s\n\n"+
-		"📋 **连接 OpenClaw**\n\n**安装插件并配置 bot：**\n"+
-		"```\nnpx -y openclaw-channel-dmwork install --bot-token %s --api-url %s --account-id %s\n```\n\n"+
-		"**插件使用指南：** %s/v1/bot/cli-guide.md  \n**Bot API 文档：** %s/v1/bot/skill.md\n\n"+
-		"⚙️ 群聊默认只有 @机器人 时才回复（可在配置中修改）  \n🔌 断开连接请发送 /disconnect",
+	msg := fmt.Sprintf(`✅ 机器人「**%s**」创建成功！
+
+**Bot Name:** %s
+**Bot Token:** %s
+**API Server:** %s
+
+📋 把下面内容发给你当前正在聊天的 OpenClaw 模型：
+
+---
+
+[DMWORK NEWBOT SETUP]
+
+Bot Name: %s
+Bot Token: %s
+API Server: %s
+Account ID: %s
+
+先阅读 CLI Guide: %s/v1/bot/cli-guide.md
+
+要求：
+1. 检查 DMWork 插件状态：npx -y openclaw-channel-dmwork info
+2. 安装/配置插件：npx -y openclaw-channel-dmwork install --bot-token %s --api-url %s --account-id %s
+3. 如果已安装，询问用户是否需要更新插件，同意则执行：npx -y openclaw-channel-dmwork update
+4. 获取当前 agent 标识：执行 /status，如果无法解析请询问用户
+5. 绑定：openclaw agents bind <agent标识> dmwork %s
+6. 重启：openclaw gateway restart
+7. 验证：npx -y openclaw-channel-dmwork doctor --account-id %s
+8. 记住 Bot API 文档：%s/v1/bot/skill.md
+
+---`,
 		name, bot.RobotID, bot.BotToken, apiURL,
+		bot.RobotID, bot.BotToken, apiURL, bot.RobotID,
+		apiURL,
 		bot.BotToken, apiURL, bot.RobotID,
-		apiURL, apiURL)
+		bot.RobotID,
+		bot.RobotID,
+		apiURL)
 
 	h.reply(toUID, msg)
 }
