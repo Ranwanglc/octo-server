@@ -566,12 +566,10 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 			}
 
 			if conversation.ChannelType == common.ChannelTypeCommunityTopic.Uint8() && threadFilterEnabled {
-				shortID, ok := threadChannelShortIDMap[conversation.ChannelID]
-				if !ok {
-					continue
-				}
-				if _, active := activeThreadShortIDs[shortID]; !active {
-					continue
+				if shortID, ok := threadChannelShortIDMap[conversation.ChannelID]; ok {
+					if _, active := activeThreadShortIDs[shortID]; !active {
+						continue
+					}
 				}
 			}
 

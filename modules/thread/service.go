@@ -555,7 +555,7 @@ func (s *Service) DeleteThread(groupNo, shortID, operatorUID string) error {
 		Ban:         1,
 	})
 	if err != nil {
-		log.Warn("通知 WuKongIM 禁用已删除子区频道失败", zap.String("channelID", channelID), zap.Error(err))
+		s.Warn("通知 WuKongIM 禁用已删除子区频道失败", zap.String("channelID", channelID), zap.Error(err))
 	}
 
 	return nil
