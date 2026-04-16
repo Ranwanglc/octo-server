@@ -499,33 +499,13 @@ func (h *commandHandler) handleQuickstart(fromUID string) {
 User API Key: %s
 API Server: %s
 
-先阅读：
-- CLI Guide: %s/v1/bot/cli-guide.md
-- Bot API: %s/v1/bot/skill.md
-
-要求：
-1. 检查 DMWork 插件状态：npx -y openclaw-channel-dmwork info
-   未安装则安装：npx -y openclaw-channel-dmwork install --skip-config
-   如果已安装，询问用户是否需要更新
-2. 获取当前 agent 标识：执行 /status，如果无法解析请询问用户
-3. 创建 bot：POST %s/v1/user/bots（Authorization: Bearer %s）
-   Body: {"username": "<agent标识规范化>", "name": "<agent显示名>"}
-   username 冲突则追加 1、2、3 后缀重试
-4. 拿到 bot_token 和 robot_id 后配置：npx -y openclaw-channel-dmwork install --bot-token <bot_token> --api-url %s --account-id <robot_id>
-5. 绑定：openclaw agents bind <agent标识> dmwork <robot_id>
-6. 重启：openclaw gateway restart
-7. 验证：npx -y openclaw-channel-dmwork doctor --account-id <robot_id>
-8. 联通确认：在 DMWork 中给 bot 的创建者（即当前用户）发一条私聊消息，例如"你好，我已上线！"
-9. 记住 Bot API 文档：%s/v1/bot/skill.md
+按 %s/v1/bot/setup-quickstart.md 操作
 
 ---
 
 💡 User API Key 可反复使用，用于管理你的所有 Bot%s
 🔑 你的 API Key: %s`,
 		apiKey, apiURL,
-		apiURL, apiURL,
-		apiURL, apiKey,
-		apiURL,
 		apiURL,
 		spaceInfo, apiKeyFormatted))
 }
@@ -1140,27 +1120,11 @@ Bot Token: %s
 API Server: %s
 Account ID: %s
 
-先阅读 CLI Guide: %s/v1/bot/cli-guide.md
-
-要求：
-1. 检查 DMWork 插件状态：npx -y openclaw-channel-dmwork info
-2. 安装/配置插件：npx -y openclaw-channel-dmwork install --bot-token %s --api-url %s --account-id %s
-3. 如果已安装，询问用户是否需要更新插件，同意则执行：npx -y openclaw-channel-dmwork update
-4. 获取当前 agent 标识：执行 /status，如果无法解析请询问用户
-5. 绑定：openclaw agents bind <agent标识> dmwork %s
-6. 重启：openclaw gateway restart
-7. 验证：npx -y openclaw-channel-dmwork doctor --account-id %s
-8. 联通确认：在 DMWork 中给 bot 的创建者（即当前用户）发一条私聊消息，例如"你好，我是 %s，已上线！"
-9. 记住 Bot API 文档：%s/v1/bot/skill.md
+按 %s/v1/bot/setup-newbot.md 操作
 
 ---`,
 		name, bot.RobotID, bot.BotToken, apiURL,
 		bot.RobotID, bot.BotToken, apiURL, bot.RobotID,
-		apiURL,
-		bot.BotToken, apiURL, bot.RobotID,
-		bot.RobotID,
-		bot.RobotID,
-		bot.RobotID,
 		apiURL)
 
 	h.reply(toUID, msg)

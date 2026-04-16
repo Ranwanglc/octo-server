@@ -99,6 +99,8 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 	// 文档端点（无需认证）
 	r.GET("/v1/bot/skill.md", bf.skillMD)
 	r.GET("/v1/bot/cli-guide.md", bf.cliGuideMD)
+	r.GET("/v1/bot/setup-newbot.md", bf.setupNewbotMD)
+	r.GET("/v1/bot/setup-quickstart.md", bf.setupQuickstartMD)
 
 	// register 端点（只需bot token，不走authBot中间件组）
 	r.POST("/v1/bot/register", bf.register)
@@ -185,6 +187,30 @@ func (bf *BotFather) skillMD(c *wkhttp.Context) {
 // cliGuideMD 返回 CLI 使用指南
 func (bf *BotFather) cliGuideMD(c *wkhttp.Context) {
 	content := generateCLIGuideMD()
+	c.Header("Content-Type", "text/markdown; charset=utf-8")
+	c.String(http.StatusOK, content)
+}
+
+// setupNewbotMD 返回 /newbot 设置流程文档
+func (bf *BotFather) setupNewbotMD(c *wkhttp.Context) {
+	cfg := bf.ctx.GetConfig()
+	apiURL := cfg.External.BaseURL
+	if strings.TrimSpace(apiURL) == "" {
+		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
+	}
+	content := generateSetupNewbotMD(apiURL)
+	c.Header("Content-Type", "text/markdown; charset=utf-8")
+	c.String(http.StatusOK, content)
+}
+
+// setupQuickstartMD 返回 /quickstart 设置流程文档
+func (bf *BotFather) setupQuickstartMD(c *wkhttp.Context) {
+	cfg := bf.ctx.GetConfig()
+	apiURL := cfg.External.BaseURL
+	if strings.TrimSpace(apiURL) == "" {
+		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
+	}
+	content := generateSetupQuickstartMD(apiURL)
 	c.Header("Content-Type", "text/markdown; charset=utf-8")
 	c.String(http.StatusOK, content)
 }

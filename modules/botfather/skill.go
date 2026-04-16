@@ -1182,3 +1182,113 @@ npx -y openclaw-channel-dmwork doctor --account-id <robot_id>
 - 遇到安装/配置问题，先执行 doctor --fix 尝试自动修复
 `
 }
+
+func generateSetupNewbotMD(apiURL string) string {
+	return fmt.Sprintf(`---
+name: dmwork-setup-newbot
+description: 收到 [DMWORK NEWBOT SETUP] 消息时，按此流程安装插件、配置 bot、绑定 agent、验证联通
+---
+
+# DMWork Newbot 设置流程
+
+收到包含 [DMWORK NEWBOT SETUP] 的消息时，按以下步骤操作。
+消息中包含 Bot Name、Bot Token、API Server、Account ID 四个参数。
+
+## 步骤
+
+1. **安装/更新插件**
+   阅读 %s/v1/bot/cli-guide.md 完成插件安装和更新检查。
+
+2. **配置 bot**（install 是幂等的，已安装时跳过安装、继续配置账号）：
+`+"```"+`
+npx -y openclaw-channel-dmwork install --bot-token <Bot Token> --api-url <API Server> --account-id <Account ID>
+`+"```"+`
+
+3. **获取当前 agent 标识**
+   执行 /status，从输出中提取 agent 标识（用于 openclaw agents bind 的第一个参数）。
+   **如果无法解析，停止并询问用户 agent 名称。**
+
+4. **绑定 agent 到 bot**
+`+"```"+`
+openclaw agents bind <agent标识> dmwork <Account ID>
+`+"```"+`
+
+5. **重启 gateway**
+`+"```"+`
+openclaw gateway restart
+`+"```"+`
+
+6. **验证**
+`+"```"+`
+npx -y openclaw-channel-dmwork doctor --account-id <Account ID>
+`+"```"+`
+
+7. **联通确认**
+   在 DMWork 中给 bot 的创建者（即当前用户）发一条私聊消息，例如"你好，我是 <Bot Name>，已上线！"
+
+8. **记住 Bot API 文档**
+   阅读 %s/v1/bot/skill.md，后续需要操作 DMWork 时参考该文档。
+`, apiURL, apiURL)
+}
+
+func generateSetupQuickstartMD(apiURL string) string {
+	return fmt.Sprintf(`---
+name: dmwork-setup-quickstart
+description: 收到 [DMWORK QUICKSTART] 消息时，按此流程安装插件、创建 bot、配置绑定、验证联通
+---
+
+# DMWork Quickstart 设置流程
+
+收到包含 [DMWORK QUICKSTART] 的消息时，按以下步骤操作。
+消息中包含 User API Key 和 API Server 两个参数。
+
+## 步骤
+
+1. **安装/更新插件**
+   阅读 %s/v1/bot/cli-guide.md 完成插件安装和更新检查。
+
+2. **获取当前 agent 标识**
+   执行 /status，从输出中提取 agent 标识。
+   **如果无法解析，停止并询问用户 agent 名称。**
+
+3. **创建 bot**
+   阅读 %s/v1/bot/skill.md 的 User API 部分。
+
+`+"```"+`
+POST %s/v1/user/bots
+Header: Authorization: Bearer <User API Key>
+Body: {"username": "<agent标识规范化>", "name": "<agent显示名>"}
+`+"```"+`
+
+   - username 规则：只允许小写字母、数字、下划线，长度 1-20
+   - 如果 username 冲突（409），依次尝试追加 1、2、3 后缀，最多重试 3 次
+   - 仍失败则询问用户手动指定 username
+
+4. **配置 bot**
+   拿到响应中的 bot_token 和 robot_id 后：
+`+"```"+`
+npx -y openclaw-channel-dmwork install --bot-token <bot_token> --api-url <API Server> --account-id <robot_id>
+`+"```"+`
+
+5. **绑定 agent 到 bot**
+`+"```"+`
+openclaw agents bind <agent标识> dmwork <robot_id>
+`+"```"+`
+
+6. **重启 gateway**
+`+"```"+`
+openclaw gateway restart
+`+"```"+`
+
+7. **验证**
+`+"```"+`
+npx -y openclaw-channel-dmwork doctor --account-id <robot_id>
+`+"```"+`
+
+8. **联通确认**
+   在 DMWork 中给 bot 的创建者（即当前用户）发一条私聊消息，确认 bot 已上线。
+
+9. **记住 Bot API 文档**
+   阅读 %s/v1/bot/skill.md，后续需要操作 DMWork 时参考该文档。
+`, apiURL, apiURL, apiURL, apiURL)
+}
