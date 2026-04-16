@@ -400,7 +400,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	groupNos := make([]string, 0, len(conversations))
 	uids := make([]string, 0, len(conversations))
 	channelIDs := make([]string, 0, len(conversations))
-	threadShortIDSet := make(map[string]struct{})
+	threadChannelShortIDMap := make(map[string]string)
 	if len(conversations) > 0 {
 		for _, conversation := range conversations {
 			if len(conversation.Recents) == 0 {
@@ -414,7 +414,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 			channelIDs = append(channelIDs, conversation.ChannelID)
 			if conversation.ChannelType == common.ChannelTypeCommunityTopic.Uint8() {
 				if _, shortID, err := thread.ParseChannelID(conversation.ChannelID); err == nil {
-					threadShortIDSet[shortID] = struct{}{}
+					threadChannelShortIDMap[conversation.ChannelID] = shortID
 				}
 			}
 		}
@@ -439,10 +439,10 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 
 	// ---------- 过滤已删除子区 ----------
 	threadFilterEnabled := false
-	if len(threadShortIDSet) > 0 {
-		shortIDs := make([]string, 0, len(threadShortIDSet))
-		for id := range threadShortIDSet {
-			shortIDs = append(shortIDs, id)
+	if len(threadChannelShortIDMap) > 0 {
+		shortIDs := make([]string, 0, len(threadChannelShortIDMap))
+		for _, shortID := range threadChannelShortIDMap {
+			shortIDs = append(shortIDs, shortID)
 		}
 		activeIDs, err := co.threadDB.QueryNonDeletedShortIDs(shortIDs)
 		if err != nil {
@@ -566,12 +566,11 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 			}
 
 			if conversation.ChannelType == common.ChannelTypeCommunityTopic.Uint8() && threadFilterEnabled {
-				if _, shortID, err := thread.ParseChannelID(conversation.ChannelID); err == nil {
-					if _, ok := activeThreadShortIDs[shortID]; !ok {
-						continue
-					}
-				} else {
-					co.Warn("解析子区 ChannelID 失败", zap.String("channelID", conversation.ChannelID), zap.Error(err))
+				shortID, ok := threadChannelShortIDMap[conversation.ChannelID]
+				if !ok {
+					continue
+				}
+				if _, active := activeThreadShortIDs[shortID]; !active {
 					continue
 				}
 			}
