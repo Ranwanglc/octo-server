@@ -49,7 +49,7 @@ func (f *File) Route(r *wkhttp.WKHttp) {
 		//上传文件
 		auth.POST("/upload", f.uploadFile)
 		// 预签名上传 URL 签发
-		auth.GET("/upload/credentials", f.getUploadCredentials)
+		auth.GET("/upload/presigned", f.getUploadCredentials)
 	}
 }
 
@@ -387,11 +387,17 @@ func (f *File) getUploadCredentials(c *wkhttp.Context) {
 	} else if uploadPath != "" {
 		ext = strings.ToLower(filepath.Ext(uploadPath))
 	}
-	if ext != "" && (IsBlockedExtension(ext) || !IsAllowedExtension(ext)) {
+	if ext == "" || IsBlockedExtension(ext) || !IsAllowedExtension(ext) {
 		c.ResponseError(errors.New("不支持的文件类型"))
 		return
 	}
 
+	if ext != "" {
+		inferred := mime.TypeByExtension(ext)
+		if inferred != "" {
+			contentType = inferred
+		}
+	}
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
