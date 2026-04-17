@@ -50,6 +50,7 @@ func (f *File) Route(r *wkhttp.WKHttp) {
 		auth.POST("/upload", f.uploadFile)
 		// 预签名上传 URL 签发
 		auth.GET("/upload/presigned", f.getUploadCredentials)
+		auth.GET("/upload/credentials", f.getUploadCredentials) // 兼容旧路径
 	}
 }
 
