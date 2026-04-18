@@ -168,6 +168,8 @@ func (h *commandHandler) handleCommand(fromUID string, cmd string) {
 		h.handleRevoke(fromUID)
 	case CmdQuickstart:
 		h.handleQuickstart(fromUID)
+	case CmdInstall:
+		h.handleInstall(fromUID)
 	case CmdApprove:
 		h.handleApprove(fromUID, strings.TrimPrefix(cmd, command+" "))
 	case CmdReject:
@@ -413,14 +415,6 @@ func (h *commandHandler) handleQuickstart(fromUID string) {
 	// 获取当前 Space ID，绑定到 API Key
 	spaceID := h.resolveSpaceID(fromUID)
 
-	// 查找当前 Space 的名称（用于展示）
-	spaceName := ""
-	if spaceID != "" {
-		if name, err := h.db.querySpaceNameByID(spaceID); err == nil && name != "" {
-			spaceName = name
-		}
-	}
-
 	// 获取或创建 User API Key（每个 Space 独立一把 Key）
 	var apiKey string
 	if spaceID != "" {
@@ -479,32 +473,13 @@ func (h *commandHandler) handleQuickstart(fromUID string) {
 		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
 	}
 
-	// 构造 Space 提示行
-	spaceInfo := ""
-	if spaceName != "" {
-		spaceInfo = fmt.Sprintf("\n📌 当前 Space：%s", spaceName)
-	} else if spaceID != "" {
-		spaceInfo = fmt.Sprintf("\n📌 当前 Space ID：%s", spaceID)
-	}
+	h.reply(fromUID, fmt.Sprintf("🚀 **Quickstart**\n\n一键为你的所有 OpenClaw Agent 创建对应的 DMWork bot 并完成绑定，让每个 Agent 都能通过 DMWork 收发消息。\n\n📋 **把下述内容发给 OpenClaw 执行（未安装插件请先使用 /install）：**\n\n```\n为所有 agent 批量创建并绑定 DMWork bot：\nnpx -y openclaw-channel-dmwork quickstart --api-key %s --api-url %s\n```",
+		apiKey, apiURL))
+}
 
-	apiKeyFormatted := "`" + apiKey + "`"
-	h.reply(fromUID, fmt.Sprintf(`🚀 **Quickstart**
-
-将下面的提示词复制发送给你的 OpenClaw：
-
----
-Read %s/v1/bot/skill.md to learn the DMWork Bot API (includes User API, multi-bot config, and OpenClaw setup).
-
-My User API Key: %s
-API server: %s
-
-Create a bot, get the bot_token, then follow the skill.md instructions to connect.
-All User API endpoints require: Authorization: Bearer %s
----
-
-💡 User API Key 可反复使用，用于管理你的所有 Bot（Bot 会自动加入你当前的 Space）%s
-🔑 你的 API Key: %s`,
-		apiURL, apiKey, apiURL, apiKey, spaceInfo, apiKeyFormatted))
+func (h *commandHandler) handleInstall(fromUID string) {
+	h.sm.Clear(fromUID, h.spaceID(fromUID))
+	h.reply(fromUID, "📦 **安装/更新 DMWork 插件**\n\n💡 建议先将 OpenClaw 升级到最新版本以获得最佳体验。\n\n📋 **把下面命令发给 OpenClaw 模型执行：**\n\n```\nnpx -y openclaw-channel-dmwork install\n```\n\n安装完成后，使用 /newbot 创建单个 bot 或 /quickstart 批量创建。")
 }
 
 func (h *commandHandler) handleHelp(fromUID string) {
@@ -513,6 +488,7 @@ func (h *commandHandler) handleHelp(fromUID string) {
 
 **可用命令：**
 
+- /install — 安装/更新 DMWork 插件
 - /quickstart — AI Agent 快速入门（推荐）
 - /newbot — 创建新机器人
 - /mybots — 查看我的机器人
@@ -1082,13 +1058,9 @@ func (h *commandHandler) sendConnectPrompt(toUID string, bot *robotModel) {
 		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
 	}
 
-	prompt := fmt.Sprintf("📋 机器人「**%s**」的连接信息：\n\n**Bot Name:** %s  \n**Bot Token:** %s  \n**API Server:** %s\n\n**安装插件并配置 bot：**\n"+
-		"```\nnpx -y openclaw-channel-dmwork install --bot-token %s --api-url %s --account-id %s\n```\n\n"+
-		"**插件使用指南：** %s/v1/bot/cli-guide.md  \n**Bot API 文档：** %s/v1/bot/skill.md\n\n"+
-		"⚙️ 群聊默认只有 @机器人 时才回复（可在配置中修改）  \n🔌 断开连接请发送 /disconnect",
+	prompt := fmt.Sprintf("📋 机器人「**%s**」的连接信息：\n\n**Bot Name:** %s  \n**Bot Token:** %s  \n**API Server:** %s\n\n📋 把下面命令发给 OpenClaw 模型执行（需先执行 /install 安装插件）：\n\n```\nnpx -y openclaw-channel-dmwork bind --bot-token %s --api-url %s --account-id %s --agent <你的agent标识>\n```\n\nagent 标识可通过 /status 查看  \n🔌 断开连接请发送 /disconnect",
 		bot.RobotID, bot.RobotID, bot.BotToken, apiURL,
-		bot.BotToken, apiURL, bot.RobotID,
-		apiURL, apiURL)
+		bot.BotToken, apiURL, bot.RobotID)
 
 	h.reply(toUID, prompt)
 }
@@ -1100,14 +1072,9 @@ func (h *commandHandler) sendCreatedPrompt(toUID string, name string, bot *robot
 		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
 	}
 
-	msg := fmt.Sprintf("✅ 机器人「**%s**」创建成功！\n\n**Bot Name:** %s  \n**Bot Token:** %s  \n**API Server:** %s\n\n"+
-		"📋 **连接 OpenClaw**\n\n**安装插件并配置 bot：**\n"+
-		"```\nnpx -y openclaw-channel-dmwork install --bot-token %s --api-url %s --account-id %s\n```\n\n"+
-		"**插件使用指南：** %s/v1/bot/cli-guide.md  \n**Bot API 文档：** %s/v1/bot/skill.md\n\n"+
-		"⚙️ 群聊默认只有 @机器人 时才回复（可在配置中修改）  \n🔌 断开连接请发送 /disconnect",
-		name, bot.RobotID, bot.BotToken, apiURL,
-		bot.BotToken, apiURL, bot.RobotID,
-		apiURL, apiURL)
+	msg := fmt.Sprintf("✅ 机器人「**%s**」创建成功！\n\n**Bot Name:** %s  \n**Bot Token:** %s  \n**API Server:** %s\n\n📋 **把下述内容发给 OpenClaw 执行（未安装插件请先使用 /install）：**\n\n```\n使用以下命令将当前 agent 绑定到 DMWork bot %s：\nnpx -y openclaw-channel-dmwork bind --bot-token %s --api-url %s --account-id %s --agent <你的agent标识>\n当前 agent 标识可通过 /status 查看\n```",
+		name, name, bot.BotToken, apiURL,
+		bot.RobotID, bot.BotToken, apiURL, bot.RobotID)
 
 	h.reply(toUID, msg)
 }

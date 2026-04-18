@@ -99,7 +99,10 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 
 	// 文档端点（无需认证）
 	r.GET("/v1/bot/skill.md", bf.skillMD)
-	r.GET("/v1/bot/cli-guide.md", bf.cliGuideMD)
+	r.GET("/v1/bot/cli-guide.md", bf.cliGuideMD) // 保留旧路径兼容
+	r.GET("/v1/bot/setup-install.md", bf.cliGuideMD)
+	r.GET("/v1/bot/setup-newbot.md", bf.setupNewbotMD)
+	r.GET("/v1/bot/setup-quickstart.md", bf.setupQuickstartMD)
 
 	// register 端点（只需bot token，不走authBot中间件组）
 	r.POST("/v1/bot/register", bf.register)
@@ -112,8 +115,7 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 		botAPI.POST("/readReceipt", bf.readReceipt)
 		botAPI.POST("/events", bf.getEvents)
 		botAPI.POST("/events/:event_id/ack", bf.eventAck)
-		botAPI.POST("/stream/start", bf.streamStart)
-		botAPI.POST("/stream/end", bf.streamEnd)
+		// stream/start and stream/end removed — DMWork does not support streaming
 		botAPI.POST("/heartbeat", bf.heartbeat)
 		botAPI.POST("/messages/sync", bf.syncMessages)
 		botAPI.GET("/groups", bf.getGroups)
@@ -187,6 +189,30 @@ func (bf *BotFather) skillMD(c *wkhttp.Context) {
 // cliGuideMD 返回 CLI 使用指南
 func (bf *BotFather) cliGuideMD(c *wkhttp.Context) {
 	content := generateCLIGuideMD()
+	c.Header("Content-Type", "text/markdown; charset=utf-8")
+	c.String(http.StatusOK, content)
+}
+
+// setupNewbotMD 返回 /newbot 设置流程文档
+func (bf *BotFather) setupNewbotMD(c *wkhttp.Context) {
+	cfg := bf.ctx.GetConfig()
+	apiURL := cfg.External.BaseURL
+	if strings.TrimSpace(apiURL) == "" {
+		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
+	}
+	content := generateSetupNewbotMD(apiURL)
+	c.Header("Content-Type", "text/markdown; charset=utf-8")
+	c.String(http.StatusOK, content)
+}
+
+// setupQuickstartMD 返回 /quickstart 设置流程文档
+func (bf *BotFather) setupQuickstartMD(c *wkhttp.Context) {
+	cfg := bf.ctx.GetConfig()
+	apiURL := cfg.External.BaseURL
+	if strings.TrimSpace(apiURL) == "" {
+		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
+	}
+	content := generateSetupQuickstartMD(apiURL)
 	c.Header("Content-Type", "text/markdown; charset=utf-8")
 	c.String(http.StatusOK, content)
 }
@@ -580,6 +606,35 @@ func (bf *BotFather) register(c *wkhttp.Context) {
 	// 更新缓存
 	if robot.IMTokenCache != imToken {
 		bf.db.updateRobotIMTokenCache(robot.RobotID, imToken)
+	}
+
+	// 可选解析版本信息（兼容旧客户端空 body）
+	// 只更新实际传入的非空字段，缺失字段保持现有值
+	var req BotRegisterReq
+	_ = c.ShouldBindJSON(&req) // 忽略解析错误
+	if req.AgentPlatform != "" || req.AgentVersion != "" || req.PluginVersion != "" {
+		// Merge: 缺失字段用现有值填充
+		merged := struct{ platform, version, plugin string }{
+			platform: req.AgentPlatform,
+			version:  req.AgentVersion,
+			plugin:   req.PluginVersion,
+		}
+		if merged.platform == "" {
+			merged.platform = robot.AgentPlatform
+		}
+		if merged.version == "" {
+			merged.version = robot.AgentVersion
+		}
+		if merged.plugin == "" {
+			merged.plugin = robot.PluginVersion
+		}
+		if robot.AgentPlatform != merged.platform ||
+			robot.AgentVersion != merged.version ||
+			robot.PluginVersion != merged.plugin {
+			if updateErr := bf.db.updateRobotAgentInfo(robot.RobotID, merged.platform, merged.version, merged.plugin); updateErr != nil {
+				bf.Warn("更新Agent信息失败", zap.Error(updateErr), zap.String("robotID", robot.RobotID))
+			}
+		}
 	}
 
 	cfg := bf.ctx.GetConfig()
@@ -1056,58 +1111,6 @@ func (bf *BotFather) eventAck(c *wkhttp.Context) {
 	err = bf.ctx.GetRedisConn().ZRemRangeByScore(key, fmt.Sprintf("%d", eventID), fmt.Sprintf("%d", eventID))
 	if err != nil {
 		c.ResponseError(err)
-		return
-	}
-	c.ResponseOK()
-}
-
-// ========== Bot Stream API ==========
-
-func (bf *BotFather) streamStart(c *wkhttp.Context) {
-	var req BotStreamStartReq
-	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("数据格式有误"))
-		return
-	}
-
-	robotID := getRobotIDFromContext(c)
-	channelID := bf.resolveSpaceChannelID(robotID, req.ChannelID, req.ChannelType)
-	streamNo, err := bf.ctx.IMStreamStart(config.MessageStreamStartReq{
-		Header: config.MsgHeader{
-			RedDot: 1,
-		},
-		FromUID:     robotID,
-		ChannelID:   channelID,
-		ChannelType: req.ChannelType,
-		Payload:     req.Payload,
-	})
-	if err != nil {
-		bf.Error("stream start失败", zap.Error(err))
-		c.ResponseError(errors.New("stream start失败"))
-		return
-	}
-	c.Response(gin.H{
-		"stream_no": streamNo,
-	})
-}
-
-func (bf *BotFather) streamEnd(c *wkhttp.Context) {
-	var req BotStreamEndReq
-	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(errors.New("数据格式有误"))
-		return
-	}
-
-	robotID := getRobotIDFromContext(c)
-	channelID := bf.resolveSpaceChannelID(robotID, req.ChannelID, req.ChannelType)
-	err := bf.ctx.IMStreamEnd(config.MessageStreamEndReq{
-		StreamNo:    req.StreamNo,
-		ChannelID:   channelID,
-		ChannelType: req.ChannelType,
-	})
-	if err != nil {
-		bf.Error("stream end失败", zap.Error(err))
-		c.ResponseError(errors.New("stream end失败"))
 		return
 	}
 	c.ResponseOK()

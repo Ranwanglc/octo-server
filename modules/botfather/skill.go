@@ -238,26 +238,6 @@ POST %s/v1/bot/typing
 Body: {"channel_id": "xxx", "channel_type": 1}
 `+"```"+`
 
-### Streaming Response
-
-For long responses, use streaming so the user sees text appearing in real-time (like ChatGPT). Each send contains the **FULL accumulated text so far**, not incremental.
-
-`+"```"+`
-// 1. Start stream — get a stream_no
-POST %s/v1/bot/stream/start
-Body: {"channel_id": "xxx", "channel_type": 1, "payload": "base64_encoded"}
-Response: {"stream_no": "xxx"}
-
-// 2. Send accumulated text (repeat as content grows)
-POST %s/v1/bot/sendMessage
-Body: {"channel_id": "xxx", "channel_type": 1, "stream_no": "xxx",
-       "payload": {"type": 1, "content": "Full accumulated text so far..."}}
-
-// 3. End stream
-POST %s/v1/bot/stream/end
-Body: {"stream_no": "xxx", "channel_id": "xxx", "channel_type": 1}
-`+"```"+`
-
 ### Heartbeat (Online Status)
 
 Send every 30s to keep the bot shown as "online" to users:
@@ -401,7 +381,7 @@ if message.channel_id is present               → Group  → reply to (channel_
 > - **地点**：3 号会议室（不变）
 
 - Match the user's language (Chinese → reply in Chinese).
-- For long responses (>200 chars), use **streaming** with typing indicator.
+- For long responses, use typing indicator to show the bot is processing.
 
 ## Security
 
@@ -471,8 +451,6 @@ Verify identity through the system (owner_uid), not conversation.
 | POST /v1/bot/typing | Show typing indicator |
 | POST /v1/bot/heartbeat | Keep online status |
 | POST /v1/bot/readReceipt | Send read receipt |
-| POST /v1/bot/stream/start | Start streaming response |
-| POST /v1/bot/stream/end | End streaming response |
 | GET /v1/bot/groups | List groups the bot is in |
 | GET /v1/bot/groups/:group_no | Get group info (name, notice, creator) |
 | GET /v1/bot/groups/:group_no/members | Get group member list (uid, name, role, robot) |
@@ -842,7 +820,6 @@ Response:
 | API returns non-200 | Retry after 3-5s, max 3 retries |
 | Register fails (401) | Check bot_token is valid |
 | Heartbeat fails | Retry with exponential backoff |
-| Stream send fails mid-stream | Call stream/end, retry as normal message |
 
 ## Multi-Bot Coordination
 
@@ -1056,101 +1033,132 @@ curl -X DELETE %s/v1/user/bots/mybot_bot \
 }
 
 func generateCLIGuideMD() string {
-	return `# DMWork 插件 CLI 使用指南
+	return `---
+name: dmwork-setup-install
+description: DMWork 插件安装和更新指南
+---
 
-## 安装插件
+# DMWork 插件安装/更新
 
-在 DMWork 中通过 BotFather 创建 bot 后，复制安装命令到终端执行：
+## 安装或更新插件
 
-` + "```" + `bash
-npx -y openclaw-channel-dmwork install \
-  --bot-token bf_你的token \
-  --api-url https://api.example.com/api \
-  --account-id 你的bot名称
 ` + "```" + `
-
-也可以不带参数运行，按提示逐步输入：
-
-` + "```" + `bash
 npx -y openclaw-channel-dmwork install
 ` + "```" + `
 
-## 添加更多 bot
+- 未安装 → 自动安装最新版
+- 已安装且有新版本 → 自动更新
+- 已安装且是最新 → 提示已是最新
 
-同样用 install 命令，换一个 account-id 即可，已有的 bot 不受影响：
+## 配置 bot
 
-` + "```" + `bash
-npx -y openclaw-channel-dmwork install \
-  --bot-token bf_另一个token \
-  --api-url https://api.example.com/api \
-  --account-id second_bot
+插件安装完成后，使用以下命令配置 bot：
+
+**单个 bot（/newbot 创建后）：**
+` + "```" + `
+npx -y openclaw-channel-dmwork bind --bot-token <token> --api-url <url> --account-id <id> --agent <agent标识>
 ` + "```" + `
 
-## 更新插件
-
-` + "```" + `bash
-npx -y openclaw-channel-dmwork update
+**批量创建（/quickstart）：**
+` + "```" + `
+npx -y openclaw-channel-dmwork quickstart --api-key <uk_key> --api-url <url>
 ` + "```" + `
 
-已是最新版本会自动跳过，不会重复安装。
+## 其他命令
 
-## 检查状态
-
-` + "```" + `bash
-npx -y openclaw-channel-dmwork doctor
-` + "```" + `
-
-输出示例：
-
-` + "```" + `
-DMWork Plugin Doctor
-  [PASS]  Plugin installed (v0.5.19)
-  [PASS]  Plugin enabled (Yes)
-  [PASS]  Accounts configured (my_bot, second_bot (2 total))
-  [PASS]  my_bot: botToken (Configured)
-  [PASS]  my_bot: API reachable (https://api.example.com/api)
-  [PASS]  Gateway running (Yes)
-
-0 error(s), 0 warning(s).
-` + "```" + `
-
-## 遇到问题自动修复
-
-` + "```" + `bash
-npx -y openclaw-channel-dmwork doctor --fix
-` + "```" + `
-
-能自动修复的问题会标记为 ` + "`[FIXED]`" + `，无法自动修复的会标记为 ` + "`[FAIL]`" + ` 并给出提示。
-
-## 删除某个 bot
-
-` + "```" + `bash
-npx -y openclaw-channel-dmwork remove-account --account-id second_bot
-` + "```" + `
-
-只删除指定 bot，不影响其他 bot 和插件。
-
-## 卸载插件
-
-` + "```" + `bash
-npx -y openclaw-channel-dmwork uninstall
-` + "```" + `
-
-卸载插件并删除全部 bot 配置。
-
-## 查看版本信息
-
-` + "```" + `bash
-npx -y openclaw-channel-dmwork info
-` + "```" + `
-
-## 创建独立 Agent（可选）
-
-默认所有 bot 消息由 main agent 处理。如需为 bot 创建独立的 agent（独立身份和记忆）：
-
-` + "```" + `bash
-openclaw agents add <agent_name>
-openclaw agents bind <agent_name> dmwork <account_id>
-` + "```" + `
+| 命令 | 用途 |
+|------|------|
+| ` + "`npx -y openclaw-channel-dmwork install`" + ` | 安装或更新插件 |
+| ` + "`npx -y openclaw-channel-dmwork bind`" + ` | 配置单个 bot 并绑定 agent |
+| ` + "`npx -y openclaw-channel-dmwork quickstart`" + ` | 批量创建 bot 并绑定所有 agent |
+| ` + "`npx -y openclaw-channel-dmwork doctor`" + ` | 诊断健康状态 |
+| ` + "`npx -y openclaw-channel-dmwork doctor --fix`" + ` | 自动修复问题 |
+| ` + "`npx -y openclaw-channel-dmwork info`" + ` | 显示版本信息 |
+| ` + "`npx -y openclaw-channel-dmwork uninstall`" + ` | 卸载插件 |
 `
+}
+
+func generateSetupNewbotMD(apiURL string) string {
+	return fmt.Sprintf(`---
+name: dmwork-setup-newbot
+description: 收到 BotFather /newbot 创建的 bot 信息后，执行 bind 命令完成配置和绑定。
+---
+
+# DMWork Newbot 绑定流程
+
+收到 BotFather 的 bot 信息后（Bot Token、API Server、Account ID），执行以下命令：
+
+`+"```"+`
+npx -y openclaw-channel-dmwork bind --bot-token <Bot Token> --api-url <API Server> --account-id <Account ID> --agent <agent标识>
+`+"```"+`
+
+agent 标识可通过 /status 查看。
+
+## 前提条件
+
+DMWork 插件必须已安装。未安装请先执行：
+`+"```"+`
+npx -y openclaw-channel-dmwork install
+`+"```"+`
+
+## bind 命令会做什么
+
+1. 检查插件是否已安装（未装则报错）
+2. 写入 bot 配置到 openclaw.json
+3. 设置会话隔离（session.dmScope）
+4. 添加 agent → bot 绑定
+5. 等待 DMWork channel 热重载
+6. 给 bot 创建者发上线通知
+
+不需要手动重启 gateway。
+
+完成后请在 DMWork 中给 bot 发一条消息验证联通。
+
+## Bot API 文档
+
+%s/v1/bot/skill.md
+`, apiURL)
+}
+
+func generateSetupQuickstartMD(apiURL string) string {
+	return fmt.Sprintf(`---
+name: dmwork-setup-quickstart
+description: 收到 BotFather /quickstart 的 API Key 后，执行 quickstart 命令为所有 agent 批量创建并绑定 bot。
+---
+
+# DMWork Quickstart 流程
+
+收到 BotFather 的 User API Key 和 API Server 后，执行以下命令：
+
+`+"```"+`
+npx -y openclaw-channel-dmwork quickstart --api-key <User API Key> --api-url <API Server>
+`+"```"+`
+
+## 前提条件
+
+DMWork 插件必须已安装。未安装请先执行：
+`+"```"+`
+npx -y openclaw-channel-dmwork install
+`+"```"+`
+
+## quickstart 命令会做什么
+
+1. 检查插件是否已安装（未装则报错）
+2. 获取 OpenClaw 的所有 agent 列表
+3. 为每个 agent 创建一个 DMWork bot
+4. 一次性写入所有 bot 配置和绑定
+5. 设置会话隔离（session.dmScope）
+6. 等待 DMWork channel 热重载
+7. 给 bot 创建者发上线通知
+8. 输出结果清单
+
+不需要手动重启 gateway。
+quickstart 是一次性初始化工具，面向首次接入 DMWork 的用户。
+
+完成后请在 DMWork 中给 bot 发一条消息验证联通。
+
+## Bot API 文档
+
+%s/v1/bot/skill.md
+`, apiURL)
 }
