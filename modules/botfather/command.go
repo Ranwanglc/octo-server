@@ -415,14 +415,6 @@ func (h *commandHandler) handleQuickstart(fromUID string) {
 	// 获取当前 Space ID，绑定到 API Key
 	spaceID := h.resolveSpaceID(fromUID)
 
-	// 查找当前 Space 的名称（用于展示）
-	spaceName := ""
-	if spaceID != "" {
-		if name, err := h.db.querySpaceNameByID(spaceID); err == nil && name != "" {
-			spaceName = name
-		}
-	}
-
 	// 获取或创建 User API Key（每个 Space 独立一把 Key）
 	var apiKey string
 	if spaceID != "" {
@@ -481,17 +473,7 @@ func (h *commandHandler) handleQuickstart(fromUID string) {
 		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
 	}
 
-	// 构造 Space 提示行
-	spaceInfo := ""
-	if spaceName != "" {
-		spaceInfo = fmt.Sprintf("\n📌 当前 Space：%s", spaceName)
-	} else if spaceID != "" {
-		spaceInfo = fmt.Sprintf("\n📌 当前 Space ID：%s", spaceID)
-	}
-
-	apiKeyFormatted := "`" + apiKey + "`"
-	h.reply(fromUID, fmt.Sprintf("🚀 **Quickstart**\n\n💡 User API Key 可反复使用，用于管理你的所有 Bot%s  \n🔑 你的 API Key: %s\n\n📋 把下面框内全部内容复制发给 OpenClaw 模型执行。\n如未安装 DMWork 插件，先发送 /install 获取安装指南。\n\n```\n为所有 agent 批量创建并绑定 DMWork bot：\nnpx -y openclaw-channel-dmwork quickstart --api-key %s --api-url %s\n```",
-		spaceInfo, apiKeyFormatted,
+	h.reply(fromUID, fmt.Sprintf("🚀 **Quickstart**\n\n📋 把下面框内全部内容复制发给 OpenClaw 模型执行。\n如未安装 DMWork 插件，先使用 /install 获取安装指南。\n\n```\n为所有 agent 批量创建并绑定 DMWork bot：\nnpx -y openclaw-channel-dmwork quickstart --api-key %s --api-url %s\n```",
 		apiKey, apiURL))
 }
 
@@ -1090,7 +1072,7 @@ func (h *commandHandler) sendCreatedPrompt(toUID string, name string, bot *robot
 		apiURL = fmt.Sprintf("http://%s:8090", cfg.External.IP)
 	}
 
-	msg := fmt.Sprintf("✅ 机器人「**%s**」创建成功！\n\n**Bot Name:** %s  \n**Bot Token:** %s  \n**API Server:** %s\n\n📋 把下面框内全部内容复制发给 OpenClaw 模型执行。\n如未安装 DMWork 插件，先发送 /install 获取安装指南。\n\n```\n使用以下命令将当前 agent 绑定到 DMWork bot %s：\nnpx -y openclaw-channel-dmwork bind --bot-token %s --api-url %s --account-id %s --agent <你的agent标识>\n当前 agent 标识可通过 /status 查看\n```",
+	msg := fmt.Sprintf("✅ 机器人「**%s**」创建成功！\n\n**Bot Name:** %s  \n**Bot Token:** %s  \n**API Server:** %s\n\n📋 把下面框内全部内容复制发给 OpenClaw 模型执行。\n如未安装 DMWork 插件，先使用 /install 获取安装指南。\n\n```\n使用以下命令将当前 agent 绑定到 DMWork bot %s：\nnpx -y openclaw-channel-dmwork bind --bot-token %s --api-url %s --account-id %s --agent <你的agent标识>\n当前 agent 标识可通过 /status 查看\n```",
 		name, name, bot.BotToken, apiURL,
 		bot.RobotID, bot.BotToken, apiURL, bot.RobotID)
 
