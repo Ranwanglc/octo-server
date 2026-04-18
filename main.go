@@ -10,6 +10,7 @@ import (
 
 	_ "github.com/Mininglamp-OSS/octo-server/internal"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
+	"github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/module"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
@@ -91,6 +92,7 @@ func runAPI(ctx *config.Context) {
 		}
 		gin.Logger()(c)
 	})
+	s.GetRoute().UseGin(wkhttp.RateLimitMiddleware(200, 300, "/v1/ping"))
 	// 模块安装
 	err := module.Setup(ctx)
 	if err != nil {
