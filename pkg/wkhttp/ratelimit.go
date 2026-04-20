@@ -35,6 +35,9 @@ local rate = tonumber(ARGV[1])
 local burst = tonumber(ARGV[2])
 local now = tonumber(ARGV[3])
 
+-- 纯防御：调用方都传正数，但脚本独立可审计，rate<=0 会让 burst/rate 变 inf 导致 EXPIRE 报错。
+if rate <= 0 then return {0, 0, 1} end
+
 local fill_time = burst / rate
 local ttl = math.max(1, math.ceil(fill_time * 2))
 
@@ -123,7 +126,11 @@ func newKeyedLimiter(client *rd.Client, keyPrefix string, rps float64, burst int
 //
 // fail-open 设计：Redis 是 IM 核心依赖，挂掉时整个系统已失能；
 // 若限流层反而返回 503，会把基础设施抖动放大成业务不可用，监控也无从判定
-// 是 Redis 问题还是业务问题。因此这里放行 + 记日志 + 单次告警。
+// 是 Redis 问题还是业务问题。因此这里放行 + 记日志 + 节流告警。
+//
+// ctx 未传入 Redis 调用（go-redis v6 的 Script.Run 不支持 context）。
+// 即使未来升级到 v8+，限流判定也应忽略请求取消——token 一旦消耗就不应因
+// 客户端断连而退还，否则攻击者可 connect/disconnect 绕过限流。
 func (k *keyedLimiter) allow(ctx context.Context, key string) (allowed bool, remaining int, retryAfter int, degraded bool) {
 	now := float64(time.Now().UnixNano()) / float64(time.Second)
 	res, err := k.script.Run(k.client, []string{k.keyPrefix + key},
