@@ -1058,7 +1058,9 @@ func (u *User) login(c *wkhttp.Context) {
 		return
 	}
 	if userInfo.Password == "" {
-		c.ResponseError(errors.New("此账号不允许登录"))
+		// 同样走失败计数 + 通用错误消息，避免攻击者区分"账号不允许登录"与"密码错误"
+		u.loginGuard.RecordFailureLogged(req.Username)
+		c.ResponseError(errors.New("用户名或密码错误"))
 		return
 	}
 	matched, needsMigration := CheckPassword(req.Password, userInfo.Password)

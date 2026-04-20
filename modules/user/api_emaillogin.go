@@ -243,6 +243,12 @@ func (u *User) emailLogin(c *wkhttp.Context) {
 		return
 	}
 	if userInfo.IsDestroy == 1 || userInfo.Status == 0 {
+		// 密码路径同样泄露账号状态，统一为通用错误 + 计入失败计数
+		if req.Password != "" {
+			u.loginGuard.RecordFailureLogged(req.Email)
+			c.ResponseError(errors.New("邮箱或密码错误"))
+			return
+		}
 		c.ResponseError(errors.New("该账号已注销或被禁用"))
 		return
 	}
