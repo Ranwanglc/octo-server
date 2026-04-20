@@ -1312,9 +1312,9 @@ func (u *User) register(c *wkhttp.Context) {
 		c.ResponseError(errors.New("该用户已存在"))
 		return
 	}
-	//测试模式
-	if strings.TrimSpace(u.ctx.GetConfig().SMSCode) != "" {
-		if strings.TrimSpace(u.ctx.GetConfig().SMSCode) != req.Code {
+	//测试模式（仅非 release 生效）
+	if commonapi.IsTestCodeEnabled(u.ctx.GetConfig()) {
+		if !commonapi.MatchTestCode(u.ctx.GetConfig(), req.Code) {
 			c.ResponseError(errors.New("验证码错误"))
 			return
 		}
@@ -2397,9 +2397,9 @@ func (u *User) destroyAccount(c *wkhttp.Context) {
 		c.ResponseError(errors.New("登录用户不存在"))
 		return
 	}
-	//测试模式
-	if strings.TrimSpace(u.ctx.GetConfig().SMSCode) != "" {
-		if strings.TrimSpace(u.ctx.GetConfig().SMSCode) != code {
+	//测试模式（仅非 release 生效）
+	if commonapi.IsTestCodeEnabled(u.ctx.GetConfig()) {
+		if !commonapi.MatchTestCode(u.ctx.GetConfig(), code) {
 			c.ResponseError(errors.New("验证码错误"))
 			return
 		}
@@ -2673,9 +2673,9 @@ func (u *User) pwdforget(c *wkhttp.Context) {
 		c.ResponseError(errors.New("该账号不存在"))
 		return
 	}
-	//测试模式
-	if strings.TrimSpace(u.ctx.GetConfig().SMSCode) != "" {
-		if strings.TrimSpace(u.ctx.GetConfig().SMSCode) != req.Code {
+	//测试模式（仅非 release 生效）
+	if commonapi.IsTestCodeEnabled(u.ctx.GetConfig()) {
+		if !commonapi.MatchTestCode(u.ctx.GetConfig(), req.Code) {
 			c.ResponseError(errors.New("验证码错误"))
 			return
 		}

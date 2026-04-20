@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	_ "github.com/Mininglamp-OSS/octo-server/internal"
+	commonapi "github.com/Mininglamp-OSS/octo-server/modules/base/common"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -54,6 +55,11 @@ func main() {
 	cfg := config.New()
 	cfg.Version = Version
 	cfg.ConfigureWithViper(vp)
+
+	// 安全校验：release 模式下禁止配置 smsCode（万能验证码后门）
+	if err := commonapi.ValidateTestCodeConfig(cfg); err != nil {
+		panic(err)
+	}
 
 	// 初始化context
 	ctx := config.NewContext(cfg)

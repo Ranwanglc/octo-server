@@ -81,9 +81,17 @@ func (u *User) emailRegister(c *wkhttp.Context) {
 		return
 	}
 
-	// 验证邮箱验证码（配置了测试验证码时可跳过）
-	testCode := strings.TrimSpace(u.ctx.GetConfig().SMSCode)
-	if testCode == "" {
+	// 验证邮箱验证码（仅非 release 模式且配置了 SMSCode 时走测试分支）
+	if commonapi.IsTestCodeEnabled(u.ctx.GetConfig()) {
+		if strings.TrimSpace(req.Code) == "" {
+			c.ResponseError(errors.New("验证码不能为空"))
+			return
+		}
+		if !commonapi.MatchTestCode(u.ctx.GetConfig(), req.Code) {
+			c.ResponseError(errors.New("验证码错误"))
+			return
+		}
+	} else {
 		// 线上模式：必须提供验证码
 		if strings.TrimSpace(req.Code) == "" {
 			c.ResponseError(errors.New("验证码不能为空"))
@@ -94,10 +102,6 @@ func (u *User) emailRegister(c *wkhttp.Context) {
 			c.ResponseError(err)
 			return
 		}
-	} else if strings.TrimSpace(req.Code) != "" && req.Code != testCode {
-		// 测试模式：提供了验证码但不匹配
-		c.ResponseError(errors.New("验证码错误"))
-		return
 	}
 
 	// 检查邮箱是否已注册
