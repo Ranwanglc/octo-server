@@ -11,25 +11,9 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 )
 
-// extractFilename mirrors the filename extraction logic used in botProxyFile and botFileDownload.
+// extractFilename delegates to the shared utility function.
 func extractFilename(ph string) string {
-	parts := strings.Split(ph, "/")
-	if len(parts) == 0 {
-		return ""
-	}
-	lastPart := parts[len(parts)-1]
-	if idx := strings.Index(lastPart, "_"); idx == 32 && pkgutil.IsHexString(lastPart[:32]) {
-		unescaped, err := url.PathUnescape(lastPart[idx+1:])
-		if err == nil {
-			return unescaped
-		}
-		return lastPart[idx+1:]
-	}
-	unescaped, err := url.PathUnescape(lastPart)
-	if err == nil {
-		return unescaped
-	}
-	return lastPart
+	return pkgutil.ExtractFilenameFromPath(ph)
 }
 
 func TestObjectPathFormat(t *testing.T) {

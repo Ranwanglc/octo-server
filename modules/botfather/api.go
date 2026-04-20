@@ -1155,26 +1155,7 @@ func (bf *BotFather) botProxyFile(c *wkhttp.Context) {
 
 	filename := c.Query("filename")
 	if filename == "" {
-		parts := strings.Split(ph, "/")
-		if len(parts) > 0 {
-			lastPart := parts[len(parts)-1]
-			// Strip UUID prefix (32 hex chars + underscore) for legacy paths
-			if idx := strings.Index(lastPart, "_"); idx == 32 && pkgutil.IsHexString(lastPart[:32]) {
-				unescaped, err := url.PathUnescape(lastPart[idx+1:])
-				if err == nil {
-					filename = unescaped
-				} else {
-					filename = lastPart[idx+1:]
-				}
-			} else {
-				unescaped, err := url.PathUnescape(lastPart)
-				if err == nil {
-					filename = unescaped
-				} else {
-					filename = lastPart
-				}
-			}
-		}
+		filename = pkgutil.ExtractFilenameFromPath(ph)
 	}
 
 	downloadURL, err := bf.fileService.DownloadURL(ph, filename)
@@ -1256,26 +1237,7 @@ func (bf *BotFather) botFileDownload(c *wkhttp.Context) {
 
 	filename := c.Query("filename")
 	if filename == "" {
-		parts := strings.Split(ph, "/")
-		if len(parts) > 0 {
-			lastPart := parts[len(parts)-1]
-			// Strip UUID prefix (32 hex chars + underscore) for legacy paths
-			if idx := strings.Index(lastPart, "_"); idx == 32 && pkgutil.IsHexString(lastPart[:32]) {
-				unescaped, err := url.PathUnescape(lastPart[idx+1:])
-				if err == nil {
-					filename = unescaped
-				} else {
-					filename = lastPart[idx+1:]
-				}
-			} else {
-				unescaped, err := url.PathUnescape(lastPart)
-				if err == nil {
-					filename = unescaped
-				} else {
-					filename = lastPart
-				}
-			}
-		}
+		filename = pkgutil.ExtractFilenameFromPath(ph)
 	}
 
 	downloadURL, err := bf.fileService.DownloadURL(ph, filename)

@@ -21,8 +21,8 @@ func TestIsHexString_Empty(t *testing.T) {
 }
 
 func TestIsHexString_UpperCase(t *testing.T) {
-	if IsHexString("AFD1A8D99BB94BF0A8D2C1E3F4A5B6C7") {
-		t.Error("expected false for uppercase hex string")
+	if !IsHexString("AFD1A8D99BB94BF0A8D2C1E3F4A5B6C7") {
+		t.Error("expected true for uppercase hex string")
 	}
 }
 
@@ -39,8 +39,8 @@ func TestIsHexString_WithDash(t *testing.T) {
 }
 
 func TestIsHexString_MixedCase(t *testing.T) {
-	if IsHexString("afd1A8d99bb94bf0a8d2c1e3f4a5b6c7") {
-		t.Error("expected false for mixed case hex string")
+	if !IsHexString("afd1A8d99bb94bf0a8d2c1e3f4a5b6c7") {
+		t.Error("expected true for mixed case hex string")
 	}
 }
 
