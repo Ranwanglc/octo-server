@@ -263,6 +263,116 @@ func TestUIDRateLimitMiddleware(t *testing.T) {
 	})
 }
 
+func TestStrictIPRateLimitMiddleware(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx := context.Background()
+
+	// newTestRouter 把 lib wkhttp 中间件桥接到 gin engine。
+	// remoteAddr 决定客户端 IP，用于按 IP 隔离的测试。
+	newTestRouter := func(mw libwkhttp.HandlerFunc) *gin.Engine {
+		r := gin.New()
+		r.Use(func(c *gin.Context) {
+			lc := &libwkhttp.Context{Context: c}
+			mw(lc)
+		})
+		r.POST("/test", func(c *gin.Context) {
+			c.JSON(200, gin.H{"ok": true})
+		})
+		return r
+	}
+
+	t.Run("allows requests within limit", func(t *testing.T) {
+		r := newTestRouter(StrictIPRateLimitMiddleware(ctx, 10, 10))
+		for i := 0; i < 10; i++ {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest("POST", "/test", nil)
+			req.RemoteAddr = "1.1.1.1:1000"
+			r.ServeHTTP(w, req)
+			assert.Equal(t, 200, w.Code)
+		}
+	})
+
+	t.Run("blocks requests exceeding limit", func(t *testing.T) {
+		r := newTestRouter(StrictIPRateLimitMiddleware(ctx, 1, 2))
+		blocked := 0
+		for i := 0; i < 10; i++ {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest("POST", "/test", nil)
+			req.RemoteAddr = "2.2.2.2:1000"
+			r.ServeHTTP(w, req)
+			if w.Code == http.StatusTooManyRequests {
+				blocked++
+			}
+		}
+		assert.Greater(t, blocked, 0)
+	})
+
+	t.Run("isolates rate limits per IP", func(t *testing.T) {
+		// 同一个 mw 实例，两个不同 IP 各自独立配额。
+		mw := StrictIPRateLimitMiddleware(ctx, 1, 2)
+		r := newTestRouter(mw)
+
+		// 耗尽 IP A
+		for i := 0; i < 10; i++ {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest("POST", "/test", nil)
+			req.RemoteAddr = "3.3.3.3:1000"
+			r.ServeHTTP(w, req)
+		}
+
+		// IP B 应该还能成功
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/test", nil)
+		req.RemoteAddr = "4.4.4.4:1000"
+		r.ServeHTTP(w, req)
+		assert.Equal(t, 200, w.Code)
+	})
+
+	t.Run("fail-closed when no IP available", func(t *testing.T) {
+		r := newTestRouter(StrictIPRateLimitMiddleware(ctx, 1, 1))
+		blocked := 0
+		for i := 0; i < 5; i++ {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest("POST", "/test", nil)
+			req.RemoteAddr = ""
+			r.ServeHTTP(w, req)
+			if w.Code == http.StatusTooManyRequests {
+				blocked++
+			}
+		}
+		assert.Greater(t, blocked, 0)
+	})
+
+	t.Run("sets X-RateLimit and Retry-After headers", func(t *testing.T) {
+		r := newTestRouter(StrictIPRateLimitMiddleware(ctx, 1, 1))
+
+		// 第一次成功，设 X-RateLimit-Limit
+		w1 := httptest.NewRecorder()
+		req1 := httptest.NewRequest("POST", "/test", nil)
+		req1.RemoteAddr = "5.5.5.5:1000"
+		r.ServeHTTP(w1, req1)
+		assert.Equal(t, 200, w1.Code)
+		assert.Equal(t, "1", w1.Header().Get("X-RateLimit-Limit"))
+
+		// 后续应触发 429 并设 Retry-After
+		got429 := false
+		for i := 0; i < 5; i++ {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest("POST", "/test", nil)
+			req.RemoteAddr = "5.5.5.5:1000"
+			r.ServeHTTP(w, req)
+			if w.Code == http.StatusTooManyRequests {
+				retryAfter, err := strconv.Atoi(w.Header().Get("Retry-After"))
+				assert.NoError(t, err)
+				assert.GreaterOrEqual(t, retryAfter, 1)
+				got429 = true
+				break
+			}
+		}
+		assert.True(t, got429, "expected at least one 429")
+	})
+}
+
 func TestCleanupLoopExitsOnContextCancel(t *testing.T) {
 	before := runtime.NumGoroutine()
 

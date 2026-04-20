@@ -165,6 +165,50 @@ func RateLimitMiddleware(ctx context.Context, rps float64, burst int, excludePat
 	}
 }
 
+// StrictIPRateLimitMiddleware 端点级 per-IP 严格限流，挂在敏感端点（登录/注册/SMS/搜索）作为额外防护。
+//
+// 与全局 RateLimitMiddleware 区别：
+//   - 全局：DDoS 底线，宽松阈值（数百 req/s），挂全局 UseGin
+//   - 严格：暴力破解/枚举防御，紧阈值（数 req/min），挂在端点级 RouterGroup
+//
+// 同类端点（如所有登录端点）应共享同一个中间件实例，使同一 IP 的总配额受控，防攻击者跨端点分散：
+//
+//	loginLimit := wkhttp.StrictIPRateLimitMiddleware(ctx, 10.0/60, 20)
+//	v.POST("/user/login", loginLimit, u.login)
+//	v.POST("/user/usernamelogin", loginLimit, u.usernameLogin)
+//
+// fail-closed：拿不到 IP 时所有请求归入同一全局桶，与全局 RateLimitMiddleware 行为一致。
+//
+// ctx 取消时后台清理 goroutine 退出。
+func StrictIPRateLimitMiddleware(ctx context.Context, rps float64, burst int) libwkhttp.HandlerFunc {
+	kl := newKeyedLimiter(ctx, rps, burst)
+	var unknownIPWarnOnce sync.Once
+
+	return func(c *libwkhttp.Context) {
+		ip := getClientIP(c.Request)
+		if ip == "" {
+			unknownIPWarnOnce.Do(func() {
+				log.Warn("strict rate limit: client IP unavailable, falling back to shared bucket; check reverse proxy / XFF configuration")
+			})
+			ip = unknownIPKey
+		}
+
+		entry := kl.entryFor(ip)
+		allowed := entry.limiter.Allow()
+		setRateLimitHeaders(c.Writer.Header(), entry, burst, rps, allowed)
+
+		if !allowed {
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
+				"msg":    "请求过于频繁，请稍后再试",
+				"status": http.StatusTooManyRequests,
+			})
+			return
+		}
+
+		c.Next()
+	}
+}
+
 // UIDRateLimitMiddleware 按登录用户 uid 限流。
 //
 // ⚠️ 挂载要求：必须挂在 AuthMiddleware 之后，且只用于认证路由组。

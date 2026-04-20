@@ -20,6 +20,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/file"
 	"github.com/Mininglamp-OSS/octo-server/modules/source"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
+	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/model"
 	"github.com/gocraft/dbr/v2"
@@ -126,6 +127,15 @@ func New(ctx *config.Context) *User {
 
 // Route 路由配置
 func (u *User) Route(r *wkhttp.WKHttp) {
+	// 端点级严格 per-IP 限流：防暴力破解 / 撞库 / 手机号枚举 / SMS 费用 DoS
+	// 同类端点共享一个限流器实例，使同一 IP 的总配额受控，避免攻击者跨端点分散
+	rlCtx := context.Background()
+	// burst 取小值：人类正常重试容忍 + 不给攻击者初始白嫖窗口
+	loginLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, 10.0/60, 5)   // 10 req/min, burst 5
+	registerLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, 5.0/60, 3) // 5 req/min, burst 3
+	smsLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, 5.0/60, 3)      // 5 req/min, burst 3
+	searchLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, 30.0/60, 60) // 30 req/min, burst 60
+
 	auth := r.Group("/v1", u.ctx.AuthMiddleware(r))
 	{
 
@@ -133,7 +143,7 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 		// 获取用户的会话信息
 		// auth.GET("/users/:uid/conversation", u.userConversationInfoGet)
 
-		auth.GET("/user/search", u.search)
+		auth.GET("/user/search", searchLimit, u.search)
 		auth.POST("/users/:uid/avatar", u.uploadAvatar)              //上传用户头像
 		auth.PUT("/users/:uid/setting", u.setting.userSettingUpdate) // 更新用户设置
 	}
@@ -179,28 +189,28 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 	v := r.Group("/v1")
 	{
 
-		v.POST("/user/register", u.register)                 //用户注册
-		v.POST("/user/login", u.login)                       // 用户登录
-		v.POST("/user/usernamelogin", u.usernameLogin)       // 用户名登录
-		v.POST("/user/usernameregister", u.usernameRegister) // 用户名注册
-		v.POST("/user/emaillogin", u.emailLogin)              // 邮箱登录
-		v.POST("/user/emailregister", u.emailRegister)        // 邮箱注册
-		v.POST("/user/email/sendcode", u.emailSendCode)       // 发送邮箱验证码
-		v.POST("/user/email/forgetpwd", u.emailForgetPwd)     // 邮箱忘记密码
+		v.POST("/user/register", registerLimit, u.register)                 //用户注册
+		v.POST("/user/login", loginLimit, u.login)                          // 用户登录
+		v.POST("/user/usernamelogin", loginLimit, u.usernameLogin)          // 用户名登录
+		v.POST("/user/usernameregister", registerLimit, u.usernameRegister) // 用户名注册
+		v.POST("/user/emaillogin", loginLimit, u.emailLogin)                // 邮箱登录
+		v.POST("/user/emailregister", registerLimit, u.emailRegister)       // 邮箱注册
+		v.POST("/user/email/sendcode", smsLimit, u.emailSendCode)    // 发送邮箱验证码
+		v.POST("/user/email/forgetpwd", loginLimit, u.emailForgetPwd) // 邮箱忘记密码
 
 		v.POST("/user/pwdforget_web3", u.resetPwdWithWeb3PublicKey) // 通过web3公钥重置密码
 		v.GET("/user/web3verifytext", u.getVerifyText)              // 获取验证字符串
 		v.POST("/user/web3verifysign", u.web3verifySignature)       // 验证签名
 		//v.POST("user/wxlogin", u.wxLogin)
-		v.POST("/user/sms/forgetpwd", u.getForgetPwdSMS) //获取忘记密码验证码
-		v.POST("/user/pwdforget", u.pwdforget)           //重置登录密码
+		v.POST("/user/sms/forgetpwd", smsLimit, u.getForgetPwdSMS) //获取忘记密码验证码
+		v.POST("/user/pwdforget", loginLimit, u.pwdforget) //重置登录密码
 		v.GET("/users/:uid/avatar", u.UserAvatar)        // 用户头像
 		v.GET("/users/:uid/im", u.userIM)                // 获取用户所在IM节点信息
 		v.GET("/user/loginuuid", u.getLoginUUID)         // 获取扫描用的登录uuid
 		v.GET("/user/loginstatus", u.getloginStatus)
-		v.POST("/user/sms/registercode", u.sendRegisterCode)             //获取注册短信验证码
-		v.POST("/user/login_authcode/:auth_code", u.loginWithAuthCode)   // 通过认证码登录
-		v.POST("/user/sms/login_check_phone", u.sendLoginCheckPhoneCode) //发送登录设备验证验证码
+		v.POST("/user/sms/registercode", smsLimit, u.sendRegisterCode)             //获取注册短信验证码
+		v.POST("/user/login_authcode/:auth_code", loginLimit, u.loginWithAuthCode) // 通过认证码登录
+		v.POST("/user/sms/login_check_phone", smsLimit, u.sendLoginCheckPhoneCode) //发送登录设备验证验证码
 		v.POST("/user/login/check_phone", u.loginCheckPhone)             //登录验证设备手机号
 
 		// #################### 第三方授权 ####################
