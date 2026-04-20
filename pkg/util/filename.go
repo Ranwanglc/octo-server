@@ -23,17 +23,20 @@ func ExtractFilenameFromPath(path string) string {
 	parts := strings.Split(path, "/")
 	lastPart := parts[len(parts)-1]
 
-	// Try to strip legacy UUID prefix: 32 hex chars followed by underscore
-	if idx := strings.Index(lastPart, "_"); idx == 32 && IsHexString(lastPart[:32]) {
-		after := lastPart[idx+1:]
-		if after != "" {
-			unescaped, err := url.PathUnescape(after)
-			if err == nil {
-				return unescaped
+	// Only attempt legacy UUID prefix stripping for 3-segment paths (legacy format: chat/ts/uuid_filename).
+	// New format (chat/ts/uuid/filename) has 4+ segments, so lastPart IS the filename.
+	if len(parts) <= 3 {
+		if idx := strings.Index(lastPart, "_"); idx == 32 && IsHexString(lastPart[:32]) {
+			after := lastPart[idx+1:]
+			if after != "" {
+				unescaped, err := url.PathUnescape(after)
+				if err == nil {
+					return unescaped
+				}
+				return after
 			}
-			return after
+			// Empty filename after UUID prefix — fall back to full last segment
 		}
-		// Empty filename after UUID prefix — fall back to full last segment
 	}
 
 	unescaped, err := url.PathUnescape(lastPart)

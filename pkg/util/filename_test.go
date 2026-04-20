@@ -86,6 +86,17 @@ func TestExtractFilenameFromPath_UnicodeFilename(t *testing.T) {
 	}
 }
 
+func TestExtractFilenameFromPath_NewPathHexStartingFilename(t *testing.T) {
+	// New-format path (4 segments) where filename starts with 32 hex chars + underscore
+	// should NOT be treated as legacy UUID prefix
+	path := "chat/1234/realuuid/aabbccdd11223344aabbccdd11223344_notes.txt"
+	got := ExtractFilenameFromPath(path)
+	expected := "aabbccdd11223344aabbccdd11223344_notes.txt"
+	if got != expected {
+		t.Errorf("expected %q, got %q", expected, got)
+	}
+}
+
 func TestExtractFilenameFromPath_SimpleFilename(t *testing.T) {
 	got := ExtractFilenameFromPath("report.xlsx")
 	if got != "report.xlsx" {
