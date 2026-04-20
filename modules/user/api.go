@@ -2,7 +2,6 @@ package user
 
 import (
 	"context"
-	"runtime/debug"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,26 +10,23 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
+	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-lib/model"
 	"github.com/Mininglamp-OSS/octo-server/modules/file"
 	"github.com/Mininglamp-OSS/octo-server/modules/source"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
-	"github.com/Mininglamp-OSS/octo-lib/config"
-	"github.com/Mininglamp-OSS/octo-lib/model"
 	"github.com/gocraft/dbr/v2"
 	"github.com/opentracing/opentracing-go"
 	"github.com/opentracing/opentracing-go/ext"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/base/app"
-	commonapi "github.com/Mininglamp-OSS/octo-server/modules/base/common"
-	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
-	common2 "github.com/Mininglamp-OSS/octo-server/modules/common"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/network"
@@ -38,6 +34,10 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkevent"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/modules/base/app"
+	commonapi "github.com/Mininglamp-OSS/octo-server/modules/base/common"
+	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
+	common2 "github.com/Mininglamp-OSS/octo-server/modules/common"
 	"github.com/gin-gonic/gin"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
@@ -89,6 +89,7 @@ type User struct {
 	deviceFlagsOnce          sync.Once
 	deviceFlagsErr           error
 	appService               app.IService
+	loginGuard               *LoginGuard
 }
 
 // New New
@@ -119,6 +120,7 @@ func New(ctx *config.Context) *User {
 		githubDB:                 newGithubDB(ctx),
 		commonService:            common2.NewService(ctx),
 		appService:               app.NewService(ctx),
+		loginGuard:               NewLoginGuard(ctx.GetRedisConn(), loginGuardThresholdFromEnv(), loginGuardWindowFromEnv()),
 	}
 	u.updateSystemUserToken()
 	source.SetUserProvider(u)
@@ -195,8 +197,8 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 		v.POST("/user/usernameregister", registerLimit, u.usernameRegister) // 用户名注册
 		v.POST("/user/emaillogin", loginLimit, u.emailLogin)                // 邮箱登录
 		v.POST("/user/emailregister", registerLimit, u.emailRegister)       // 邮箱注册
-		v.POST("/user/email/sendcode", smsLimit, u.emailSendCode)    // 发送邮箱验证码
-		v.POST("/user/email/forgetpwd", loginLimit, u.emailForgetPwd) // 邮箱忘记密码
+		v.POST("/user/email/sendcode", smsLimit, u.emailSendCode)           // 发送邮箱验证码
+		v.POST("/user/email/forgetpwd", loginLimit, u.emailForgetPwd)       // 邮箱忘记密码
 
 		v.POST("/user/pwdforget_web3", u.resetPwdWithWeb3PublicKey) // 通过web3公钥重置密码
 		v.GET("/user/web3verifytext", u.getVerifyText)              // 获取验证字符串
@@ -1030,6 +1032,11 @@ func (u *User) login(c *wkhttp.Context) {
 		c.ResponseError(err)
 		return
 	}
+	if err := u.loginGuard.Check(req.Username); err != nil {
+		u.Warn("登录被临时锁定", zap.String("username", req.Username), zap.Error(err))
+		c.ResponseError(err)
+		return
+	}
 	loginSpan := u.ctx.Tracer().StartSpan(
 		"login",
 		opentracing.ChildOf(c.GetSpanContext()),
@@ -1045,18 +1052,24 @@ func (u *User) login(c *wkhttp.Context) {
 		return
 	}
 	if userInfo == nil || userInfo.IsDestroy == 1 {
-		c.ResponseError(errors.New("用户不存在"))
+		u.loginGuard.RecordFailureLogged(req.Username)
+		// 统一错误消息，避免攻击者通过响应差异枚举有效账号
+		c.ResponseError(errors.New("用户名或密码错误"))
 		return
 	}
 	if userInfo.Password == "" {
-		c.ResponseError(errors.New("此账号不允许登录"))
+		// 同样走失败计数 + 通用错误消息，避免攻击者区分"账号不允许登录"与"密码错误"
+		u.loginGuard.RecordFailureLogged(req.Username)
+		c.ResponseError(errors.New("用户名或密码错误"))
 		return
 	}
 	matched, needsMigration := CheckPassword(req.Password, userInfo.Password)
 	if !matched {
-		c.ResponseError(errors.New("密码不正确！"))
+		u.loginGuard.RecordFailureLogged(req.Username)
+		c.ResponseError(errors.New("用户名或密码错误"))
 		return
 	}
+	u.loginGuard.ResetLogged(req.Username)
 	// 自动迁移 MD5 密码到 bcrypt
 	if needsMigration {
 		if newHash, err := HashPassword(req.Password); err == nil {
