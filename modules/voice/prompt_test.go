@@ -46,6 +46,32 @@ func TestBuildSystemMessage_ContainsMentionRule(t *testing.T) {
 	assert.Contains(t, msg, "@Bob")
 }
 
+func TestBuildSystemMessage_MentionV2Scenarios(t *testing.T) {
+	msg := buildSystemMessage()
+
+	// Positive scenarios present in prompt
+	assert.Contains(t, msg, "让陈皮皮帮忙处理一下")   // intent verb "让"
+	assert.Contains(t, msg, "Boris，明天天气怎么样")  // direct address
+	assert.Contains(t, msg, "跟Bob说明天开会改时间")   // preposition "跟"
+	assert.Contains(t, msg, "这个方案怎么样，Boris")  // trailing address
+
+	// Negative scenarios present in prompt
+	assert.Contains(t, msg, "Boris的代码写得不错")    // possessive, no @
+	assert.Contains(t, msg, "我昨天和张三聊了")      // past event, no @
+	assert.Contains(t, msg, "不用找Boris了")        // negation, no @
+
+	// V2 structural elements
+	assert.Contains(t, msg, "识别为@的场景")
+	assert.Contains(t, msg, "不识别为@的场景")
+	assert.Contains(t, msg, "显式意图词")
+	assert.Contains(t, msg, "直接呼名对话")
+	assert.Contains(t, msg, "介词沟通")
+	assert.Contains(t, msg, "句尾呼名")
+	assert.Contains(t, msg, "叙述/引用")
+	assert.Contains(t, msg, "否定取消")
+	assert.Contains(t, msg, "过去事件")
+}
+
 func TestBuildSystemMessage_MentionRuleOrder(t *testing.T) {
 	msg := buildSystemMessage()
 	vocabIdx := strings.Index(msg, "词汇参考表使用规则")
