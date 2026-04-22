@@ -17,6 +17,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/thread"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
+	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/model"
@@ -90,16 +91,20 @@ func (co *Conversation) Route(r *wkhttp.WKHttp) {
 		c.Request.URL.RawQuery = q.Encode()
 		c.Next()
 	}
-	coversations := r.Group("/v1/coversations", co.ctx.AuthMiddleware(r), deprecatedLog)
+	// UID 限流：Web 端轮询叠加易触发全局 per-IP 桶（见 wukongim#92 / octo-server#1086 P2），
+	// 共享 keyspace "ratelimit:uid:{uid}"，配额跨所有挂载端点统一
+	uidLimit := appwkhttp.SharedUIDRateLimiter(co.ctx)
+
+	coversations := r.Group("/v1/coversations", co.ctx.AuthMiddleware(r), uidLimit, deprecatedLog)
 	{
 		coversations.GET("", co.getConversations)
 	}
-	cnversation := r.Group("/v1/coversation", co.ctx.AuthMiddleware(r), deprecatedLog)
+	cnversation := r.Group("/v1/coversation", co.ctx.AuthMiddleware(r), uidLimit, deprecatedLog)
 	{
 		cnversation.PUT("/clearUnread", co.clearConversationUnread)
 	}
 
-	conversation := r.Group("/v1/conversation", co.ctx.AuthMiddleware(r), spacepkg.SpaceMiddleware(co.ctx))
+	conversation := r.Group("/v1/conversation", co.ctx.AuthMiddleware(r), uidLimit, spacepkg.SpaceMiddleware(co.ctx))
 	{
 		// 离线的最近会话
 		conversation.POST("/sync", co.syncUserConversation)
@@ -107,7 +112,7 @@ func (co *Conversation) Route(r *wkhttp.WKHttp) {
 		conversation.POST("/extra/sync", co.conversationExtraSync) // 同步最近会话扩展
 		conversation.PUT("/clearUnread", co.clearConversationUnread) // 清除未读（正确拼写路径）
 	}
-	conversations := r.Group("/v1/conversations", co.ctx.AuthMiddleware(r))
+	conversations := r.Group("/v1/conversations", co.ctx.AuthMiddleware(r), uidLimit)
 	{
 		conversations.DELETE("/:channel_id/:channel_type", co.deleteConversation)          // 删除最近会话
 		conversations.POST("/:channel_id/:channel_type/extra", co.conversationExtraUpdate) // 添加或更新最近会话扩展

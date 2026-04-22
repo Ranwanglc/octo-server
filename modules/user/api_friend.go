@@ -12,6 +12,7 @@ import (
 	chservice "github.com/Mininglamp-OSS/octo-server/modules/channel/service"
 	"github.com/Mininglamp-OSS/octo-server/modules/source"
 	"github.com/Mininglamp-OSS/octo-server/modules/space"
+	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
@@ -53,7 +54,8 @@ func NewFriend(ctx *config.Context) *Friend {
 
 // Route 配置路由规则
 func (f *Friend) Route(r *wkhttp.WKHttp) {
-	friend := r.Group("/v1/friend", f.ctx.AuthMiddleware(r))
+	uidLimit := appwkhttp.SharedUIDRateLimiter(f.ctx)
+	friend := r.Group("/v1/friend", f.ctx.AuthMiddleware(r), uidLimit)
 	{
 		friend.POST("/apply", f.friendApply)           // 好友申请
 		friend.GET("/apply", f.apply)                  // 好友申请列表
@@ -64,7 +66,7 @@ func (f *Friend) Route(r *wkhttp.WKHttp) {
 		friend.GET("/search", f.friendSearch)          // 查询好友
 		friend.PUT("/remark", f.remark)                //好友备注
 	}
-	friends := r.Group("/v1/friends", f.ctx.AuthMiddleware(r))
+	friends := r.Group("/v1/friends", f.ctx.AuthMiddleware(r), uidLimit)
 	{
 		friends.DELETE("/:uid", f.delete) //删除好友
 	}

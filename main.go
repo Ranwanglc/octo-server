@@ -101,8 +101,11 @@ func runAPI(ctx *config.Context) {
 		}
 		gin.Logger()(c)
 	})
-	rps := 200.0
-	burst := 300
+	// 全局 per-IP 作为 DDoS 底线：办公室共享出网 IP 下 IM 基础量就能到 100+ rps
+	// （每人 1-2 rps × 数十人），200 余量过小；真实 DDoS 常数千 rps+，底线设 500
+	// 更合理。精细限流交给 UID 层和端点级严格桶（#1090）。
+	rps := 500.0
+	burst := 1000
 	if v := os.Getenv("DM_API_RATELIMIT_RPS"); v != "" {
 		if n, err := strconv.ParseFloat(v, 64); err == nil && n > 0 {
 			rps = n
@@ -117,10 +120,13 @@ func runAPI(ctx *config.Context) {
 	// 独立构造 client 的原因：lib 的 redis.Conn 未暴露 Eval/Script 接口，
 	// 而令牌桶需要 Lua 脚本保证原子性。
 	// 生命周期：跟随进程存续，不显式 Close——与 lib 自身的 redis.Conn 处理方式一致。
+	// PoolSize 显式设 10：令牌桶 Lua 脚本是短事务，Redis 端 <1ms，不需要大池；
+	// go-redis v6 默认 10*NumCPU 在大核机上会失控（多副本 × 多 client 连接数叠加）。
 	rlRedis := rd.NewClient(&rd.Options{
 		Addr:       ctx.GetConfig().DB.RedisAddr,
 		Password:   ctx.GetConfig().DB.RedisPass,
 		MaxRetries: 1,
+		PoolSize:   10,
 	})
 	s.GetRoute().UseGin(wkhttp.RateLimitMiddleware(context.Background(), rlRedis, rps, burst, "/v1/ping"))
 	// CORS 白名单覆盖：dmwork-lib 的 server.New 默认注入 "*" + Credentials:true，
