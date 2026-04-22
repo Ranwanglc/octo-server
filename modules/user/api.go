@@ -134,10 +134,12 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 	// 同类端点共享一个限流器实例，使同一 IP 的总配额受控，避免攻击者跨端点分散
 	rlCtx := context.Background()
 	// 限流状态存 Redis，多副本共享配额；生命周期跟随进程，与 main.go 的做法一致
+	// PoolSize 显式设 10：理由同 main.go——限流 Lua 脚本短事务，不需要大池。
 	rlRedis := rd.NewClient(&rd.Options{
 		Addr:       u.ctx.GetConfig().DB.RedisAddr,
 		Password:   u.ctx.GetConfig().DB.RedisPass,
 		MaxRetries: 1,
+		PoolSize:   10,
 	})
 	// burst 取小值：人类正常重试容忍 + 不给攻击者初始白嫖窗口
 	// tag 用稳定字符串分离 keyspace；注意 register 和 sms 参数相同但语义不同，必须分开

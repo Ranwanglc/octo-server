@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
+	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
@@ -30,7 +31,8 @@ func New(ctx *config.Context) *Category {
 
 // Route 路由配置
 func (c *Category) Route(r *wkhttp.WKHttp) {
-	spaces := r.Group("/v1/spaces", c.ctx.AuthMiddleware(r))
+	uidLimit := appwkhttp.SharedUIDRateLimiter(c.ctx)
+	spaces := r.Group("/v1/spaces", c.ctx.AuthMiddleware(r), uidLimit)
 	{
 		spaces.POST("/:space_id/categories", c.create)
 		spaces.GET("/:space_id/categories", c.list)
@@ -39,7 +41,7 @@ func (c *Category) Route(r *wkhttp.WKHttp) {
 		spaces.DELETE("/:space_id/categories/:category_id", c.delete)
 	}
 
-	groups := r.Group("/v1/groups", c.ctx.AuthMiddleware(r))
+	groups := r.Group("/v1/groups", c.ctx.AuthMiddleware(r), uidLimit)
 	{
 		groups.PUT("/:group_no/category", c.moveGroupToCategory)
 	}

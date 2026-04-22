@@ -22,6 +22,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/thread"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
+	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
@@ -210,7 +211,9 @@ func New(ctx *config.Context) *Message {
 
 // Route 路由配置
 func (m *Message) Route(r *wkhttp.WKHttp) {
-	message := r.Group("/v1/message", m.ctx.AuthMiddleware(r))
+	// UID 限流：所有认证路由组共享同一桶（详见 SharedUIDRateLimiter 注释）
+	uidLimit := appwkhttp.SharedUIDRateLimiter(m.ctx)
+	message := r.Group("/v1/message", m.ctx.AuthMiddleware(r), uidLimit)
 	{
 
 		message.POST("/sync", m.sync)                             // 同步消息 (写模式才用到 TODO：此方法未来将弃用)
@@ -234,21 +237,21 @@ func (m *Message) Route(r *wkhttp.WKHttp) {
 		message.POST("/pinned/sync", m.syncPinnedMessage)         // 同步置顶消息
 		message.POST("/pinned/clear", m.clearPinnedMessage)       // 删除所有置顶消息
 	}
-	messages := r.Group("/v1/messages", m.ctx.AuthMiddleware(r))
+	messages := r.Group("/v1/messages", m.ctx.AuthMiddleware(r), uidLimit)
 	{
 		// messages.PUT("/:message_id/voicereaded", m.voiceReaded)
 		messages.GET("/:message_id/receipt", m.messageReceiptList) // 消息回执列表
 	}
 	// 回应
-	reactions := r.Group("/v1/reactions", m.ctx.AuthMiddleware(r))
+	reactions := r.Group("/v1/reactions", m.ctx.AuthMiddleware(r), uidLimit)
 	{
 		reactions.POST("", m.addOrCancelReaction) // 添加或取消回应
 	}
-	reaction := r.Group("/v1/reaction", m.ctx.AuthMiddleware(r))
+	reaction := r.Group("/v1/reaction", m.ctx.AuthMiddleware(r), uidLimit)
 	{
 		reaction.POST("/sync", m.syncReaction)
 	}
-	msg := r.Group("/v1/message", m.ctx.AuthMiddleware(r))
+	msg := r.Group("/v1/message", m.ctx.AuthMiddleware(r), uidLimit)
 	{
 		msg.POST("/send", m.sendMsg) // 代发消息
 	}
