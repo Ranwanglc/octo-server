@@ -99,6 +99,7 @@ func (t *Thread) Route(r *wkhttp.WKHttp) {
 		threads.GET("", t.listThreads)
 		threads.GET("/:short_id", t.getThread)
 		threads.PUT("/:short_id", t.updateThread)
+		threads.PUT("/:short_id/setting", t.updateSetting)
 		threads.GET("/:short_id/members", t.listMembers)
 		threads.POST("/:short_id/join", t.joinThread)
 		threads.POST("/:short_id/leave", t.leaveThread)
@@ -209,6 +210,41 @@ func (t *Thread) updateThread(c *wkhttp.Context) {
 	c.ResponseOK()
 }
 
+// updateSetting 更新当前用户对子区的个人设置(目前支持 mute)
+// PUT /v1/groups/:group_no/threads/:short_id/setting
+func (t *Thread) updateSetting(c *wkhttp.Context) {
+	groupNo := c.Param("group_no")
+	shortID := c.Param("short_id")
+	loginUID := c.GetLoginUID()
+
+	if !IsValidGroupNo(groupNo) {
+		c.ResponseError(errors.New("invalid group_no format"))
+		return
+	}
+	if !IsValidShortID(shortID) {
+		c.ResponseError(errors.New("invalid short_id format"))
+		return
+	}
+
+	var req map[string]interface{}
+	if err := c.BindJSON(&req); err != nil {
+		t.Error("参数错误", zap.Error(err))
+		c.ResponseError(errors.New("invalid request"))
+		return
+	}
+	if len(req) == 0 {
+		c.ResponseOK()
+		return
+	}
+
+	if err := t.service.UpdateSetting(groupNo, shortID, loginUID, req); err != nil {
+		t.Error("更新子区设置失败", zap.Error(err), zap.String("groupNo", groupNo), zap.String("shortID", shortID))
+		c.ResponseError(err)
+		return
+	}
+	c.ResponseOK()
+}
+
 // listThreads 列出子区
 // GET /v1/groups/:group_no/threads
 func (t *Thread) listThreads(c *wkhttp.Context) {
@@ -233,11 +269,24 @@ func (t *Thread) listThreads(c *wkhttp.Context) {
 		return
 	}
 
-	pageIndex, pageSize := c.GetPage()
+	// 向后兼容：未显式传 page_index/page_size 时，返回裸数组（旧客户端格式，
+	// 避免老 App 因响应结构变更解析失败）；一旦传了任一分页参数，就返回 {count, list} 信封。
+	hasPageParam := c.Query("page_index") != "" || c.Query("page_size") != ""
+	var pageIndex, pageSize int64
+	if hasPageParam {
+		pageIndex, pageSize = c.GetPage()
+	} else {
+		pageIndex, pageSize = 1, MaxThreadPageSize
+	}
+
 	threads, total, err := t.service.GetThreads(groupNo, pageIndex, pageSize)
 	if err != nil {
 		t.Error("获取子区列表失败", zap.Error(err), zap.String("groupNo", groupNo))
 		c.ResponseError(err)
+		return
+	}
+	if !hasPageParam {
+		c.Response(threads)
 		return
 	}
 	c.Response(map[string]interface{}{

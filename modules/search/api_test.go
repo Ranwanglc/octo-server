@@ -8,6 +8,27 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestShouldIncludeGroupForSpace(t *testing.T) {
+	tests := []struct {
+		name          string
+		groupSpaceID  string
+		searchSpaceID string
+		want          bool
+	}{
+		{"no_space_context_excludes_all", "spaceA", "", false},
+		{"no_space_context_excludes_groups_without_space", "", "", false},
+		{"same_space_included", "spaceA", "spaceA", true},
+		{"different_space_excluded", "spaceB", "spaceA", false},
+		{"group_without_space_excluded_when_filtering", "", "spaceA", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldIncludeGroupForSpace(tt.groupSpaceID, tt.searchSpaceID)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestCollectChannelIDs_ThreadMessage(t *testing.T) {
 	tests := []struct {
 		name            string

@@ -1403,6 +1403,24 @@ func (u *User) search(c *wkhttp.Context) {
 			})
 			return
 		}
+	} else {
+		// 未指定 Space：仅允许查询自己或与登录用户至少共享一个 Space 的用户，
+		// 防止通过 short_no/phone/email 跨 Space 探测用户存在性。
+		loginUID := c.GetLoginUID()
+		if loginUID != "" && loginUID != useModel.UID {
+			shared, err := spacepkg.HaveCommonSpace(u.ctx.DB(), loginUID, useModel.UID)
+			if err != nil {
+				u.Error("校验共同 Space 错误", zap.Error(err))
+				c.ResponseError(errors.New("校验共同 Space 错误"))
+				return
+			}
+			if !shared {
+				c.JSON(http.StatusOK, gin.H{
+					"exist": 0,
+				})
+				return
+			}
+		}
 	}
 	appconfig, _ := u.commonService.GetAppConfig()
 

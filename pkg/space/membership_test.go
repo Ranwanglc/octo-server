@@ -39,3 +39,26 @@ func TestCheckBothMembersEmptyArgs(t *testing.T) {
 		t.Error("expected false for empty uid1")
 	}
 }
+
+func TestHaveCommonSpaceEmptyArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		uid1 string
+		uid2 string
+	}{
+		{"both_empty", "", ""},
+		{"uid1_empty", "", "u2"},
+		{"uid2_empty", "u1", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ok, err := HaveCommonSpace(nil, tt.uid1, tt.uid2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok {
+				t.Errorf("expected false for %s", tt.name)
+			}
+		})
+	}
+}

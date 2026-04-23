@@ -238,8 +238,9 @@ func (s *Search) global(c *wkhttp.Context) {
 	searchSpaceID := spacepkg.GetSpaceID(c)
 	if req.OnlyMessage == 0 && len(joinedGroups) > 0 {
 		for _, g := range joinedGroups {
-			// Space 过滤：如果指定了 space_id，只显示该 Space 的群
-			if searchSpaceID != "" && g.SpaceID != searchSpaceID {
+			// Space 过滤：仅当 searchSpaceID 非空且匹配时返回；为空时整批排除，
+			// 防止跨 Space 群列表混合泄漏。
+			if !shouldIncludeGroupForSpace(g.SpaceID, searchSpaceID) {
 				continue
 			}
 			isAdd := false
@@ -477,6 +478,16 @@ type messageResp struct {
 	IsDeleted    int8                   `json:"is_deleted"`        // 是否已删除
 	Channel      *channelResp           `json:"channel,omitempty"` // 消息所属channel
 	FromChannel  *channelResp           `json:"from_channel"`      // 消息发送者channel
+}
+
+// shouldIncludeGroupForSpace decides whether a group should appear in search
+// results for the given searchSpaceID. When searchSpaceID is empty (no Space
+// context), all groups are excluded to avoid leaking groups across Spaces.
+func shouldIncludeGroupForSpace(groupSpaceID, searchSpaceID string) bool {
+	if searchSpaceID == "" {
+		return false
+	}
+	return groupSpaceID == searchSpaceID
 }
 
 func collectChannelIDs(messages []*config.MessageResp) (groupIDs, uids, fromUIDs []string, threadParentMap map[string]string) {

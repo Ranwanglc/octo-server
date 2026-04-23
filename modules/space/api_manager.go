@@ -1,0 +1,796 @@
+package space
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+
+	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"go.uber.org/zap"
+)
+
+// Space 状态常量
+const (
+	SpaceStatusDisbanded = 0
+	SpaceStatusNormal    = 1
+	SpaceStatusBanned    = 2
+)
+
+// 管理端分页上限，防止恶意/误操作的大页请求把全表拉出来。
+const managerMaxPageSize = 200
+
+// 批量成员操作一次最多处理的 uid 数量，避免长事务拖垮 DB。
+const managerMaxBatchUIDs = 200
+
+// clampPage 规范化页码和每页大小，并执行上限保护。
+// 入参类型 int64 以直接适配 c.GetPage() 的返回值。
+func clampPage(pageIndex, pageSize int64) (int, int) {
+	if pageIndex <= 0 {
+		pageIndex = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	if pageSize > managerMaxPageSize {
+		pageSize = managerMaxPageSize
+	}
+	return int(pageIndex), int(pageSize)
+}
+
+// Manager Space 后台管理 API
+type Manager struct {
+	ctx *config.Context
+	log.Log
+	db        *DB
+	managerDB *managerDB
+	space     *Space
+}
+
+// NewManager 创建 Space 管理实例。space 参数用于复用业务侧的 Space 实例
+// （共享 executeJoinSpace / notifyApplicantJoinResult / loadKnownSpaceIDs），
+// 避免创建冗余实例；space 为 nil 时会兜底自建（主要给老调用点留后路）。
+func NewManager(ctx *config.Context, space *Space) *Manager {
+	if space == nil {
+		space = New(ctx)
+	}
+	return &Manager{
+		ctx:       ctx,
+		Log:       log.NewTLog("spaceManager"),
+		db:        NewDB(ctx),
+		managerDB: newManagerDB(ctx.DB()),
+		space:     space,
+	}
+}
+
+// Route 路由配置。所有路径统一使用复数 `/spaces/`，子资源按 REST 嵌套。
+// 注：`/spaces/disabled` 作为静态路径必须先于 `/spaces/:space_id` 注册，
+// Gin 内部会让静态路由优先匹配，但显式有序更稳妥。
+func (m *Manager) Route(r *wkhttp.WKHttp) {
+	auth := r.Group("/v1/manager", m.ctx.AuthMiddleware(r))
+	{
+		// 空间集合
+		auth.GET("/spaces", m.list)                     // 活跃空间列表
+		auth.GET("/spaces/disabled", m.disableList)     // 已解散 / 已封禁空间列表
+
+		// 空间单体
+		auth.GET("/spaces/:space_id", m.detail)                      // 空间详情
+		auth.DELETE("/spaces/:space_id", m.forceDisband)             // 强制解散
+		auth.PUT("/spaces/:space_id/status/:status", m.liftBan)      // 封禁(2) / 解禁(1)
+
+		// 成员
+		auth.GET("/spaces/:space_id/members", m.members)                    // 成员列表
+		auth.POST("/spaces/:space_id/members", m.addMembers)                // 强制添加
+		auth.DELETE("/spaces/:space_id/members", m.removeMembers)           // 强制移除
+		auth.PUT("/spaces/:space_id/members/:uid/role", m.updateMemberRole) // 修改成员角色
+
+		// 邀请码
+		auth.GET("/spaces/:space_id/invites", m.listInvites)            // 列表
+		auth.DELETE("/spaces/:space_id/invites/:code", m.disableInvite) // 禁用
+
+		// 加入申请
+		auth.GET("/spaces/:space_id/join-applies", m.listJoinApplies)               // 列表
+		auth.POST("/spaces/:space_id/join-applies/:id/approve", m.approveJoinApply) // 通过
+		auth.POST("/spaces/:space_id/join-applies/:id/reject", m.rejectJoinApply)   // 拒绝
+	}
+}
+
+// managerSpaceResp 管理后台空间响应
+type managerSpaceResp struct {
+	SpaceId     string `json:"space_id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Logo        string `json:"logo"`
+	Creator     string `json:"creator"`
+	CreatorName string `json:"creator_name"`
+	Status      int    `json:"status"`
+	JoinMode    int    `json:"join_mode"`
+	MaxUsers    int    `json:"max_users"`
+	MemberCount int    `json:"member_count"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
+// managerMemberResp 管理后台成员响应
+type managerMemberResp struct {
+	UID       string `json:"uid"`
+	Name      string `json:"name"`
+	Role      int    `json:"role"`
+	Status    int    `json:"status"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+func toSpaceResp(m *managerSpaceModel) *managerSpaceResp {
+	return &managerSpaceResp{
+		SpaceId:     m.SpaceId,
+		Name:        m.Name,
+		Description: m.Description,
+		Logo:        m.Logo,
+		Creator:     m.Creator,
+		CreatorName: m.CreatorName,
+		Status:      m.Status,
+		JoinMode:    m.JoinMode,
+		MaxUsers:    m.MaxUsers,
+		MemberCount: m.MemberCount,
+		CreatedAt:   m.CreatedAt.String(),
+		UpdatedAt:   m.UpdatedAt.String(),
+	}
+}
+
+// requireAdmin 统一的 admin/superAdmin 角色检查。未通过时已写入响应，调用方应立即返回。
+func (m *Manager) requireAdmin(c *wkhttp.Context) bool {
+	if err := c.CheckLoginRole(); err != nil {
+		c.ResponseError(err)
+		return false
+	}
+	return true
+}
+
+// listByStatuses 分页列表通用实现。statuses 为空时不过滤状态。
+func (m *Manager) listByStatuses(c *wkhttp.Context, statuses []int) {
+	if !m.requireAdmin(c) {
+		return
+	}
+	keyword := c.Query("keyword")
+	pageIndex, pageSize := clampPage(c.GetPage())
+
+	list, err := m.managerDB.querySpaces(keyword, statuses, uint64(pageSize), uint64(pageIndex))
+	if err != nil {
+		m.Error("查询空间列表失败", zap.Error(err))
+		c.ResponseError(errors.New("查询空间列表失败"))
+		return
+	}
+	count, err := m.managerDB.countSpaces(keyword, statuses)
+	if err != nil {
+		m.Error("查询空间总数失败", zap.Error(err))
+		c.ResponseError(errors.New("查询空间总数失败"))
+		return
+	}
+
+	resp := make([]*managerSpaceResp, 0, len(list))
+	for _, sp := range list {
+		resp = append(resp, toSpaceResp(sp))
+	}
+	c.Response(map[string]interface{}{
+		"count": count,
+		"list":  resp,
+	})
+}
+
+// list 活跃空间列表
+func (m *Manager) list(c *wkhttp.Context) {
+	m.listByStatuses(c, []int{SpaceStatusNormal})
+}
+
+// disableList 已解散 + 已封禁空间列表
+func (m *Manager) disableList(c *wkhttp.Context) {
+	m.listByStatuses(c, []int{SpaceStatusDisbanded, SpaceStatusBanned})
+}
+
+// detail 空间详情（包含已解散）
+func (m *Manager) detail(c *wkhttp.Context) {
+	if !m.requireAdmin(c) {
+		return
+	}
+	spaceId := c.Param("space_id")
+	if spaceId == "" {
+		c.ResponseError(errors.New("空间ID不能为空"))
+		return
+	}
+	sp, err := m.managerDB.querySpaceIncludeDisbanded(spaceId)
+	if err != nil {
+		m.Error("查询空间详情失败", zap.Error(err), zap.String("spaceId", spaceId))
+		c.ResponseError(errors.New("查询空间详情失败"))
+		return
+	}
+	if sp == nil {
+		c.ResponseError(errors.New("空间不存在"))
+		return
+	}
+	c.Response(toSpaceResp(sp))
+}
+
+// forceDisband 强制解散空间（同时移除全部成员）
+func (m *Manager) forceDisband(c *wkhttp.Context) {
+	if !m.requireAdmin(c) {
+		return
+	}
+	spaceId := c.Param("space_id")
+	if spaceId == "" {
+		c.ResponseError(errors.New("空间ID不能为空"))
+		return
+	}
+	sp, err := m.managerDB.querySpaceIncludeDisbanded(spaceId)
+	if err != nil {
+		m.Error("查询空间失败", zap.Error(err), zap.String("spaceId", spaceId))
+		c.ResponseError(errors.New("查询空间失败"))
+		return
+	}
+	if sp == nil {
+		c.ResponseError(errors.New("空间不存在"))
+		return
+	}
+	if sp.Status == 0 {
+		c.ResponseOK()
+		return
+	}
+	if err = m.managerDB.forceDisbandSpace(spaceId); err != nil {
+		m.Error("强制解散空间失败", zap.Error(err), zap.String("spaceId", spaceId))
+		c.ResponseError(errors.New("强制解散空间失败"))
+		return
+	}
+	m.Info("管理员强制解散空间", zap.String("spaceId", spaceId), zap.String("operator", c.GetLoginUID()))
+	// 刷新 ParseChannelID 缓存，避免已解散的 spaceId 继续被前缀路由认为有效
+	go m.space.loadKnownSpaceIDs()
+	c.ResponseOK()
+}
+
+// members 管理后台查询成员（含已移除）
+func (m *Manager) members(c *wkhttp.Context) {
+	if !m.requireAdmin(c) {
+		return
+	}
+	spaceId := c.Param("space_id")
+	if spaceId == "" {
+		c.ResponseError(errors.New("空间ID不能为空"))
+		return
+	}
+	sp, err := m.managerDB.querySpaceIncludeDisbanded(spaceId)
+	if err != nil {
+		m.Error("查询空间失败", zap.Error(err), zap.String("spaceId", spaceId))
+		c.ResponseError(errors.New("查询空间失败"))
+		return
+	}
+	if sp == nil {
+		c.ResponseError(errors.New("空间不存在"))
+		return
+	}
+
+	keyword := c.Query("keyword")
+	pageIndex, pageSize := clampPage(c.GetPage())
+
+	list, err := m.managerDB.queryMembersAdmin(spaceId, keyword, uint64(pageSize), uint64(pageIndex))
+	if err != nil {
+		m.Error("查询空间成员失败", zap.Error(err), zap.String("spaceId", spaceId))
+		c.ResponseError(errors.New("查询空间成员失败"))
+		return
+	}
+	count, err := m.managerDB.countMembersAdmin(spaceId, keyword)
+	if err != nil {
+		m.Error("查询空间成员总数失败", zap.Error(err), zap.String("spaceId", spaceId))
+		c.ResponseError(errors.New("查询空间成员总数失败"))
+		return
+	}
+
+	resp := make([]*managerMemberResp, 0, len(list))
+	for _, mem := range list {
+		resp = append(resp, &managerMemberResp{
+			UID:       mem.UID,
+			Name:      mem.Name,
+			Role:      mem.Role,
+			Status:    mem.Status,
+			CreatedAt: mem.CreatedAt.String(),
+			UpdatedAt: mem.UpdatedAt.String(),
+		})
+	}
+	c.Response(map[string]interface{}{
+		"count": count,
+		"list":  resp,
+	})
+}
+
+// ==================== P1 handlers ====================
+
+// liftBan 封禁 / 解禁空间：status=1 恢复正常，status=2 置为封禁。
+// status=0（解散）请用 DELETE /space/:space_id。
+func (m *Manager) liftBan(c *wkhttp.Context) {
+	if !m.requireAdmin(c) {
+		return
+	}
+	spaceId := c.Param("space_id")
+	statusStr := c.Param("status")
+	if spaceId == "" {
+		c.ResponseError(errors.New("空间ID不能为空"))
+		return
+	}
+	status, err := strconv.Atoi(statusStr)
+	if err != nil || (status != SpaceStatusNormal && status != SpaceStatusBanned) {
+		c.ResponseError(errors.New("无效的状态值，仅支持 1(正常) 或 2(封禁)"))
+		return
+	}
+	sp, err := m.managerDB.querySpaceIncludeDisbanded(spaceId)
+	if err != nil {
+		m.Error("查询空间失败", zap.Error(err), zap.String("spaceId", spaceId))
+		c.ResponseError(errors.New("查询空间失败"))
+		return
+	}
+	if sp == nil {
+		c.ResponseError(errors.New("空间不存在"))
+		return
+	}
+	if sp.Status == SpaceStatusDisbanded {
+		c.ResponseError(errors.New("空间已解散，无法更新状态"))
+		return
+	}
+	if sp.Status == status {
+		c.ResponseOK()
+		return
+	}
+	if err = m.managerDB.updateSpaceStatus(spaceId, status); err != nil {
+		m.Error("更新空间状态失败", zap.Error(err), zap.String("spaceId", spaceId))
+		c.ResponseError(errors.New("更新空间状态失败"))
+		return
+	}
+	m.Info("管理员修改空间状态", zap.String("spaceId", spaceId), zap.String("operator", c.GetLoginUID()), zap.Int("from", sp.Status), zap.Int("to", status))
+	// 刷新 ParseChannelID 缓存：loadKnownSpaceIDs 只加载 status=1 的空间，
+	// 封禁 1→2 需要把该 spaceId 从缓存中剔除，解禁 2→1 需要加回去，否则路由会走偏。
+	go m.space.loadKnownSpaceIDs()
+	c.ResponseOK()
+}
+
+// addMembers 管理员强制添加成员（绕过 max_users 限制）。
+// 注意：此操作绕过了 executeJoinSpace 的业务副作用（SpaceMemberJoin 事件、预设群组），
+// 属于 low-level 管理操作；常规入口请走 /v1/space/join。
+func (m *Manager) addMembers(c *wkhttp.Context) {
+	if !m.requireAdmin(c) {
+		return
+	}
+	spaceId := c.Param("space_id")
+	if spaceId == "" {
+		c.ResponseError(errors.New("空间ID不能为空"))
+		return
+	}
+	sp, err := m.managerDB.querySpaceIncludeDisbanded(spaceId)
+	if err != nil {
+		m.Error("查询空间失败", zap.Error(err), zap.String("spaceId", spaceId))
+		c.ResponseError(errors.New("查询空间失败"))
+		return
+	}
+	if sp == nil {
+		c.ResponseError(errors.New("空间不存在"))
+		return
+	}
+	if sp.Status == SpaceStatusDisbanded {
+		c.ResponseError(errors.New("空间已解散，无法添加成员"))
+		return
+	}
+	var req addMemberReq
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("请求参数错误"))
+		return
+	}
+	uids := normalizeUIDs(req.UIDs)
+	if len(uids) == 0 {
+		c.ResponseError(errors.New("成员列表不能为空"))
+		return
+	}
+	if len(uids) > managerMaxBatchUIDs {
+		c.ResponseError(fmt.Errorf("单次最多处理 %d 个成员", managerMaxBatchUIDs))
+		return
+	}
+	if err := m.managerDB.upsertMembers(spaceId, uids); err != nil {
+		m.Error("添加成员失败", zap.Error(err), zap.String("spaceId", spaceId), zap.Strings("uids", uids))
+		c.ResponseError(errors.New("添加成员失败"))
+		return
+	}
+	m.Info("管理员添加空间成员", zap.String("spaceId", spaceId), zap.String("operator", c.GetLoginUID()), zap.Strings("uids", uids))
+	c.ResponseOK()
+}
+
+// removeMembers 管理员强制移除成员。
+// 禁止移除 owner——实际检查在 managerDB.removeMembersForce 的事务内用
+// SELECT ... FOR UPDATE 原子完成，避免 handler 层 check 与 update 之间的 TOCTOU。
+func (m *Manager) removeMembers(c *wkhttp.Context) {
+	if !m.requireAdmin(c) {
+		return
+	}
+	spaceId := c.Param("space_id")
+	if spaceId == "" {
+		c.ResponseError(errors.New("空间ID不能为空"))
+		return
+	}
+	sp, err := m.managerDB.querySpaceIncludeDisbanded(spaceId)
+	if err != nil {
+		m.Error("查询空间失败", zap.Error(err), zap.String("spaceId", spaceId))
+		c.ResponseError(errors.New("查询空间失败"))
+		return
+	}
+	if sp == nil {
+		c.ResponseError(errors.New("空间不存在"))
+		return
+	}
+	var req removeMemberReq
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("请求参数错误"))
+		return
+	}
+	uids := normalizeUIDs(req.UIDs)
+	if len(uids) == 0 {
+		c.ResponseError(errors.New("成员列表不能为空"))
+		return
+	}
+	if len(uids) > managerMaxBatchUIDs {
+		c.ResponseError(fmt.Errorf("单次最多处理 %d 个成员", managerMaxBatchUIDs))
+		return
+	}
+	if err := m.managerDB.removeMembersForce(spaceId, uids); err != nil {
+		if errors.Is(err, ErrCannotRemoveOwner) {
+			c.ResponseError(errors.New("无法移除拥有者，请先通过修改角色转让所有权"))
+			return
+		}
+		m.Error("移除成员失败", zap.Error(err), zap.String("spaceId", spaceId), zap.Strings("uids", uids))
+		c.ResponseError(errors.New("移除成员失败"))
+		return
+	}
+	m.Info("管理员移除空间成员", zap.String("spaceId", spaceId), zap.String("operator", c.GetLoginUID()), zap.Strings("uids", uids))
+	c.ResponseOK()
+}
+
+// normalizeUIDs 去重 + 过滤空字符串，保持输入顺序。
+func normalizeUIDs(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
+// updateMemberRole 修改成员角色；role=2 时自动把当前 owner 降级为 admin。
+func (m *Manager) updateMemberRole(c *wkhttp.Context) {
+	if !m.requireAdmin(c) {
+		return
+	}
+	spaceId := c.Param("space_id")
+	targetUID := c.Param("uid")
+	if spaceId == "" || targetUID == "" {
+		c.ResponseError(errors.New("空间ID或成员UID不能为空"))
+		return
+	}
+	var req updateMemberRoleReq
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("请求参数错误"))
+		return
+	}
+	if req.Role < 0 || req.Role > 2 {
+		c.ResponseError(errors.New("无效的角色值"))
+		return
+	}
+	target, err := m.db.queryMember(spaceId, targetUID)
+	if err != nil {
+		m.Error("查询目标成员失败", zap.Error(err), zap.String("spaceId", spaceId), zap.String("uid", targetUID))
+		c.ResponseError(errors.New("查询目标成员失败"))
+		return
+	}
+	if target == nil {
+		c.ResponseError(errors.New("目标成员不存在或已被移除"))
+		return
+	}
+	// 禁止把 owner 直接降级（否则空间无主）；必须通过设置其他成员为 role=2 触发 transferOwnerAdmin 来转移。
+	if target.Role == 2 && req.Role != 2 {
+		c.ResponseError(errors.New("无法直接降级拥有者，请将其他成员设为拥有者以转让所有权"))
+		return
+	}
+	if req.Role == 2 {
+		if err = m.managerDB.transferOwnerAdmin(spaceId, targetUID); err != nil {
+			if errors.Is(err, ErrTransferTargetMissing) {
+				c.ResponseError(errors.New("目标成员已被移除，无法转让所有权"))
+				return
+			}
+			m.Error("转让拥有权失败", zap.Error(err), zap.String("spaceId", spaceId), zap.String("uid", targetUID))
+			c.ResponseError(errors.New("转让拥有权失败"))
+			return
+		}
+	} else {
+		if err = m.db.updateMemberRole(spaceId, targetUID, req.Role); err != nil {
+			m.Error("修改角色失败", zap.Error(err), zap.String("spaceId", spaceId), zap.String("uid", targetUID))
+			c.ResponseError(errors.New("修改角色失败"))
+			return
+		}
+	}
+	m.Info("管理员修改成员角色", zap.String("spaceId", spaceId), zap.String("uid", targetUID), zap.Int("role", req.Role), zap.String("operator", c.GetLoginUID()))
+	c.ResponseOK()
+}
+
+// managerInviteResp 管理后台邀请响应
+type managerInviteResp struct {
+	InviteCode string `json:"invite_code"`
+	SpaceId    string `json:"space_id"`
+	Creator    string `json:"creator"`
+	MaxUses    int    `json:"max_uses"`
+	UsedCount  int    `json:"used_count"`
+	ExpiresAt  string `json:"expires_at"`
+	Status     int    `json:"status"`
+	CreatedAt  string `json:"created_at"`
+}
+
+// listInvites 查询空间全部邀请码（含已禁用）
+func (m *Manager) listInvites(c *wkhttp.Context) {
+	if !m.requireAdmin(c) {
+		return
+	}
+	spaceId := c.Param("space_id")
+	if spaceId == "" {
+		c.ResponseError(errors.New("空间ID不能为空"))
+		return
+	}
+	pageIndex, pageSize := clampPage(c.GetPage())
+	list, err := m.managerDB.queryInvitesAdmin(spaceId, uint64(pageSize), uint64(pageIndex))
+	if err != nil {
+		m.Error("查询邀请码失败", zap.Error(err), zap.String("spaceId", spaceId))
+		c.ResponseError(errors.New("查询邀请码失败"))
+		return
+	}
+	count, err := m.managerDB.countInvitesAdmin(spaceId)
+	if err != nil {
+		m.Error("查询邀请码总数失败", zap.Error(err), zap.String("spaceId", spaceId))
+		c.ResponseError(errors.New("查询邀请码总数失败"))
+		return
+	}
+	resp := make([]*managerInviteResp, 0, len(list))
+	for _, inv := range list {
+		expiresAt := ""
+		if inv.ExpiresAt != nil {
+			expiresAt = inv.ExpiresAt.String()
+		}
+		resp = append(resp, &managerInviteResp{
+			InviteCode: inv.InviteCode,
+			SpaceId:    inv.SpaceId,
+			Creator:    inv.Creator,
+			MaxUses:    inv.MaxUses,
+			UsedCount:  inv.UsedCount,
+			ExpiresAt:  expiresAt,
+			Status:     inv.Status,
+			CreatedAt:  inv.CreatedAt.String(),
+		})
+	}
+	c.Response(map[string]interface{}{
+		"count": count,
+		"list":  resp,
+	})
+}
+
+// disableInvite 禁用邀请码
+func (m *Manager) disableInvite(c *wkhttp.Context) {
+	if !m.requireAdmin(c) {
+		return
+	}
+	spaceId := c.Param("space_id")
+	code := c.Param("code")
+	if spaceId == "" || code == "" {
+		c.ResponseError(errors.New("空间ID或邀请码不能为空"))
+		return
+	}
+	affected, err := m.managerDB.disableInvitation(spaceId, code)
+	if err != nil {
+		m.Error("禁用邀请码失败", zap.Error(err), zap.String("code", code))
+		c.ResponseError(errors.New("禁用邀请码失败"))
+		return
+	}
+	if affected == 0 {
+		c.ResponseError(errors.New("邀请码不存在"))
+		return
+	}
+	m.Info("管理员禁用邀请码", zap.String("spaceId", spaceId), zap.String("code", code), zap.String("operator", c.GetLoginUID()))
+	c.ResponseOK()
+}
+
+// managerJoinApplyResp 管理后台申请响应
+type managerJoinApplyResp struct {
+	ID            int64  `json:"id"`
+	SpaceId       string `json:"space_id"`
+	UID           string `json:"uid"`
+	ApplicantName string `json:"applicant_name"`
+	InviteCode    string `json:"invite_code"`
+	Remark        string `json:"remark"`
+	Status        int    `json:"status"`
+	ReviewerUID   string `json:"reviewer_uid"`
+	CreatedAt     string `json:"created_at"`
+}
+
+// listJoinApplies 查询申请列表。query 支持 status 过滤（不传则返回全部）
+func (m *Manager) listJoinApplies(c *wkhttp.Context) {
+	if !m.requireAdmin(c) {
+		return
+	}
+	spaceId := c.Param("space_id")
+	if spaceId == "" {
+		c.ResponseError(errors.New("空间ID不能为空"))
+		return
+	}
+	status := -1
+	if s := c.Query("status"); s != "" {
+		if v, err := strconv.Atoi(s); err == nil && v >= 0 && v <= 2 {
+			status = v
+		}
+	}
+	pageIndex, pageSize := clampPage(c.GetPage())
+
+	list, err := m.managerDB.queryJoinAppliesAdmin(spaceId, status, uint64(pageSize), uint64(pageIndex))
+	if err != nil {
+		m.Error("查询申请列表失败", zap.Error(err), zap.String("spaceId", spaceId))
+		c.ResponseError(errors.New("查询申请列表失败"))
+		return
+	}
+	count, err := m.managerDB.countJoinAppliesAdmin(spaceId, status)
+	if err != nil {
+		m.Error("查询申请总数失败", zap.Error(err), zap.String("spaceId", spaceId))
+		c.ResponseError(errors.New("查询申请总数失败"))
+		return
+	}
+	resp := make([]*managerJoinApplyResp, 0, len(list))
+	for _, a := range list {
+		name := a.ApplicantName
+		if name == "" {
+			name = a.UID
+		}
+		resp = append(resp, &managerJoinApplyResp{
+			ID:            a.Id,
+			SpaceId:       a.SpaceId,
+			UID:           a.UID,
+			ApplicantName: name,
+			InviteCode:    a.InviteCode,
+			Remark:        a.Remark,
+			Status:        a.Status,
+			ReviewerUID:   a.ReviewerUID,
+			CreatedAt:     a.CreatedAt.String(),
+		})
+	}
+	c.Response(map[string]interface{}{
+		"count": count,
+		"list":  resp,
+	})
+}
+
+// approveJoinApply 管理员审批通过：复用 Space.executeJoinSpace 的加入逻辑。
+func (m *Manager) approveJoinApply(c *wkhttp.Context) {
+	if !m.requireAdmin(c) {
+		return
+	}
+	spaceId := c.Param("space_id")
+	applyIDStr := c.Param("id")
+	reviewerUID := c.GetLoginUID()
+
+	applyID, err := strconv.ParseInt(applyIDStr, 10, 64)
+	if err != nil || applyID <= 0 {
+		c.ResponseError(errors.New("申请ID无效"))
+		return
+	}
+	apply, err := m.db.queryJoinApplyByID(applyID)
+	if err != nil {
+		m.Error("查询申请记录失败", zap.Error(err), zap.Int64("applyID", applyID))
+		c.ResponseError(errors.New("查询申请记录失败"))
+		return
+	}
+	if apply == nil {
+		c.ResponseError(errors.New("申请记录不存在"))
+		return
+	}
+	if apply.SpaceId != spaceId {
+		c.ResponseError(errors.New("申请记录不属于当前空间"))
+		return
+	}
+	if apply.Status != 0 {
+		c.ResponseError(errors.New("该申请已被处理"))
+		return
+	}
+	sp, err := m.db.querySpaceByID(spaceId)
+	if err != nil {
+		m.Error("查询空间失败", zap.Error(err), zap.String("spaceId", spaceId))
+		c.ResponseError(errors.New("查询空间失败"))
+		return
+	}
+	if sp == nil {
+		c.ResponseError(errors.New("空间不存在或已解散"))
+		return
+	}
+	affected, err := m.db.updateJoinApplyStatus(applyID, 1, reviewerUID)
+	if err != nil {
+		m.Error("更新申请状态失败", zap.Error(err), zap.Int64("applyID", applyID))
+		c.ResponseError(errors.New("更新申请状态失败"))
+		return
+	}
+	if affected == 0 {
+		c.ResponseOK() // 已被其他人处理
+		return
+	}
+	if joinErr := m.space.executeJoinSpace(apply.UID, spaceId, sp); joinErr != nil {
+		// ErrAlreadyMember 说明用户已经在空间里（例如业务侧并发通过了同一申请）——视作审批成功，不回滚状态
+		if errors.Is(joinErr, ErrAlreadyMember) {
+			c.ResponseOK()
+			return
+		}
+		if _, rbErr := m.db.updateJoinApplyStatusRaw(applyID, 0, ""); rbErr != nil {
+			m.Error("回滚申请状态失败", zap.Error(rbErr), zap.Int64("applyID", applyID))
+		}
+		if errors.Is(joinErr, ErrSpaceFull) {
+			c.ResponseError(errors.New("空间已满，无法通过申请"))
+			return
+		}
+		m.Error("加入空间失败", zap.Error(joinErr), zap.Int64("applyID", applyID))
+		c.ResponseError(errors.New("加入空间失败"))
+		return
+	}
+	go m.space.notifyApplicantJoinResult(apply.UID, spaceId, sp.Name, true)
+	m.Info("管理员通过加入申请", zap.String("spaceId", spaceId), zap.Int64("applyID", applyID), zap.String("applicant", apply.UID), zap.String("operator", reviewerUID))
+	c.ResponseOK()
+}
+
+// rejectJoinApply 管理员审批拒绝
+func (m *Manager) rejectJoinApply(c *wkhttp.Context) {
+	if !m.requireAdmin(c) {
+		return
+	}
+	spaceId := c.Param("space_id")
+	applyIDStr := c.Param("id")
+	reviewerUID := c.GetLoginUID()
+
+	applyID, err := strconv.ParseInt(applyIDStr, 10, 64)
+	if err != nil || applyID <= 0 {
+		c.ResponseError(errors.New("申请ID无效"))
+		return
+	}
+	apply, err := m.db.queryJoinApplyByID(applyID)
+	if err != nil {
+		m.Error("查询申请记录失败", zap.Error(err), zap.Int64("applyID", applyID))
+		c.ResponseError(errors.New("查询申请记录失败"))
+		return
+	}
+	if apply == nil {
+		c.ResponseError(errors.New("申请记录不存在"))
+		return
+	}
+	if apply.SpaceId != spaceId {
+		c.ResponseError(errors.New("申请记录不属于当前空间"))
+		return
+	}
+	if apply.Status != 0 {
+		c.ResponseError(errors.New("该申请已被处理"))
+		return
+	}
+	if _, err = m.db.updateJoinApplyStatus(applyID, 2, reviewerUID); err != nil {
+		m.Error("更新申请状态失败", zap.Error(err), zap.Int64("applyID", applyID))
+		c.ResponseError(errors.New("更新申请状态失败"))
+		return
+	}
+	sp, spErr := m.db.querySpaceByID(spaceId)
+	if spErr != nil {
+		m.Warn("查询空间失败", zap.Error(spErr), zap.String("spaceId", spaceId))
+	}
+	spaceName := spaceId
+	if sp != nil {
+		spaceName = sp.Name
+	}
+	go m.space.notifyApplicantJoinResult(apply.UID, spaceId, spaceName, false)
+	m.Info("管理员拒绝加入申请", zap.String("spaceId", spaceId), zap.Int64("applyID", applyID), zap.String("applicant", apply.UID), zap.String("operator", reviewerUID))
+	c.ResponseOK()
+}
