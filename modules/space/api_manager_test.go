@@ -792,3 +792,208 @@ func TestManager_RemoveMembersOnNonExistentSpace(t *testing.T) {
 	assert.NotEqual(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "不存在")
 }
+
+// ==================== P2: 管理端代建 ====================
+
+// seedUser 向 user 表写入一条记录，满足代建时的 creator_uid 存在性检查。
+func seedUser(t *testing.T, uid, name string) {
+	t.Helper()
+	_, err := testCtx.DB().InsertBySql(
+		"INSERT IGNORE INTO `user` (uid, name) VALUES (?, ?)", uid, name,
+	).Exec()
+	assert.NoError(t, err)
+}
+
+func TestManager_CreateSpace_Success(t *testing.T) {
+	s, _, err := setup(t)
+	assert.NoError(t, err)
+	token := adminToken(t)
+
+	seedUser(t, "u-target-p2", "Target User")
+
+	// 开启用户侧开关：管理端代建应绕过
+	t.Setenv(envDisableUserCreateSpace, "true")
+
+	body := util.ToJson(map[string]interface{}{
+		"creator_uid": "u-target-p2",
+		"name":        "admin-created",
+		"description": "代建测试",
+		"join_mode":   1,
+		"max_users":   50,
+	})
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/manager/spaces", bytes.NewReader([]byte(body)))
+	req.Header.Set("token", token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+
+	var resp struct {
+		SpaceID    string `json:"space_id"`
+		CreatorUID string `json:"creator_uid"`
+		Name       string `json:"name"`
+		InviteCode string `json:"invite_code"`
+	}
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.NotEmpty(t, resp.SpaceID)
+	assert.Equal(t, "u-target-p2", resp.CreatorUID)
+	assert.Equal(t, "admin-created", resp.Name)
+	assert.NotEmpty(t, resp.InviteCode)
+
+	// 目标用户被写为 owner
+	mem, err := testSpaceDB.queryMember(resp.SpaceID, "u-target-p2")
+	assert.NoError(t, err)
+	assert.NotNil(t, mem)
+	assert.Equal(t, 2, mem.Role)
+
+	// space.creator 是目标用户，join_mode / max_users 正确落库
+	var sp SpaceModel
+	_, err = testCtx.DB().Select("*").From("space").Where("space_id=?", resp.SpaceID).Load(&sp)
+	assert.NoError(t, err)
+	assert.Equal(t, "u-target-p2", sp.Creator)
+	assert.Equal(t, 1, sp.JoinMode)
+	assert.Equal(t, 50, sp.MaxUsers)
+}
+
+func TestManager_CreateSpace_RetrievableViaDetail(t *testing.T) {
+	s, _, err := setup(t)
+	assert.NoError(t, err)
+	token := adminToken(t)
+	seedUser(t, "u-t-2", "Target 2")
+
+	body := util.ToJson(map[string]interface{}{
+		"creator_uid": "u-t-2",
+		"name":        "detail-check",
+	})
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/manager/spaces", bytes.NewReader([]byte(body)))
+	req.Header.Set("token", token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	var created struct {
+		SpaceID string `json:"space_id"`
+	}
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &created))
+
+	// 用 manager detail 端点读回
+	w2 := httptest.NewRecorder()
+	req2, _ := http.NewRequest("GET", "/v1/manager/spaces/"+created.SpaceID, nil)
+	req2.Header.Set("token", token)
+	s.GetRoute().ServeHTTP(w2, req2)
+	assert.Equal(t, http.StatusOK, w2.Code)
+	body2 := w2.Body.String()
+	assert.Contains(t, body2, `"name":"detail-check"`)
+	assert.Contains(t, body2, `"creator":"u-t-2"`)
+	assert.Contains(t, body2, `"member_count":2`) // owner + botfather
+	assert.Contains(t, body2, `"status":1`)
+}
+
+func TestManager_CreateSpace_NonAdminRejected(t *testing.T) {
+	s, _, err := setup(t)
+	assert.NoError(t, err)
+
+	// 用普通用户 token（testutil.Token 不是 admin 角色）
+	body := util.ToJson(map[string]interface{}{
+		"creator_uid": "anyone",
+		"name":        "x",
+	})
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/manager/spaces", bytes.NewReader([]byte(body)))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.NotEqual(t, http.StatusOK, w.Code)
+}
+
+func TestManager_CreateSpace_ValidationErrors(t *testing.T) {
+	s, _, err := setup(t)
+	assert.NoError(t, err)
+	token := adminToken(t)
+
+	seedUser(t, "u-ok", "Ok")
+
+	cases := []struct {
+		name string
+		body map[string]interface{}
+		msg  string
+	}{
+		{
+			"missing creator_uid",
+			map[string]interface{}{"name": "n"},
+			"creator_uid",
+		},
+		{
+			"missing name",
+			map[string]interface{}{"creator_uid": "u-ok"},
+			"名称",
+		},
+		{
+			"invalid join_mode",
+			map[string]interface{}{"creator_uid": "u-ok", "name": "n", "join_mode": 9},
+			"加入模式",
+		},
+		{
+			"negative max_users",
+			map[string]interface{}{"creator_uid": "u-ok", "name": "n", "max_users": -1},
+			"max_users",
+		},
+		{
+			"creator not exists",
+			map[string]interface{}{"creator_uid": "ghost", "name": "n"},
+			"用户不存在",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := util.ToJson(tc.body)
+			w := httptest.NewRecorder()
+			req, _ := http.NewRequest("POST", "/v1/manager/spaces", bytes.NewReader([]byte(body)))
+			req.Header.Set("token", token)
+			s.GetRoute().ServeHTTP(w, req)
+			assert.NotEqual(t, http.StatusOK, w.Code)
+			assert.Contains(t, w.Body.String(), tc.msg)
+		})
+	}
+}
+
+// ==================== P2: LIKE 通配符转义 ====================
+
+func TestEscapeLike(t *testing.T) {
+	cases := map[string]string{
+		"":              "",
+		"foo":           "foo",
+		"foo_bar":       `foo\_bar`,
+		"100%":          `100\%`,
+		`a\b`:           `a\\b`,
+		`mix_%\tricky`:  `mix\_\%\\tricky`,
+	}
+	for in, want := range cases {
+		assert.Equal(t, want, escapeLike(in), "in=%q", in)
+	}
+}
+
+func TestManager_ListKeywordLikeEscape(t *testing.T) {
+	s, _, err := setup(t)
+	assert.NoError(t, err)
+	token := adminToken(t)
+
+	// 两条空间：foo_bar 字面匹配，foobar 仅在通配符未转义时被误匹配
+	seedSpace(t, "s-foobar", "foobar", "u-o1", SpaceStatusNormal)
+	seedSpace(t, "s-foo_bar", "foo_bar", "u-o2", SpaceStatusNormal)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/manager/spaces?keyword=foo_bar", nil)
+	req.Header.Set("token", token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp struct {
+		Count int64 `json:"count"`
+		List  []struct {
+			Name string `json:"name"`
+		} `json:"list"`
+	}
+	assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.EqualValues(t, 1, resp.Count, "foo_bar 关键字不应匹配 foobar（_ 被转义）")
+	if len(resp.List) == 1 {
+		assert.Equal(t, "foo_bar", resp.List[0].Name)
+	}
+}

@@ -11,13 +11,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// Space 状态常量
-const (
-	SpaceStatusDisbanded = 0
-	SpaceStatusNormal    = 1
-	SpaceStatusBanned    = 2
-)
-
 // 管理端分页上限，防止恶意/误操作的大页请求把全表拉出来。
 const managerMaxPageSize = 200
 
@@ -71,8 +64,9 @@ func (m *Manager) Route(r *wkhttp.WKHttp) {
 	auth := r.Group("/v1/manager", m.ctx.AuthMiddleware(r))
 	{
 		// 空间集合
-		auth.GET("/spaces", m.list)                     // 活跃空间列表
-		auth.GET("/spaces/disabled", m.disableList)     // 已解散 / 已封禁空间列表
+		auth.GET("/spaces", m.list)                 // 活跃空间列表
+		auth.POST("/spaces", m.create)              // 管理端代建空间
+		auth.GET("/spaces/disabled", m.disableList) // 已解散 / 已封禁空间列表
 
 		// 空间单体
 		auth.GET("/spaces/:space_id", m.detail)                      // 空间详情
@@ -182,6 +176,84 @@ func (m *Manager) listByStatuses(c *wkhttp.Context, statuses []int) {
 // list 活跃空间列表
 func (m *Manager) list(c *wkhttp.Context) {
 	m.listByStatuses(c, []int{SpaceStatusNormal})
+}
+
+// managerCreateSpaceReq 管理端代建空间请求体
+type managerCreateSpaceReq struct {
+	CreatorUID     string  `json:"creator_uid"`
+	Name           string  `json:"name"`
+	Description    string  `json:"description"`
+	Logo           string  `json:"logo"`
+	JoinMode       int     `json:"join_mode"`
+	MaxUsers       int     `json:"max_users"`
+	PresetGroupIds *string `json:"preset_group_ids"`
+}
+
+// create 管理端代建空间：creator 记为目标用户，正常触发 IM 事件/预设群组，
+// 绕过 DM_SPACE_DISABLE_USER_CREATE 全局开关。
+func (m *Manager) create(c *wkhttp.Context) {
+	if !m.requireAdmin(c) {
+		return
+	}
+	var req managerCreateSpaceReq
+	if err := c.BindJSON(&req); err != nil {
+		c.ResponseError(errors.New("请求参数错误"))
+		return
+	}
+	if req.CreatorUID == "" {
+		c.ResponseError(errors.New("creator_uid 不能为空"))
+		return
+	}
+	if req.Name == "" {
+		c.ResponseError(errors.New("空间名称不能为空"))
+		return
+	}
+	if req.JoinMode < JoinModeDirect || req.JoinMode > JoinModeApproval {
+		c.ResponseError(errors.New("无效的加入模式，仅支持 0(直接加入) 或 1(需要审批)"))
+		return
+	}
+	if req.MaxUsers < 0 {
+		c.ResponseError(errors.New("max_users 不能为负"))
+		return
+	}
+	exists, err := m.managerDB.isUserExists(req.CreatorUID)
+	if err != nil {
+		m.Error("校验用户失败", zap.Error(err), zap.String("creator_uid", req.CreatorUID))
+		c.ResponseError(errors.New("校验用户失败"))
+		return
+	}
+	if !exists {
+		c.ResponseError(errors.New("目标用户不存在"))
+		return
+	}
+	result, err := m.space.createSpaceCore(createSpaceParams{
+		Creator:        req.CreatorUID,
+		Name:           req.Name,
+		Description:    req.Description,
+		Logo:           req.Logo,
+		JoinMode:       req.JoinMode,
+		MaxUsers:       req.MaxUsers,
+		PresetGroupIds: req.PresetGroupIds,
+	})
+	if err != nil {
+		m.Error("管理端代建空间失败", zap.Error(err), zap.String("creator_uid", req.CreatorUID), zap.String("operator", c.GetLoginUID()))
+		c.ResponseError(errors.New("创建空间失败"))
+		return
+	}
+	m.Info("管理员代建空间",
+		zap.String("spaceId", result.SpaceID),
+		zap.String("creator_uid", req.CreatorUID),
+		zap.String("operator", c.GetLoginUID()),
+	)
+	resp := map[string]interface{}{
+		"space_id":    result.SpaceID,
+		"creator_uid": req.CreatorUID,
+		"name":        req.Name,
+	}
+	if result.InviteCode != "" {
+		resp["invite_code"] = result.InviteCode
+	}
+	c.Response(resp)
 }
 
 // disableList 已解散 + 已封禁空间列表

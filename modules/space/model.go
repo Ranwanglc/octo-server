@@ -9,6 +9,13 @@ const (
 	JoinModeApproval = 1 // 需要审批
 )
 
+// Space 状态常量（SpaceModel.Status）
+const (
+	SpaceStatusDisbanded = 0 // 已解散
+	SpaceStatusNormal    = 1 // 正常
+	SpaceStatusBanned    = 2 // 已封禁
+)
+
 // SpaceModel 空间表模型
 type SpaceModel struct {
 	SpaceId        string // 空间ID

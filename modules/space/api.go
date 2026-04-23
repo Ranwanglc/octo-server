@@ -90,8 +90,47 @@ func (s *Space) Route(r *wkhttp.WKHttp) {
 	}
 }
 
-// createSpace 创建空间
+// envDisableUserCreateSpace 全局开关：运维通过环境变量 DM_SPACE_DISABLE_USER_CREATE=true
+// 关闭用户侧创建空间入口（POST /v1/space/create）。管理端代建接口不受此开关约束。
+const envDisableUserCreateSpace = "DM_SPACE_DISABLE_USER_CREATE"
+
+// IsUserCreateDisabled 是否已通过环境变量关闭用户侧创建空间。
+func IsUserCreateDisabled() bool {
+	v := strings.TrimSpace(os.Getenv(envDisableUserCreateSpace))
+	if v == "" {
+		return false
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// createSpaceParams 创建空间的核心参数。Creator 为目标空间 owner，
+// 管理端代建时设为被代建用户，业务端为登录用户。
+type createSpaceParams struct {
+	Creator        string
+	Name           string
+	Description    string
+	Logo           string
+	JoinMode       int
+	MaxUsers       int
+	PresetGroupIds *string
+}
+
+// createSpaceResult 创建空间的结果。InviteCode 为空代表邀请码创建失败（不致命）。
+type createSpaceResult struct {
+	SpaceID    string
+	InviteCode string
+}
+
+// createSpace 创建空间（用户侧入口）
 func (s *Space) createSpace(c *wkhttp.Context) {
+	if IsUserCreateDisabled() {
+		c.ResponseErrorWithStatus(errors.New("管理员已关闭空间创建功能"), http.StatusForbidden)
+		return
+	}
 	loginUID := c.GetLoginUID()
 	var req createSpaceReq
 	if err := c.BindJSON(&req); err != nil {
@@ -107,64 +146,83 @@ func (s *Space) createSpace(c *wkhttp.Context) {
 		return
 	}
 
-	spaceId := util.GenerUUID()
-	inviteCode := util.GenerUUID()[:8]
-
-	tx, err := s.ctx.DB().Begin()
-	if err != nil {
-		c.ResponseError(errors.New("开启事务失败"))
-		return
-	}
-	defer tx.RollbackUnlessCommitted()
-
-	err = s.db.insertSpace(&SpaceModel{
-		SpaceId:     spaceId,
+	result, err := s.createSpaceCore(createSpaceParams{
+		Creator:     loginUID,
 		Name:        req.Name,
 		Description: req.Description,
 		Logo:        req.Logo,
-		Creator:     loginUID,
 		JoinMode:    req.JoinMode,
-		Status:      1,
-	}, tx)
+	})
 	if err != nil {
+		s.Error("创建空间失败", zap.Error(err), zap.String("loginUID", loginUID))
 		c.ResponseError(errors.New("创建空间失败"))
 		return
 	}
 
-	err = s.db.insertMember(&MemberModel{
-		SpaceId: spaceId,
-		UID:     loginUID,
-		Role:    2, // owner
-		Status:  1,
-	}, tx)
-	if err != nil {
-		c.ResponseError(errors.New("添加空间成员失败"))
-		return
-	}
-
-	if err = tx.Commit(); err != nil {
-		c.ResponseError(errors.New("提交事务失败"))
-		return
-	}
-
-	// 创建默认邀请链接
 	resp := map[string]interface{}{
-		"space_id":    spaceId,
+		"space_id":    result.SpaceID,
 		"name":        req.Name,
 		"description": req.Description,
 		"logo":        req.Logo,
 		"join_mode":   req.JoinMode,
 	}
-	inviteErr := s.db.insertInvitation(&InvitationModel{
-		SpaceId:    spaceId,
-		InviteCode: inviteCode,
-		Creator:    loginUID,
-		Status:     1,
-	})
-	if inviteErr == nil {
-		resp["invite_code"] = inviteCode
+	if result.InviteCode != "" {
+		resp["invite_code"] = result.InviteCode
 	}
 	c.Response(resp)
+}
+
+// createSpaceCore 创建空间事务核心（供用户侧与管理端代建复用）。
+//
+// 事务内写 space + owner 成员；事务外建邀请码、BotFather 入驻、刷新 ParseChannelID 缓存、
+// 触发 SpaceMemberJoin 事件。与原先 createSpace 行为保持一致。
+func (s *Space) createSpaceCore(p createSpaceParams) (*createSpaceResult, error) {
+	spaceId := util.GenerUUID()
+	inviteCode := util.GenerUUID()[:8]
+
+	tx, err := s.ctx.DB().Begin()
+	if err != nil {
+		return nil, fmt.Errorf("开启事务失败: %w", err)
+	}
+	defer tx.RollbackUnlessCommitted()
+
+	model := &SpaceModel{
+		SpaceId:        spaceId,
+		Name:           p.Name,
+		Description:    p.Description,
+		Logo:           p.Logo,
+		Creator:        p.Creator,
+		JoinMode:       p.JoinMode,
+		MaxUsers:       p.MaxUsers,
+		PresetGroupIds: p.PresetGroupIds,
+		Status:         SpaceStatusNormal,
+	}
+	if err = s.db.insertSpace(model, tx); err != nil {
+		return nil, fmt.Errorf("创建空间失败: %w", err)
+	}
+	if err = s.db.insertMember(&MemberModel{
+		SpaceId: spaceId,
+		UID:     p.Creator,
+		Role:    2, // owner
+		Status:  1,
+	}, tx); err != nil {
+		return nil, fmt.Errorf("添加空间成员失败: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, fmt.Errorf("提交事务失败: %w", err)
+	}
+
+	result := &createSpaceResult{SpaceID: spaceId}
+	if inviteErr := s.db.insertInvitation(&InvitationModel{
+		SpaceId:    spaceId,
+		InviteCode: inviteCode,
+		Creator:    p.Creator,
+		Status:     1,
+	}); inviteErr == nil {
+		result.InviteCode = inviteCode
+	} else {
+		s.Warn("创建默认邀请码失败", zap.Error(inviteErr), zap.String("spaceId", spaceId))
+	}
 
 	// BotFather 自动加入新 Space
 	_ = s.db.insertMemberIgnore(&MemberModel{
@@ -178,7 +236,9 @@ func (s *Space) createSpace(c *wkhttp.Context) {
 	go s.loadKnownSpaceIDs()
 
 	// 触发 SpaceMemberJoin 事件（创建者）
-	go s.fireSpaceMemberJoinEvent(loginUID, spaceId)
+	go s.fireSpaceMemberJoinEvent(p.Creator, spaceId)
+
+	return result, nil
 }
 
 // getSpace 获取空间详情

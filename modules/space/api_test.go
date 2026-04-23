@@ -1440,3 +1440,89 @@ func TestJoinApproveDetail_AfterApproval_ShowsReviewer(t *testing.T) {
 	assert.Equal(t, reviewerUID, resp["reviewer_uid"], "应返回审批人UID")
 	assert.Equal(t, reviewerName, resp["reviewer_name"], "应返回审批人名称")
 }
+
+// ==================== P2: 全局开关测试 ====================
+
+// TestIsUserCreateDisabled_Parsing 覆盖 env 解析分支
+func TestIsUserCreateDisabled_Parsing(t *testing.T) {
+	cases := []struct {
+		val  string
+		want bool
+	}{
+		{"", false},
+		{"0", false},
+		{"false", false},
+		{"FALSE", false},
+		{"no", false},
+		{"random", false},
+		{"1", true},
+		{"true", true},
+		{"TRUE", true},
+		{"yes", true},
+		{"ON", true},
+		{" true ", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.val, func(t *testing.T) {
+			t.Setenv(envDisableUserCreateSpace, tc.val)
+			assert.Equal(t, tc.want, IsUserCreateDisabled())
+		})
+	}
+}
+
+func TestCreateSpace_AllowedByDefault(t *testing.T) {
+	s, _, err := setup(t)
+	assert.NoError(t, err)
+
+	// 确保开关关闭（默认）
+	t.Setenv(envDisableUserCreateSpace, "")
+
+	body := util.ToJson(map[string]interface{}{
+		"name":      "p2-normal",
+		"join_mode": 0,
+	})
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/space/create", bytes.NewReader([]byte(body)))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Contains(t, w.Body.String(), `"name":"p2-normal"`)
+
+	var resp map[string]interface{}
+	err = json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.NoError(t, err)
+	spaceID, _ := resp["space_id"].(string)
+	assert.NotEmpty(t, spaceID, "space_id 应返回")
+
+	// owner 成员已写入
+	mem, err := testSpaceDB.queryMember(spaceID, testutil.UID)
+	assert.NoError(t, err)
+	assert.NotNil(t, mem)
+	assert.Equal(t, 2, mem.Role)
+}
+
+func TestCreateSpace_DisabledByEnv(t *testing.T) {
+	s, _, err := setup(t)
+	assert.NoError(t, err)
+
+	t.Setenv(envDisableUserCreateSpace, "true")
+
+	body := util.ToJson(map[string]interface{}{
+		"name":      "p2-blocked",
+		"join_mode": 0,
+	})
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/space/create", bytes.NewReader([]byte(body)))
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code, "应返回 403")
+	assert.Contains(t, w.Body.String(), "已关闭")
+
+	// 不应有新空间入库：按 name 反查
+	var count int
+	_, err = testCtx.DB().SelectBySql("SELECT COUNT(*) FROM space WHERE name=?", "p2-blocked").Load(&count)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, count, "开关开启时不应写入任何 space 记录")
+}
