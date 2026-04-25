@@ -2457,10 +2457,12 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 			g.Error("查询外部成员数量失败", zap.Error(countErr))
 		} else if externalCount == 0 {
 			if updateErr := g.db.UpdateIsExternalGroupTx(groupNo, 0, tx); updateErr != nil {
+				tx.Rollback()
 				g.Error("更新 is_external_group 失败", zap.Error(updateErr))
-			} else {
-				resetExternalGroup = true
+				c.ResponseError(errors.New("更新 is_external_group 失败"))
+				return
 			}
+			resetExternalGroup = true
 		}
 	}
 

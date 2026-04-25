@@ -192,12 +192,14 @@ func (d *DB) UpdateMemberTx(member *MemberModel, tx *dbr.Tx) error {
 // recoverMemberTx 恢复成员信息
 func (d *DB) recoverMemberTx(member *MemberModel, tx *dbr.Tx) error {
 	_, err := tx.Update("group_member").SetMap(map[string]interface{}{
-		"remark":     member.Remark,
-		"role":       member.Role,
-		"version":    member.Version,
-		"is_deleted": 0,
-		"invite_uid": member.InviteUID,
-		"created_at": dbr.Expr("Now()"),
+		"remark":          member.Remark,
+		"role":            member.Role,
+		"version":         member.Version,
+		"is_deleted":      0,
+		"invite_uid":      member.InviteUID,
+		"is_external":     member.IsExternal,
+		"source_space_id": member.SourceSpaceID,
+		"created_at":      dbr.Expr("Now()"),
 	}).Where("group_no=? and uid=?", member.GroupNo, member.UID).Exec()
 	return err
 }

@@ -1354,9 +1354,9 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 		} else if externalCount == 0 {
 			if updateErr := s.db.UpdateIsExternalGroupTx(req.GroupNo, 0, tx); updateErr != nil {
 				s.Error("update is_external_group failed", zap.Error(updateErr))
-			} else {
-				resetExternalGroup = true
+				return nil, errors.New("failed to update is_external_group")
 			}
+			resetExternalGroup = true
 		}
 	}
 
