@@ -21,6 +21,12 @@ type StateData struct {
 	UserAgent    string    `json:"user_agent"`
 	ReturnTo     string    `json:"return_to"`
 	CreatedAt    time.Time `json:"created_at"`
+
+	// ClientAuthcode 前端在 /authorize 阶段传入的短码,callback 完成后用作 ThirdAuthcode
+	// Redis key 的后半段,前端按 GitHub 模式短码轮询取 LoginRespJSON。
+	ClientAuthcode string `json:"client_authcode,omitempty"`
+	// DeviceFlag 调用方期望的设备类型(0=APP / 1=PC / 2=Web ...),透传给 IssueSession。
+	DeviceFlag uint8 `json:"device_flag,omitempty"`
 }
 
 // StateStore 状态存储抽象,生产用 Redis,测试用内存

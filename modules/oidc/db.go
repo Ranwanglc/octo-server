@@ -133,9 +133,7 @@ func (d *DB) QueryRefreshDueForSync(limit int) ([]*RefreshModel, error) {
 
 // InsertRefresh 新增 RT
 func (d *DB) InsertRefresh(m *RefreshModel) error {
-	if _, err := d.session.InsertInto("user_oidc_refresh").
-		Columns(util.AttrToUnderscore(m)...).
-		Record(m).Exec(); err != nil {
+	if err := insertRefreshRow(d.session.InsertBySql, m); err != nil {
 		return fmt.Errorf("oidc: insert refresh: %w", err)
 	}
 	return nil
@@ -179,15 +177,61 @@ func (d *DB) RotateRefresh(oldID int64, newRT *RefreshModel) error {
 	if affected == 0 {
 		return ErrAlreadyRevoked
 	}
-	if _, err := tx.InsertInto("user_oidc_refresh").
-		Columns(util.AttrToUnderscore(newRT)...).
-		Record(newRT).Exec(); err != nil {
+	if err := insertRefreshRow(tx.InsertBySql, newRT); err != nil {
 		return fmt.Errorf("oidc: rotate refresh insert new: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("oidc: rotate refresh commit: %w", err)
 	}
 	return nil
+}
+
+// insertRefreshRow 显式列表插入。
+//
+// 不能用 util.AttrToUnderscore + Record:它跳 reflect.Struct 字段(time.Time / db.Time
+// 都中招),expires_at 没有 schema 默认值会导致 INSERT 失败。集成测试发现的真 bug。
+type insertBySql func(query string, value ...interface{}) *dbr.InsertStmt
+
+func insertRefreshRow(insert insertBySql, m *RefreshModel) error {
+	_, err := insert(`INSERT INTO user_oidc_refresh
+		(identity_id, token_hash, token_ciphertext, expires_at)
+		VALUES (?, ?, ?, ?)`,
+		m.IdentityID, m.TokenHash, m.TokenCiphertext, m.ExpiresAt,
+	).Exec()
+	return err
+}
+
+// ---------- 跨模块只读查询 ----------
+
+// QueryUIDsByEmail 按邮箱查 dmwork user 表的 uid 列表(用于自动绑定时检测多匹配冲突)。
+//
+// TODO: user.IService 后续应暴露 QueryUIDsByEmail,届时本方法迁移到 user 模块,
+// oidc 改走接口避免跨模块 SQL 耦合。
+func (d *DB) QueryUIDsByEmail(email string) ([]string, error) {
+	if email == "" {
+		return nil, nil
+	}
+	var uids []string
+	if _, err := d.session.Select("uid").From("user").
+		Where("email=? AND email<>'' AND is_destroy=0", email).
+		Load(&uids); err != nil {
+		return nil, fmt.Errorf("oidc: query users by email: %w", err)
+	}
+	return uids, nil
+}
+
+// QueryUIDsByPhone 按手机号查 dmwork user 表的 uid 列表(同 QueryUIDsByEmail)。
+func (d *DB) QueryUIDsByPhone(zone, phone string) ([]string, error) {
+	if phone == "" {
+		return nil, nil
+	}
+	var uids []string
+	if _, err := d.session.Select("uid").From("user").
+		Where("zone=? AND phone=? AND phone<>'' AND is_destroy=0", zone, phone).
+		Load(&uids); err != nil {
+		return nil, fmt.Errorf("oidc: query users by phone: %w", err)
+	}
+	return uids, nil
 }
 
 // ---------- oidc_audit_log ----------
