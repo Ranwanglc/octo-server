@@ -84,20 +84,25 @@ func (s *EmailService) SendVerifyCode(ctx context.Context, email string, codeTyp
 </div>
 <p style="color:#666;font-size:13px;">验证码 5 分钟内有效，请勿泄露给他人。</p>
 </div>`, code)
-	return s.sendEmail(email, subject, body)
+	return s.sendEmail(ctx, email, subject, body)
 }
 
 // SendHTMLEmail 直接发送一封 HTML 邮件。subject/body 由调用方负责，本方法
 // 不写 Redis、不限速；速率控制由调用方根据业务场景自行处理。
-func (s *EmailService) SendHTMLEmail(_ context.Context, to, subject, htmlBody string) error {
+//
+// ctx 的 deadline 会传递到 SMTP 层（dial / 投递阶段）；调用方设的 ctx 比
+// SMTP 默认超时（dial 15s + IO 60s）更紧时，会真正生效。
+func (s *EmailService) SendHTMLEmail(ctx context.Context, to, subject, htmlBody string) error {
 	if to == "" {
 		return errors.New("收件人不能为空")
 	}
-	return s.sendEmail(to, subject, htmlBody)
+	return s.sendEmail(ctx, to, subject, htmlBody)
 }
 
-// sendEmail 通过SMTP发送邮件（支持SSL端口465和STARTTLS端口587）
-func (s *EmailService) sendEmail(to, subject, body string) error {
+// sendEmail 通过SMTP发送邮件（支持SSL端口465和STARTTLS端口587）。
+// ctx 的 deadline 会被注入到 dial 和 conn.SetDeadline；ctx 无 deadline 时
+// 退化到 smtpDialTimeout / smtpIOTimeout 默认值。
+func (s *EmailService) sendEmail(ctx context.Context, to, subject, body string) error {
 	cfg := s.ctx.GetConfig()
 	smtpAddr := cfg.Support.EmailSmtp
 	from := cfg.Support.Email
@@ -133,79 +138,73 @@ func (s *EmailService) sendEmail(to, subject, body string) error {
 		"\r\n" +
 		body + "\r\n"
 
-	// 端口465使用直连SSL/TLS
+	dialer := &net.Dialer{Timeout: smtpDialTimeout}
+	var conn net.Conn
 	if port == "465" {
-		tlsConfig := &tls.Config{ServerName: host}
-		dialer := &net.Dialer{Timeout: smtpDialTimeout}
-		conn, err := tls.DialWithDialer(dialer, "tcp", smtpAddr, tlsConfig)
+		// 端口 465：直连 SSL/TLS。
+		tlsDialer := &tls.Dialer{NetDialer: dialer, Config: &tls.Config{ServerName: host}}
+		conn, err = tlsDialer.DialContext(ctx, "tcp", smtpAddr)
 		if err != nil {
 			return fmt.Errorf("TLS连接失败: %w", err)
 		}
-		defer conn.Close()
-		// 防止 SMTP 握手 / 投递阶段无限挂起 —— 异步触发的发送任务一旦泄漏会持续占用 goroutine。
-		_ = conn.SetDeadline(time.Now().Add(smtpIOTimeout))
-
-		client, err := smtp.NewClient(conn, host)
+	} else {
+		// 端口 25 / 587：明文连接，连接后再 STARTTLS。
+		conn, err = dialer.DialContext(ctx, "tcp", smtpAddr)
 		if err != nil {
-			return fmt.Errorf("创建SMTP客户端失败: %w", err)
+			return fmt.Errorf("SMTP 连接失败: %w", err)
 		}
-		defer client.Close()
-
-		if err = client.Auth(auth); err != nil {
-			return fmt.Errorf("SMTP认证失败: %w", err)
-		}
-		if err = client.Mail(from); err != nil {
-			return err
-		}
-		if err = client.Rcpt(to); err != nil {
-			return err
-		}
-		w, err := client.Data()
-		if err != nil {
-			return err
-		}
-		_, err = w.Write([]byte(msg))
-		if err != nil {
-			return err
-		}
-		return w.Close()
-	}
-
-	// 端口25/587使用STARTTLS。手动 dial 以注入超时（smtp.SendMail 默认无超时）。
-	conn, err := net.DialTimeout("tcp", smtpAddr, smtpDialTimeout)
-	if err != nil {
-		return fmt.Errorf("SMTP 连接失败: %w", err)
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(smtpIOTimeout))
+	// ctx 设了 deadline 就用它；否则退化到 smtpIOTimeout。
+	// 这一行是上限保险——dispatchInviteEmail 给的 30s ctx 会真正约束整个会话。
+	if d, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(d)
+	} else {
+		_ = conn.SetDeadline(time.Now().Add(smtpIOTimeout))
+	}
 
 	client, err := smtp.NewClient(conn, host)
 	if err != nil {
 		return fmt.Errorf("创建SMTP客户端失败: %w", err)
 	}
 	defer client.Close()
-	if ok, _ := client.Extension("STARTTLS"); ok {
-		if err = client.StartTLS(&tls.Config{ServerName: host}); err != nil {
-			return fmt.Errorf("STARTTLS 失败: %w", err)
+
+	if port != "465" {
+		if ok, _ := client.Extension("STARTTLS"); ok {
+			if err = client.StartTLS(&tls.Config{ServerName: host}); err != nil {
+				return fmt.Errorf("STARTTLS 失败: %w", err)
+			}
 		}
 	}
-	if err = client.Auth(auth); err != nil {
+
+	return runSMTPTransaction(client, auth, from, to, []byte(msg))
+}
+
+// runSMTPTransaction 跑完一次 SMTP 投递：Auth → Mail → Rcpt → Data → Quit。
+// 抽出来是为了 465 / 587 路径不用复制 7 行序列；同时确保两条路径都发 QUIT
+// （旧实现用 smtp.SendMail，stdlib 末尾就是 c.Quit()——本 PR 重写时漏发，
+// 部分严格邮件网关在缺 QUIT 时会丢弃消息。defer client.Close 仅用于异常兜底）。
+func runSMTPTransaction(client *smtp.Client, auth smtp.Auth, from, to string, msg []byte) error {
+	if err := client.Auth(auth); err != nil {
 		return fmt.Errorf("SMTP认证失败: %w", err)
 	}
-	if err = client.Mail(from); err != nil {
+	if err := client.Mail(from); err != nil {
 		return err
 	}
-	if err = client.Rcpt(to); err != nil {
+	if err := client.Rcpt(to); err != nil {
 		return err
 	}
 	w, err := client.Data()
 	if err != nil {
 		return err
 	}
-	if _, err = w.Write([]byte(msg)); err != nil {
+	if _, err = w.Write(msg); err != nil {
 		return err
 	}
-	return w.Close()
+	if err = w.Close(); err != nil {
+		return err
+	}
+	return client.Quit()
 }
 
 const (
