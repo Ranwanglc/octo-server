@@ -13,8 +13,7 @@ import (
 )
 
 // emailInvitePage 返回邀请落地页 H5（公开，注入 API_BASE_URL）。
-// JS 在浏览器里调用 previewEmailInvite / acceptEmailInvite 完成实际逻辑；
-// 鉴权 token 由 dmwork-web 写入 localStorage，与 group_invite.html 同模式。
+// JS 在浏览器里调用 previewEmailInvite / acceptEmailInvite 完成实际逻辑。
 func (s *Space) emailInvitePage(c *wkhttp.Context) {
 	htmlBytes, err := os.ReadFile("./assets/web/space_email_invite.html")
 	if err != nil {
@@ -27,6 +26,19 @@ func (s *Space) emailInvitePage(c *wkhttp.Context) {
 	// BaseURL 与部署强相关；邀请落地页本身也不应被搜索引擎索引或 CDN 缓存。
 	c.Header("Cache-Control", "no-store")
 	c.Header("X-Robots-Tag", "noindex, nofollow")
+	// 落地页本身就以"读 sessionStorage 拿登录 token"为目的，一旦出现 XSS 就是
+	// 会话凭证泄漏。CSP 把 fetch / script / style 全部钉到同源（inline 暂保留——
+	// 服务端模板需要把 BaseURL 注入到 JS 字面量；后续可改 nonce-based 策略），
+	// 阻断 token 外发到第三方域；frame-ancestors 'none' 防 clickjacking。
+	c.Header("Content-Security-Policy",
+		"default-src 'self'; "+
+			"script-src 'self' 'unsafe-inline'; "+
+			"style-src 'self' 'unsafe-inline'; "+
+			"connect-src 'self'; "+
+			"img-src 'self' data:; "+
+			"base-uri 'self'; "+
+			"form-action 'none'; "+
+			"frame-ancestors 'none'")
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
 }
 

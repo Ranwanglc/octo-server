@@ -228,6 +228,13 @@ func TestEmailInvitePage_RendersHTMLWithAPIBase(t *testing.T) {
 	assert.NotContains(t, body, "{{API_BASE_URL}}", "占位符应已被替换")
 	assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
 	assert.Contains(t, w.Header().Get("Content-Type"), "text/html")
+
+	// CSP 必须钉死 connect-src 到 self（防止 token 外发到第三方域）
+	// 和 frame-ancestors 'none'（防 clickjacking）。
+	csp := w.Header().Get("Content-Security-Policy")
+	assert.Contains(t, csp, "connect-src 'self'", "fetch 必须限制到同源，否则 XSS 可外发 token")
+	assert.Contains(t, csp, "frame-ancestors 'none'", "防 clickjacking")
+	assert.Contains(t, csp, "default-src 'self'", "默认策略应是同源 only")
 	// rate-limit / server error / network error 三个状态块必须存在（参见 group_invite.html YUJ-42）。
 	assert.Contains(t, body, `id="state-rate-limited"`)
 	assert.Contains(t, body, `id="state-server-error"`)
