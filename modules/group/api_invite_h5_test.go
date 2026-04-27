@@ -234,6 +234,14 @@ func TestGroupInvitePage_RendersHTMLWithAPIBase(t *testing.T) {
 	assert.True(t, strings.Contains(body, `id="state-network-error"`), "network-error state block missing")
 	assert.True(t, strings.Contains(body, "r.status === 429"), "detail fetch must special-case 429")
 	assert.True(t, strings.Contains(body, "r.status >= 500"), "detail fetch must special-case 5xx")
+
+	// YUJ-59: findTokenAndSid 必须先扫 sessionStorage（IM Web / admin 后台实际写入的位置），
+	// 并支持 dm-admin-auth JSON fallback。回归 im-test 观察到的 localStorage-only 漏洞——
+	// 历史实现只扫 localStorage，导致登录态读不到、落地页短路成「请先登录」，加群按钮不显示。
+	assert.True(t, strings.Contains(body, "scanByPrefix(sessionStorage)"),
+		"必须先扫 sessionStorage，否则 IM Web / admin 后台的会话读不到，加群按钮不显示")
+	assert.True(t, strings.Contains(body, "dm-admin-auth"),
+		"必须支持 admin 后台的 dm-admin-auth JSON 结构作为 fallback")
 }
 
 // 已登录用户用公开 code 换取 auth_code：基础路径。
