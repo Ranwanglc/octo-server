@@ -36,7 +36,10 @@ type ProviderConfig struct {
 	RequireEmailVerified bool
 	RequirePKCE          bool
 	AutoLinkByEmail      bool
-	AllowNewUser         bool
+	// AutoLinkByPhone phone_number_verified=true 时按手机号自动绑历史账号。
+	// 单独开关因为部分场景里"邮箱可信"但"手机号未必",分开控制更精细。
+	AutoLinkByPhone bool
+	AllowNewUser    bool
 
 	ClockSkew   time.Duration
 	HTTPTimeout time.Duration
@@ -46,6 +49,11 @@ type ProviderConfig struct {
 
 	// AES-256-GCM 主密钥,用于加密 refresh_token,从 base64 字符串解码
 	RefreshTokenEncryptionKey []byte
+
+	// ReturnToHosts callback 完成后允许的 return_to 跳转 host 白名单
+	// (DM_OIDC_RETURN_TO_HOSTS,逗号分隔)。空列表表示禁用 return_to,
+	// 防开放重定向是 P1.2 必须做的硬约束。
+	ReturnToHosts []string
 }
 
 // LoadConfig 从环境变量加载 OIDC 配置
@@ -81,6 +89,7 @@ func loadAegis() (ProviderConfig, error) {
 		RequireEmailVerified: getBool("DM_OIDC_AEGIS_REQUIRE_EMAIL_VERIFIED", true),
 		RequirePKCE:          getBool("DM_OIDC_AEGIS_REQUIRE_PKCE", true),
 		AutoLinkByEmail:      getBool("DM_OIDC_AEGIS_AUTO_LINK_BY_EMAIL", true),
+		AutoLinkByPhone:      getBool("DM_OIDC_AEGIS_AUTO_LINK_BY_PHONE", true),
 		AllowNewUser:         getBool("DM_OIDC_AEGIS_ALLOW_NEW_USER", true),
 
 		ClockSkew:   getDuration("DM_OIDC_AEGIS_CLOCK_SKEW", 60*time.Second),
@@ -88,6 +97,8 @@ func loadAegis() (ProviderConfig, error) {
 
 		SyncInterval:    getDuration("DM_OIDC_AEGIS_SYNC_INTERVAL", 15*time.Minute),
 		SyncConcurrency: getInt("DM_OIDC_AEGIS_SYNC_CONCURRENCY", 10),
+
+		ReturnToHosts: getStringSlice("DM_OIDC_RETURN_TO_HOSTS", nil),
 	}
 
 	// 用 slice 保证检查顺序稳定,缺多个字段时报第一项固定,排查体验更好

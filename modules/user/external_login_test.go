@@ -71,7 +71,7 @@ func TestService_LoginByExternalIdentity_ExistingUserDestroyed(t *testing.T) {
 		ShortNo:   "extshort2",
 		Vercode:   uid + "@1",
 		Status:    int(common.UserAvailable),
-		IsDestroy: 1,
+		IsDestroy: IsDestroyDone, // 终态注销,必须拒
 	}))
 
 	resp, err := u.userService.LoginByExternalIdentity(context.Background(), ExternalLoginReq{
@@ -80,6 +80,33 @@ func TestService_LoginByExternalIdentity_ExistingUserDestroyed(t *testing.T) {
 	})
 	assert.Nil(t, resp)
 	assert.Error(t, err)
+}
+
+// 冷静期(IsDestroy=1)用户必须能登录:登录动作即撤销注销,符合 PR #1192 的产品规则。
+func TestService_LoginByExternalIdentity_ExistingUserCoolingOff(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	require.NoError(t, testutil.CleanAllTables(ctx))
+	u := New(ctx)
+	u.Route(s.GetRoute())
+
+	uid := "ext-cooling-uid"
+	require.NoError(t, u.db.Insert(&Model{
+		UID:       uid,
+		Username:  "ext_cooling",
+		Name:      "Cooling",
+		ShortNo:   "extshort3",
+		Vercode:   uid + "@1",
+		Status:    int(common.UserAvailable),
+		IsDestroy: IsDestroyApplying, // 冷静期可登录
+	}))
+
+	resp, err := u.userService.LoginByExternalIdentity(context.Background(), ExternalLoginReq{
+		ExistingUID: uid,
+		DeviceFlag:  config.APP,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, uid, resp.UID)
 }
 
 // ExistingUID 不存在应报错(避免悄悄落库)。

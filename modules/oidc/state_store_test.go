@@ -59,7 +59,7 @@ func TestMemoryStateStore_ConsumeExpired(t *testing.T) {
 
 	_ = s.Save(ctx, "state-1", &StateData{Provider: "aegis"}, 10*time.Millisecond)
 	time.Sleep(30 * time.Millisecond)
-	if _, err := s.Consume(ctx, "state-1"); err != ErrStateNotFound {
+	if _, err := s.Consume(ctx, "state-1"); !errors.Is(err, ErrStateNotFound) {
 		t.Fatalf("expired state should be not found, got %v", err)
 	}
 }
@@ -67,7 +67,7 @@ func TestMemoryStateStore_ConsumeExpired(t *testing.T) {
 func TestMemoryStateStore_ConsumeUnknown(t *testing.T) {
 	s := newMemoryStateStore()
 	ctx := context.Background()
-	if _, err := s.Consume(ctx, "no-such"); err != ErrStateNotFound {
+	if _, err := s.Consume(ctx, "no-such"); !errors.Is(err, ErrStateNotFound) {
 		t.Fatalf("unknown state err=%v want=ErrStateNotFound", err)
 	}
 }
