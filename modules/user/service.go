@@ -1,6 +1,7 @@
 package user
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -80,6 +81,23 @@ type IService interface {
 	UpdateUserMsgExpireSecond(uid string, msgExpireSecond int64) error
 	// 搜索好友
 	SearchFriendsWithKeyword(uid string, keyword string) ([]*FriendResp, error)
+
+	// LoginByExternalIdentity 给外部 IdP（OIDC / OAuth）登录流程签发 DMWork 会话。
+	//
+	// 内部委托给 *User 实现,需要在模块初始化时通过 (*Service).SetExternalLoginHandler 注入。
+	// 未注入或调用方为 *Service 以外的 IService 实现时,返回 ErrExternalLoginNotConfigured。
+	LoginByExternalIdentity(ctx context.Context, req ExternalLoginReq) (*ExternalLoginResp, error)
+}
+
+// ErrExternalLoginNotConfigured 外部登录未注入 handler（通常是单测中未走 user.New 完整初始化）
+var ErrExternalLoginNotConfigured = errors.New("user: external login handler not configured")
+
+// externalLoginHandler 由 *User 实现,Service 通过 SetExternalLoginHandler 后注入。
+//
+// 之所以走注入而非直接 import:execLogin / createUserWithRespAndTx 是 *User 的私有方法,
+// *User 的构造已依赖 IService（u.userService = NewService(ctx)）,反向再依赖会成环。
+type externalLoginHandler interface {
+	LoginByExternalIdentity(ctx context.Context, req ExternalLoginReq) (*ExternalLoginResp, error)
 }
 
 // Service Service
@@ -92,6 +110,20 @@ type Service struct {
 	settingDB        *SettingDB
 	onetimePrekeysDB *onetimePrekeysDB
 	onlineService    *OnlineService
+	extLogin         externalLoginHandler
+}
+
+// SetExternalLoginHandler 注入外部 IdP 登录 handler（在 user.New 内部调用,生产路径下保证非空）
+func (s *Service) SetExternalLoginHandler(h externalLoginHandler) {
+	s.extLogin = h
+}
+
+// LoginByExternalIdentity 委托给已注入的 handler。未注入时返回 ErrExternalLoginNotConfigured。
+func (s *Service) LoginByExternalIdentity(ctx context.Context, req ExternalLoginReq) (*ExternalLoginResp, error) {
+	if s.extLogin == nil {
+		return nil, ErrExternalLoginNotConfigured
+	}
+	return s.extLogin.LoginByExternalIdentity(ctx, req)
 }
 
 // NewService NewService

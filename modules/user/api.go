@@ -130,6 +130,11 @@ func New(ctx *config.Context) *User {
 	InitGlobalPinnedDB(ctx) // 初始化全局 PinnedDB 供其他模块调用
 	u.updateSystemUserToken()
 	source.SetUserProvider(u)
+	// 注入外部 IdP 登录 handler:Service 通过 IService 暴露 LoginByExternalIdentity,
+	// 但实际逻辑落在 *User 上（依赖 execLogin / createUserWithRespAndTx 等私有方法）。
+	if svc, ok := u.userService.(*Service); ok {
+		svc.SetExternalLoginHandler(u)
+	}
 	return u
 }
 
