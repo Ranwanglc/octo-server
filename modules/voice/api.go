@@ -121,6 +121,36 @@ func (v *Voice) transcribe(c *wkhttp.Context) {
 		memberContext = TruncateRunesTail(memberContext, v.cfg.MaxMemberContextLength)
 	}
 
+	// Parse and validate mode parameter
+	mode := c.Request.FormValue("mode")
+	var internalMode string
+	switch mode {
+	case "", "smart":
+		// fallback to config.EditMode (internalMode stays empty)
+	case "append_only":
+		internalMode = "append"
+	case "edit_only":
+		if contextText == "" {
+			c.ResponseErrorWithStatus(errors.New("edit_only mode requires context_text"), http.StatusBadRequest)
+			return
+		}
+		// GPT engine does not support edit_only mode
+		if v.cfg.Engine == EngineGPT {
+			c.ResponseErrorWithStatus(ErrGPTEditNotSupported, http.StatusBadRequest)
+			return
+		}
+		internalMode = "edit_only"
+	default:
+		c.ResponseErrorWithStatus(errors.New("invalid mode: must be smart, append_only, or edit_only"), http.StatusBadRequest)
+		return
+	}
+
+	// Calculate effective mode for ASR logging
+	effectiveMode := mode
+	if effectiveMode == "" || effectiveMode == "smart" {
+		effectiveMode = "smart"
+	}
+
 	// Save original chatContext for ASR logging
 	origChatContext := chatContext
 
@@ -129,13 +159,13 @@ func (v *Voice) transcribe(c *wkhttp.Context) {
 
 	startTime := time.Now()
 	result, err := v.service.TranscribeWithResult(audioData, mimeType, contextText, chatContext,
-		TranscribeOptions{})
+		TranscribeOptions{Mode: internalMode})
 	durationMs := time.Since(startTime).Milliseconds()
 
 	if err != nil {
 		v.Error("transcription failed", zap.Error(err))
 		if v.asrLogger != nil {
-			entry := v.buildASREntry("app", audioData, mimeType, contextText, origChatContext,
+			entry := v.buildASREntry("app", effectiveMode, audioData, mimeType, contextText, origChatContext,
 				personalContext, memberContext, startTime, durationMs, result, err)
 			v.asrLogger.Enqueue(entry)
 		}
@@ -147,7 +177,7 @@ func (v *Voice) transcribe(c *wkhttp.Context) {
 	}
 
 	if v.asrLogger != nil {
-		v.asrLogger.Enqueue(v.buildASREntry("app", audioData, mimeType, contextText, origChatContext,
+		v.asrLogger.Enqueue(v.buildASREntry("app", effectiveMode, audioData, mimeType, contextText, origChatContext,
 			personalContext, memberContext, startTime, durationMs, result, nil))
 	}
 
@@ -172,7 +202,7 @@ func (v *Voice) getConfig(c *wkhttp.Context) {
 }
 
 // buildASREntry constructs an ASREntry with common fields populated.
-func (v *Voice) buildASREntry(source string, audioData []byte, mimeType string,
+func (v *Voice) buildASREntry(source string, mode string, audioData []byte, mimeType string,
 	contextText string, chatContext string, personalContext string, memberContext string,
 	startTime time.Time, durationMs int64,
 	result *TranscribeResult, err error) ASREntry {
@@ -183,7 +213,7 @@ func (v *Voice) buildASREntry(source string, audioData []byte, mimeType string,
 		Source:    source,
 		Engine:    v.cfg.Engine,
 		Input: ASRInput{
-			Mode:            v.cfg.EditMode,
+			Mode:            mode,
 			MimeType:        mimeType,
 			AudioSize:       len(audioData),
 			ContextText:     contextText,

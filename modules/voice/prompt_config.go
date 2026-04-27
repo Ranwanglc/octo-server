@@ -27,6 +27,7 @@ type PromptConfig struct {
 	TaskTranscribeWithVocab  string `yaml:"task_transcribe_with_vocab"`
 	TaskAppend               string `yaml:"task_append"`
 	TaskEdit                 string `yaml:"task_edit"`
+	TaskEditOnly             string `yaml:"task_edit_only"`
 
 	// Legacy fields: parsed for backward compatibility but ignored with warning.
 	Transcribe        string `yaml:"transcribe,omitempty"`
@@ -56,6 +57,7 @@ func resetToDefaults() {
 		TaskTranscribeWithVocab:  taskTranscribeWithVocab,
 		TaskAppend:               taskAppend,
 		TaskEdit:                 taskEdit,
+		TaskEditOnly:             taskEditOnly,
 	}
 }
 
@@ -150,6 +152,7 @@ func LoadPrompts(filePath string, log promptLogger) {
 		{"task_transcribe_with_vocab", cfg.TaskTranscribeWithVocab, &activePrompts.TaskTranscribeWithVocab},
 		{"task_append", cfg.TaskAppend, &activePrompts.TaskAppend},
 		{"task_edit", cfg.TaskEdit, &activePrompts.TaskEdit},
+		{"task_edit_only", cfg.TaskEditOnly, &activePrompts.TaskEditOnly},
 	}
 	for _, f := range taskFields {
 		if strings.TrimSpace(f.value) != "" {
@@ -164,6 +167,7 @@ func LoadPrompts(filePath string, log promptLogger) {
 			zap.String("vocabulary_reference", truncatePrompt(activePrompts.VocabularyReference, 80)),
 			zap.String("append_input_buffer", truncatePrompt(activePrompts.AppendInputBuffer, 80)),
 			zap.String("edit_input_buffer", truncatePrompt(activePrompts.EditInputBuffer, 80)),
+			zap.String("task_edit_only", truncatePrompt(activePrompts.TaskEditOnly, 80)),
 		)
 	}
 }
