@@ -148,20 +148,42 @@ function toast(msg, ms) {
     toast._t = setTimeout(function () { el.style.display = "none"; }, ms || 2200);
 }
 
-// 与 group_invite.html 一致：从 localStorage 抓 dmwork-web 的登录会话。
-// key 形如 "token{sid}"，value 为 token；找不到就当未登录处理。
+// 抓取 dmwork-web / admin 后台的登录 token。当前生产实际约定（im-test 验证得来）：
+//   1. sessionStorage 里 "token{sid}" → 直接 value 就是 token（dmwork-web 与 admin 都写）
+//   2. localStorage "dm-admin-auth" → JSON，token 在 state.token（仅 admin 后台）
+//
+// group_invite.html 历史只扫 localStorage 的 "tokenXXX"，在 admin 后台用 sessionStorage
+// 的环境里读不到。这里两路都试，sessionStorage 优先（覆盖面更广）。
 function findTokenAndSid() {
-    try {
-        for (var i = 0; i < localStorage.length; i++) {
-            var key = localStorage.key(i);
-            if (key && key.indexOf("token") === 0 && key !== "tokenCallback") {
-                var val = localStorage.getItem(key);
-                if (val && val.length > 10) {
-                    return { token: val, sid: key.substring(5) };
+    function scanByPrefix(storage) {
+        try {
+            for (var i = 0; i < storage.length; i++) {
+                var key = storage.key(i);
+                if (key && key.indexOf("token") === 0 && key !== "tokenCallback") {
+                    var val = storage.getItem(key);
+                    if (val && val.length > 10) {
+                        return { token: val, sid: key.substring(5) };
+                    }
                 }
             }
+        } catch (e) { /* Safari 隐私模式等 */ }
+        return null;
+    }
+    var hit = scanByPrefix(sessionStorage) || scanByPrefix(localStorage);
+    if (hit) return hit;
+
+    // admin 后台的 dm-admin-auth 是 JSON 结构，存了 state.token / state.uid。
+    try {
+        var raw = localStorage.getItem("dm-admin-auth");
+        if (raw) {
+            var parsed = JSON.parse(raw);
+            var state = parsed && parsed.state;
+            if (state && typeof state.token === "string" && state.token.length > 10) {
+                return { token: state.token, sid: state.uid || "" };
+            }
         }
-    } catch (e) { /* Safari 隐私模式等 */ }
+    } catch (e) { /* 损坏的 JSON、隐私模式等 */ }
+
     return { token: "", sid: "" };
 }
 

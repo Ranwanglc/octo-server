@@ -232,6 +232,13 @@ func TestEmailInvitePage_RendersHTMLWithAPIBase(t *testing.T) {
 	assert.Contains(t, body, `id="state-rate-limited"`)
 	assert.Contains(t, body, `id="state-server-error"`)
 	assert.Contains(t, body, `id="state-network-error"`)
+
+	// findTokenAndSid 必须扫 sessionStorage（dmwork-web / admin 实际写入的位置），
+	// 同时支持 dm-admin-auth JSON fallback。回归 im-test 验证发现的 localStorage-only 漏洞。
+	assert.Contains(t, body, "scanByPrefix(sessionStorage)",
+		"必须先扫 sessionStorage，否则 admin 后台 / dmwork-web 的会话读不到")
+	assert.Contains(t, body, "dm-admin-auth",
+		"必须支持 admin 后台的 dm-admin-auth JSON 结构作为 fallback")
 }
 
 func TestEmailInvitePage_PathDoesNotShadowPreview(t *testing.T) {
