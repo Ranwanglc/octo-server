@@ -458,6 +458,32 @@ func TestAcceptEmailInvite_RequiresAuth(t *testing.T) {
 	assert.NotEqual(t, http.StatusOK, w.Code)
 }
 
+// 回归：owner（role=2）接受 role=admin 的邀请不应被降级（PR #1172 review C2）。
+func TestAcceptEmailInvite_OwnerAcceptingAdminInvite_NotDemoted(t *testing.T) {
+	srv, _, err := setup(t)
+	resetSpaceInviteRateLimit(t)
+	assert.NoError(t, err)
+	spaceId := "sp-no-demote"
+	// testutil.UID 是该空间 owner（role=2）
+	seedSpaceWithMemberRole(t, spaceId, testutil.UID, 2)
+	seedUserWithEmail(t, testutil.UID, "owner@x.com", "")
+
+	raw, _ := seedEmailInviteWithToken(t, &spaceEmailInviteModel{
+		InviteType: EmailInviteTypeMember,
+		Email:      "owner@x.com",
+		SpaceId:    spaceId,
+		Role:       EmailInviteRoleAdmin, // 邀请 admin
+		Status:     EmailInviteStatusPending,
+		CreatedBy:  testutil.UID,
+	})
+
+	w := acceptInviteHelper(t, srv, raw, testutil.Token, "owner@x.com")
+	assert.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	mem, _ := testSpaceDB.queryMember(spaceId, testutil.UID)
+	assert.Equal(t, 2, mem.Role, "owner 接受 admin 邀请后应保持 owner，不能被降级")
+}
+
 func TestAcceptEmailInvite_TypedEmailMissing(t *testing.T) {
 	srv, _, err := setup(t)
 	resetSpaceInviteRateLimit(t)

@@ -24,3 +24,6 @@ CREATE TABLE IF NOT EXISTS `space_email_invite` (
   KEY `idx_space_status` (`space_id`, `status`),
   KEY `idx_created_by` (`created_by`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='空间邮件邀请（owner/member）';
+
+-- +migrate Down
+DROP TABLE IF EXISTS `space_email_invite`;

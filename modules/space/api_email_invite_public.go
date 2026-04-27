@@ -286,10 +286,17 @@ func (s *Space) acceptMemberInvite(c *wkhttp.Context, inv *spaceEmailInviteModel
 		}
 	}
 
+	// admin 邀请仅可升级；防止 owner（role=2）接受一条 role=admin 的邀请被降级为 1。
 	if inv.Role == EmailInviteRoleAdmin {
-		if rErr := s.db.updateMemberRole(inv.SpaceId, loginUID, 1); rErr != nil {
-			s.Warn("提升为管理员失败，成员关系仍生效", zap.Error(rErr),
+		mem, mErr := s.db.queryMember(inv.SpaceId, loginUID)
+		if mErr != nil {
+			s.Warn("加入后查询成员失败，跳过角色提升", zap.Error(mErr),
 				zap.String("spaceId", inv.SpaceId), zap.String("uid", loginUID))
+		} else if mem != nil && mem.Role < 1 {
+			if rErr := s.db.updateMemberRole(inv.SpaceId, loginUID, 1); rErr != nil {
+				s.Warn("提升为管理员失败，成员关系仍生效", zap.Error(rErr),
+					zap.String("spaceId", inv.SpaceId), zap.String("uid", loginUID))
+			}
 		}
 	}
 
@@ -298,13 +305,23 @@ func (s *Space) acceptMemberInvite(c *wkhttp.Context, inv *spaceEmailInviteModel
 
 // rollbackConsumedInvite 把已 consumed 的邀请回滚到 pending，并清空 consumed_by/consumed_at。
 // 仅用于 member accept 路径在 join 失败时的最终一致性补偿。
+//
+// 失败语义：本函数失败不会向上传播，但会以 alert=email_invite_rollback_failed 标记日志，
+// 便于运维通过日志/监控系统检索人工介入。短期内 invite 会卡在 consumed 但用户未加入空间的
+// 状态，需要 ops 手工把 status 改回 pending（或直接 join）。Phase 6 之后会用乐观锁/异步
+// 任务做自动补偿（参见 PR #1172 跟进项）。
 func (s *Space) rollbackConsumedInvite(id int64, consumedBy string) {
 	if _, err := s.db.session.UpdateBySql(
 		"UPDATE space_email_invite SET status=?, consumed_by='', consumed_at=NULL, updated_at=NOW() "+
 			"WHERE id=? AND status=? AND consumed_by=?",
 		EmailInviteStatusPending, id, EmailInviteStatusConsumed, consumedBy,
 	).Exec(); err != nil {
-		s.Error("回滚邮件邀请状态失败", zap.Error(err), zap.Int64("id", id))
+		s.Error("回滚邮件邀请状态失败，需要人工介入",
+			zap.String("alert", "email_invite_rollback_failed"),
+			zap.Error(err),
+			zap.Int64("inviteID", id),
+			zap.String("consumedBy", consumedBy),
+		)
 	}
 }
 
