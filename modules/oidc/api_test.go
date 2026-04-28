@@ -517,6 +517,137 @@ func TestAPI_Logout_OK(t *testing.T) {
 	}
 }
 
+// callback 应在 ID Token 缺 email 时调 /userinfo 补全,使 ResolveOrLink
+// 能命中已有账号(场景:Aegis 仅在 /userinfo 暴露 email)。
+func TestAPI_Callback_BackfillsEmailFromUserInfo(t *testing.T) {
+	mp := NewMockProvider(t)
+	// ID Token 只有 sub,不暴露 email
+	mp.PrepUser("sub-aegis", map[string]interface{}{})
+	// /userinfo 暴露 email + email_verified
+	mp.PrepUserInfoOnly("sub-aegis", map[string]interface{}{
+		"email":          "alice@example.com",
+		"email_verified": true,
+	})
+
+	users := &fakeUserLookup{
+		usersByEmail: map[string][]string{"alice@example.com": {"u-existing"}},
+		loginResp:    &IssueSessionResp{UID: "u-existing", LoginRespJSON: `{"token":"t-1"}`},
+	}
+	store := newFakeIdentityStore()
+	o := newTestOIDC(t, mp, users, store)
+	r := newTestRouter(o)
+
+	req := httptest.NewRequest("GET", "/v1/auth/oidc/aegis/authorize?authcode=ac-bf&return_to=/", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	authURL, _ := url.Parse(w.Header().Get("Location"))
+	state := authURL.Query().Get("state")
+	mp.PrepCode("idp-code", "sub-aegis", authURL.Query().Get("nonce"))
+
+	req2 := httptest.NewRequest("GET",
+		"/v1/auth/oidc/aegis/callback?state="+state+"&code=idp-code", nil)
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusFound {
+		t.Fatalf("callback status = %d, body=%s", w2.Code, w2.Body.String())
+	}
+	if len(users.loginCalls) != 1 {
+		t.Fatalf("expected 1 IssueSession call, got %d", len(users.loginCalls))
+	}
+	// 关键断言:UserInfo 拉取的 email 让 ResolveOrLink 命中已有 uid
+	if call := users.loginCalls[0]; call.UID != "u-existing" || call.CreateUser {
+		t.Errorf("IssueSession call = %+v, want UID=u-existing CreateUser=false (绑定到已有账户)", call)
+	}
+}
+
+// /userinfo 请求失败时不阻断登录,只是失去自动绑定能力 → 走 AllowNewUser=true 创建新用户。
+// 等价于 IdP 没返这些 claim,降级到 ID Token 的有限信息继续走流程。
+func TestAPI_Callback_UserInfoFailure_NonBlocking(t *testing.T) {
+	mp := NewMockProvider(t)
+	mp.PrepUser("sub-fail", map[string]interface{}{}) // ID Token 仅有 sub
+	mp.ForceUserInfoStatus(http.StatusInternalServerError)
+
+	users := &fakeUserLookup{
+		loginResp: &IssueSessionResp{UID: "u-new", LoginRespJSON: `{"token":"t"}`},
+	}
+	o := newTestOIDC(t, mp, users, newFakeIdentityStore())
+	r := newTestRouter(o)
+
+	req := httptest.NewRequest("GET", "/v1/auth/oidc/aegis/authorize?authcode=ac-uifail&return_to=/", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	authURL, _ := url.Parse(w.Header().Get("Location"))
+	state := authURL.Query().Get("state")
+	mp.PrepCode("idp-code", "sub-fail", authURL.Query().Get("nonce"))
+
+	req2 := httptest.NewRequest("GET",
+		"/v1/auth/oidc/aegis/callback?state="+state+"&code=idp-code", nil)
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusFound {
+		t.Fatalf("callback status = %d, body=%s", w2.Code, w2.Body.String())
+	}
+	if got := w2.Header().Get("Location"); strings.Contains(got, "oidc_error=1") {
+		t.Errorf("redirect = %q, expected success (no oidc_error=1)", got)
+	}
+	if len(users.loginCalls) != 1 || !users.loginCalls[0].CreateUser {
+		t.Errorf("expected 1 IssueSession call with CreateUser=true (degraded), got %+v", users.loginCalls)
+	}
+}
+
+// /userinfo 返回 sub 与 ID Token sub 不一致,视为账号串台,直接拒绝登录。
+// 这是关键安全分支:防止 confused deputy 攻击。
+func TestAPI_Callback_UserInfoSubMismatch_Rejects(t *testing.T) {
+	mp := NewMockProvider(t)
+	mp.PrepUser("sub-A", map[string]interface{}{}) // ID Token sub=sub-A
+	// userinfo 返回的 sub 故意篡改为 sub-EVIL
+	mp.PrepUserInfoOnly("sub-A", map[string]interface{}{
+		"sub":   "sub-EVIL",
+		"email": "victim@example.com",
+	})
+
+	users := &fakeUserLookup{}
+	o := newTestOIDC(t, mp, users, newFakeIdentityStore())
+	audit := newFakeAudit()
+	o.audit = audit
+	r := newTestRouter(o)
+
+	req := httptest.NewRequest("GET", "/v1/auth/oidc/aegis/authorize?authcode=ac-mismatch&return_to=/", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	authURL, _ := url.Parse(w.Header().Get("Location"))
+	state := authURL.Query().Get("state")
+	mp.PrepCode("idp-code", "sub-A", authURL.Query().Get("nonce"))
+
+	req2 := httptest.NewRequest("GET",
+		"/v1/auth/oidc/aegis/callback?state="+state+"&code=idp-code", nil)
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+
+	// 应 302 回 return_to 但带 oidc_error=1,且不调 IssueSession
+	if w2.Code != http.StatusFound {
+		t.Fatalf("callback status = %d, body=%s", w2.Code, w2.Body.String())
+	}
+	if loc := w2.Header().Get("Location"); !strings.Contains(loc, "oidc_error=1") {
+		t.Errorf("redirect = %q, want oidc_error=1 (rejected)", loc)
+	}
+	if len(users.loginCalls) != 0 {
+		t.Errorf("expected 0 IssueSession calls (rejected before login), got %d", len(users.loginCalls))
+	}
+	// 应有 callback_fail 审计记录
+	foundFail := false
+	for _, e := range audit.events() {
+		if e == EventCallbackFail {
+			foundFail = true
+		}
+	}
+	if !foundFail {
+		t.Errorf("expected EventCallbackFail in audit, got %v", audit.events())
+	}
+}
+
 // failWithAuthcode 对 long subject 的审计 uid 应截断到 maxAuditUID 长度,
 // 防止超过 oidc_audit_log.uid VARCHAR(64) 导致 INSERT 失败。
 func TestFailWithAuthcode_LongSubject_TruncatesAuditUID(t *testing.T) {

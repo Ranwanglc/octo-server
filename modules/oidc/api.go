@@ -117,6 +117,11 @@ func (o *OIDC) Init() error {
 	if o.cfg == nil || !o.cfg.Enabled {
 		return nil
 	}
+	// Discovery 失败时 client=nil,handler 入口已 fail-fast 返 500,
+	// 此处构造 service 也用不到,直接早返回省一次跨模块查询。
+	if o.client == nil {
+		return nil
+	}
 	raw := register.GetService("user")
 	if raw == nil {
 		return fmt.Errorf("oidc: Init: user service not registered")
@@ -302,7 +307,37 @@ func (o *OIDC) callback(c *wkhttp.Context) {
 		o.redirectAfterCallback(c, sd, true)
 		return
 	}
-	o.Debug("OIDC callback nonce 匹配,开始 ResolveOrLink")
+	o.Debug("OIDC callback nonce 匹配")
+
+	// 部分 IdP(如 Aegis)只在 /userinfo 暴露 email/phone,ID Token 仅含 sub。
+	// 自动绑定历史账号必须依赖 email/phone,所以缺啥就拉一次 /userinfo 补啥。
+	// userinfo 失败不阻断登录,只是失去自动绑定能力,等价于 IdP 没返这些 claim。
+	if claims.Email == "" || claims.PhoneNumber == "" {
+		ui, uerr := o.client.UserInfo(c.Request.Context(), tok)
+		if uerr != nil {
+			o.Warn("OIDC callback userinfo 拉取失败,跳过补全", zap.Error(uerr))
+		} else if ui.Subject != claims.Subject {
+			// 安全检查:userinfo sub 必须等于 ID Token sub,否则视为账号串台,直接拒绝
+			o.failWithAuthcode(c.Request.Context(), sd, claims,
+				fmt.Errorf("userinfo sub mismatch: idtoken=%s userinfo=%s", claims.Subject, ui.Subject))
+			o.redirectAfterCallback(c, sd, true)
+			return
+		} else {
+			o.Debug("OIDC callback userinfo 成功",
+				zap.String("ui_email", maskEmail(ui.Email)),
+				zap.Bool("ui_email_verified", ui.EmailVerified),
+				zap.Bool("has_phone", ui.PhoneNumber != ""))
+			if claims.Email == "" {
+				claims.Email = ui.Email
+				claims.EmailVerified = ui.EmailVerified
+			}
+			if claims.PhoneNumber == "" {
+				claims.PhoneNumber = ui.PhoneNumber
+				claims.PhoneVerified = ui.PhoneVerified
+			}
+		}
+	}
+	o.Debug("OIDC callback 开始 ResolveOrLink")
 
 	res, err := o.service.ResolveOrLink(c.Request.Context(), claims)
 	if err != nil {

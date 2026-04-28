@@ -12,7 +12,7 @@ import (
 // userAdapter 适配 user.IService + oidc.DB → service.userLookup。
 //
 // 把跨模块依赖收敛在这一层,service 测试只对接小接口 fakeUserLookup,
-// 生产路径下 NewService 注入本适配器。
+// 生产路径下 Init() 通过 register.GetService("user") 获取 userSvc 后注入本适配器。
 type userAdapter struct {
 	userSvc user.IService
 	db      *DB

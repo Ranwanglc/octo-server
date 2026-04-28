@@ -33,9 +33,13 @@ type MockProvider struct {
 	mu      sync.Mutex
 	privKey *rsa.PrivateKey
 	keyID   string
-	users   map[string]map[string]interface{} // sub -> claims
+	users   map[string]map[string]interface{} // sub -> claims (放 ID Token + userinfo)
+	uiOnly  map[string]map[string]interface{} // sub -> claims (仅 userinfo,模拟 IdP 不在 ID Token 暴露 email)
 	codes   map[string]mockGrant              // code -> grant
 	rts     map[string]string                 // refresh_token -> sub
+
+	// userinfoForceStatus 测试可调:>=400 时 /userinfo 直接返该状态码,模拟 IdP 抖动。
+	userinfoForceStatus int
 }
 
 type mockGrant struct {
@@ -63,6 +67,7 @@ func NewMockProvider(t *testing.T) *MockProvider {
 		privKey:  priv,
 		keyID:    "mock-key-1",
 		users:    make(map[string]map[string]interface{}),
+		uiOnly:   make(map[string]map[string]interface{}),
 		codes:    make(map[string]mockGrant),
 		rts:      make(map[string]string),
 	}
@@ -74,6 +79,13 @@ func NewMockProvider(t *testing.T) *MockProvider {
 }
 
 func (m *MockProvider) handleUserInfo(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	forceStatus := m.userinfoForceStatus
+	m.mu.Unlock()
+	if forceStatus >= 400 {
+		http.Error(w, "forced failure", forceStatus)
+		return
+	}
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
 		http.Error(w, "missing bearer", http.StatusUnauthorized)
@@ -90,6 +102,7 @@ func (m *MockProvider) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 
 	m.mu.Lock()
 	claims, ok := m.users[sub]
+	uiExtra := m.uiOnly[sub]
 	m.mu.Unlock()
 	if !ok {
 		http.Error(w, "unknown sub", http.StatusUnauthorized)
@@ -97,6 +110,9 @@ func (m *MockProvider) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]interface{}{"sub": sub}
 	for k, v := range claims {
+		out[k] = v
+	}
+	for k, v := range uiExtra {
 		out[k] = v
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -112,6 +128,26 @@ func (m *MockProvider) PrepUser(sub string, claims map[string]interface{}) {
 		cp[k] = v
 	}
 	m.users[sub] = cp
+}
+
+// ForceUserInfoStatus 让 /userinfo 直接返指定 HTTP 状态(>=400),用于测试 IdP 抖动。
+// 设为 0 恢复正常行为。
+func (m *MockProvider) ForceUserInfoStatus(code int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.userinfoForceStatus = code
+}
+
+// PrepUserInfoOnly 预置仅在 /userinfo 暴露的 claims(不入 ID Token)。
+// 模拟 Aegis 等 IdP 把 email/phone 放 /userinfo 而非 ID Token 的行为。
+func (m *MockProvider) PrepUserInfoOnly(sub string, claims map[string]interface{}) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := make(map[string]interface{}, len(claims))
+	for k, v := range claims {
+		cp[k] = v
+	}
+	m.uiOnly[sub] = cp
 }
 
 // PrepCode 预置 authorization_code → sub + nonce(可空)。
