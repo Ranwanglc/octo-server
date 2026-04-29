@@ -3,8 +3,8 @@ package message
 import (
 	"testing"
 
-	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/Mininglamp-OSS/octo-lib/common"
+	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -203,6 +203,108 @@ func TestFilterConversationsBySpace_ExternalGroupFallbackToDefault(t *testing.T)
 	// defaultSpaceID=spaceB，fallback 后在 spaceB 可见
 	result := filterConversationsCore(convs, "spaceB", "spaceB", nil, externalMap, nil, nil, false, false)
 	assert.Len(t, result, 1)
+}
+
+func TestFilterConversationsBySpace_ThreadChannelInParentGroupSpace(t *testing.T) {
+	convs := []*SyncUserConversationResp{
+		{ChannelID: "g1____123456789012345", ChannelType: common.ChannelTypeCommunityTopic.Uint8(), SpaceID: ""},
+	}
+	groupMap := map[string]string{"g1": "spaceA"}
+
+	result := filterConversationsCore(convs, "spaceA", "spaceDefault", groupMap, nil, nil, nil, false, false)
+	assert.Len(t, result, 1)
+
+	result = filterConversationsCore(convs, "spaceB", "spaceDefault", groupMap, nil, nil, nil, false, false)
+	assert.Len(t, result, 0)
+}
+
+func TestFilterConversationsBySpace_ThreadChannelNoLeakInDefaultSpace(t *testing.T) {
+	// 父群在 spaceA，用户在默认 Space → 子区不能借兜底分支漏出来
+	convs := []*SyncUserConversationResp{
+		{ChannelID: "g1____123456789012345", ChannelType: common.ChannelTypeCommunityTopic.Uint8(), SpaceID: ""},
+	}
+	groupMap := map[string]string{"g1": "spaceA"}
+
+	result := filterConversationsCore(convs, "spaceDefault", "spaceDefault", groupMap, nil, nil, nil, false, false)
+	assert.Len(t, result, 0)
+}
+
+func TestFilterConversationsBySpace_ThreadChannelExternalGroup(t *testing.T) {
+	convs := []*SyncUserConversationResp{
+		{ChannelID: "gExt____123456789012345", ChannelType: common.ChannelTypeCommunityTopic.Uint8(), SpaceID: ""},
+	}
+	groupMap := map[string]string{"gExt": "spaceA"}
+	externalMap := map[string]string{"gExt": "spaceB"}
+
+	result := filterConversationsCore(convs, "spaceB", "spaceDefault", groupMap, externalMap, nil, nil, false, false)
+	assert.Len(t, result, 1)
+
+	result = filterConversationsCore(convs, "spaceA", "spaceDefault", groupMap, externalMap, nil, nil, false, false)
+	assert.Len(t, result, 1)
+
+	result = filterConversationsCore(convs, "spaceC", "spaceDefault", groupMap, externalMap, nil, nil, false, false)
+	assert.Len(t, result, 0)
+}
+
+func TestFilterConversationsBySpace_ThreadChannelExternalOnly(t *testing.T) {
+	// 隔离外部群路径：父群 home Space 与 filterSpaceID 不重合，
+	// 子区只能通过外部群 source Space 才能匹配到 filterSpaceID。
+	convs := []*SyncUserConversationResp{
+		{ChannelID: "gExt____123456789012345", ChannelType: common.ChannelTypeCommunityTopic.Uint8(), SpaceID: ""},
+	}
+	groupMap := map[string]string{"gExt": "spaceHome"}
+	externalMap := map[string]string{"gExt": "spaceB"}
+
+	// filter=spaceB 只能通过 external 路径命中
+	result := filterConversationsCore(convs, "spaceB", "spaceDefault", groupMap, externalMap, nil, nil, false, false)
+	assert.Len(t, result, 1)
+
+	// filter=spaceHome 只能通过直接匹配命中（不走 external）
+	result = filterConversationsCore(convs, "spaceHome", "spaceDefault", groupMap, externalMap, nil, nil, false, false)
+	assert.Len(t, result, 1)
+}
+
+func TestFilterConversationsBySpace_ThreadChannelExternalFallback(t *testing.T) {
+	convs := []*SyncUserConversationResp{
+		{ChannelID: "gExt____123456789012345", ChannelType: common.ChannelTypeCommunityTopic.Uint8(), SpaceID: ""},
+	}
+	groupMap := map[string]string{"gExt": "spaceA"}
+	externalMap := map[string]string{"gExt": ""}
+
+	result := filterConversationsCore(convs, "spaceDefault", "spaceDefault", groupMap, externalMap, nil, nil, false, false)
+	assert.Len(t, result, 1)
+}
+
+func TestFilterConversationsBySpace_ThreadChannelLegacyParent(t *testing.T) {
+	// 父群无 space_id（旧群） → 子区跟旧群一样所有 Space 可见
+	convs := []*SyncUserConversationResp{
+		{ChannelID: "gLegacy____123456789012345", ChannelType: common.ChannelTypeCommunityTopic.Uint8(), SpaceID: ""},
+	}
+	result := filterConversationsCore(convs, "spaceA", "spaceDefault", map[string]string{}, nil, nil, nil, false, false)
+	assert.Len(t, result, 1)
+	result = filterConversationsCore(convs, "spaceB", "spaceDefault", map[string]string{}, nil, nil, nil, false, false)
+	assert.Len(t, result, 1)
+}
+
+func TestFilterConversationsBySpace_ThreadChannelInvalidID(t *testing.T) {
+	convs := []*SyncUserConversationResp{
+		{ChannelID: "bad-channel-id", ChannelType: common.ChannelTypeCommunityTopic.Uint8(), SpaceID: ""},
+		{ChannelID: "g1____123456789012345", ChannelType: common.ChannelTypeCommunityTopic.Uint8(), SpaceID: ""},
+	}
+	groupMap := map[string]string{"g1": "spaceA"}
+
+	result := filterConversationsCore(convs, "spaceA", "spaceDefault", groupMap, nil, nil, nil, false, false)
+	assert.Len(t, result, 1)
+	assert.Equal(t, "g1____123456789012345", result[0].ChannelID)
+}
+
+func TestFilterConversationsBySpace_ThreadChannelSkipGroupFilter(t *testing.T) {
+	convs := []*SyncUserConversationResp{
+		{ChannelID: "g1____123456789012345", ChannelType: common.ChannelTypeCommunityTopic.Uint8(), SpaceID: ""},
+		{ChannelID: "g2____987654321098765", ChannelType: common.ChannelTypeCommunityTopic.Uint8(), SpaceID: ""},
+	}
+	result := filterConversationsCore(convs, "spaceA", "spaceDefault", nil, nil, nil, nil, true, false)
+	assert.Len(t, result, 2)
 }
 
 func TestGetBotUIDs_SkipsSystemBots(t *testing.T) {

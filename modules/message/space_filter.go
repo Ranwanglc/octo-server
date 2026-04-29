@@ -1,12 +1,13 @@
 package message
 
 import (
-	"github.com/Mininglamp-OSS/octo-server/modules/group"
-	"github.com/Mininglamp-OSS/octo-server/modules/space"
-	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
+	"github.com/Mininglamp-OSS/octo-server/modules/group"
+	"github.com/Mininglamp-OSS/octo-server/modules/space"
+	"github.com/Mininglamp-OSS/octo-server/modules/thread"
+	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"go.uber.org/zap"
 )
 
@@ -33,14 +34,29 @@ func FilterConversationsBySpace(
 
 	// 群聊的 channel_id 是裸 group_no（没有 Space 前缀），ParseChannelID 返回 spaceID=""。
 	// 需要从 group 表查出真实 space_id。
+	groupNoSeen := make(map[string]struct{})
 	var bareGroupNos []string
 	var bareDMUIDs []string
+	addGroupNo := func(no string) {
+		if _, ok := groupNoSeen[no]; ok {
+			return
+		}
+		groupNoSeen[no] = struct{}{}
+		bareGroupNos = append(bareGroupNos, no)
+	}
 	for _, conv := range conversations {
 		if conv.SpaceID == "" && conv.ChannelType == common.ChannelTypeGroup.Uint8() {
-			bareGroupNos = append(bareGroupNos, conv.ChannelID)
+			addGroupNo(conv.ChannelID)
 		}
 		if conv.SpaceID == "" && conv.ChannelType == common.ChannelTypePerson.Uint8() {
 			bareDMUIDs = append(bareDMUIDs, conv.ChannelID)
+		}
+		// 子区会话需要按父群的 space_id 决定可见性，把父群 groupNo 也加入查询。
+		// 同一父群的多个子区/父群本身都可能命中，dedup 避免下游 GetGroups 重复查询。
+		if conv.ChannelType == common.ChannelTypeCommunityTopic.Uint8() {
+			if parentNo, _, err := thread.ParseChannelID(conv.ChannelID); err == nil {
+				addGroupNo(parentNo)
+			}
 		}
 	}
 
@@ -100,8 +116,13 @@ func filterConversationsCore(
 			spaceID = groupSpaceMap[conv.ChannelID]
 		}
 
-		if spaceID == filterSpaceID {
+		if spaceID == filterSpaceID && conv.ChannelType != common.ChannelTypeCommunityTopic.Uint8() {
 			filtered = append(filtered, conv)
+		} else if conv.ChannelType == common.ChannelTypeCommunityTopic.Uint8() {
+			// 子区：按父群的 space_id 决定可见性，规则与群聊一致（含外部群兜底、旧群放行）
+			if filterThreadConv(conv, filterSpaceID, defaultSpaceID, groupSpaceMap, externalGroupMap, skipGroupFilter) {
+				filtered = append(filtered, conv)
+			}
 		} else if conv.ChannelType == common.ChannelTypeGroup.Uint8() {
 			// 外部群：用户作为外部成员加入的群，在其 source Space 下显示
 			if sourceSpace, ok := externalGroupMap[conv.ChannelID]; ok {
@@ -119,9 +140,10 @@ func filterConversationsCore(
 				// 旧群（无 space_id）在所有 Space 可见
 				filtered = append(filtered, conv)
 			}
-		} else if spaceID == "" && filterSpaceID == defaultSpaceID {
+		} else if spaceID == "" && filterSpaceID == defaultSpaceID && conv.ChannelType != common.ChannelTypeCommunityTopic.Uint8() {
 			// 裸 UID 旧会话只在默认 Space 显示
 			// Bot DM：Bot 不在默认 Space 则排除（查询失败时不过滤，避免误删）
+			// 子区已在上面按父群 space_id 处理过，不能再从这里漏过去
 			if !skipBotFilter && conv.ChannelType == common.ChannelTypePerson.Uint8() && botSet[conv.ChannelID] && !botInSpace[conv.ChannelID] {
 				continue
 			}
@@ -147,6 +169,41 @@ func filterConversationsCore(
 		}
 	}
 	return filtered
+}
+
+// filterThreadConv 判断子区会话是否应在 filterSpaceID 中显示。
+// 规则：跟父群一致——按父群的 space_id 匹配，外部群走 source Space 兜底，旧群（无 space_id）所有 Space 可见。
+// channel_id 解析失败的子区会话会被丢弃。
+func filterThreadConv(
+	conv *SyncUserConversationResp,
+	filterSpaceID string,
+	defaultSpaceID string,
+	groupSpaceMap map[string]string,
+	externalGroupMap map[string]string,
+	skipGroupFilter bool,
+) bool {
+	parentNo, _, err := thread.ParseChannelID(conv.ChannelID)
+	if err != nil {
+		return false
+	}
+	if skipGroupFilter {
+		return true
+	}
+	parentSpaceID := groupSpaceMap[parentNo]
+	if parentSpaceID == filterSpaceID {
+		return true
+	}
+	if sourceSpace, ok := externalGroupMap[parentNo]; ok {
+		eff := sourceSpace
+		if eff == "" {
+			eff = defaultSpaceID
+		}
+		if eff == filterSpaceID {
+			return true
+		}
+	}
+	// 父群无 space_id（旧群） → 子区跟旧群一样所有 Space 可见
+	return parentSpaceID == ""
 }
 
 // personConvHasSpaceMessages 检查 Person 会话的 Recents 中是否有 space_id 匹配的消息。
