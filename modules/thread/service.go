@@ -132,7 +132,9 @@ type ThreadResp struct {
 	HasThreadMd       bool   `json:"has_thread_md"`
 	ThreadMdVersion   int64  `json:"thread_md_version"`
 	ThreadMdUpdatedAt string `json:"thread_md_updated_at"`
-	Mute      int    `json:"mute"` // 当前用户免打扰状态，仅 GetThread 填充
+	// Mute 当前用户的子区免打扰状态，仅 GetThread 填充。
+	// nil = 用户未设置（前端应继承父群组 mute）；0 = 显式未静音；1 = 显式静音。
+	Mute      *int   `json:"mute"`
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
 }
@@ -479,13 +481,14 @@ func (s *Service) GetThread(groupNo, shortID, loginUID string) (*ThreadResp, err
 	if loginUID != "" {
 		setting, err := s.db.QuerySetting(groupNo, shortID, loginUID)
 		if err != nil {
-			s.Warn("查询子区免打扰设置失败，mute 字段降级为 0",
+			s.Warn("查询子区免打扰设置失败，mute 字段返回 nil（前端按未设置处理）",
 				zap.Error(err),
 				zap.String("groupNo", groupNo),
 				zap.String("shortID", shortID),
 				zap.String("loginUID", loginUID))
 		} else if setting != nil {
-			resp.Mute = setting.Mute
+			mute := setting.Mute
+			resp.Mute = &mute
 		}
 	}
 	return resp, nil

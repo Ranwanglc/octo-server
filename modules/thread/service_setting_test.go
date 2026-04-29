@@ -56,7 +56,8 @@ func TestUpdateSetting_InsertAndUpdateMute(t *testing.T) {
 	assert.Equal(t, 0, settings[0].Mute)
 }
 
-// TestGetThread_ReturnsMuteForLoginUID 验证 GetThread 返回当前登录用户的 mute 状态
+// TestGetThread_ReturnsMuteForLoginUID 验证 GetThread 返回当前登录用户的 mute 状态。
+// Mute 是 *int 三态：nil=未设置（继承父群组）、*0=显式未静音、*1=显式静音。
 func TestGetThread_ReturnsMuteForLoginUID(t *testing.T) {
 	svc, groupNo := setupServiceTestData(t)
 	thread, err := svc.CreateThread(&CreateThreadReq{
@@ -64,12 +65,24 @@ func TestGetThread_ReturnsMuteForLoginUID(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	// 未设置时默认 0
+	// 未设置时返回 nil（前端继承父群组）
 	resp, err := svc.GetThread(groupNo, thread.ShortID, testutil.UID)
 	assert.NoError(t, err)
-	assert.Equal(t, 0, resp.Mute)
+	assert.Nil(t, resp.Mute, "未设置时 Mute 应为 nil")
 
-	// 设置 mute=1 后应返回 1
+	// 显式设置 mute=0：应返回非 nil 指针，值为 0
+	err = svc.UpdateSetting(groupNo, thread.ShortID, testutil.UID, map[string]interface{}{
+		"mute": float64(0),
+	})
+	assert.NoError(t, err)
+
+	resp, err = svc.GetThread(groupNo, thread.ShortID, testutil.UID)
+	assert.NoError(t, err)
+	if assert.NotNil(t, resp.Mute, "显式设置后 Mute 不应为 nil") {
+		assert.Equal(t, 0, *resp.Mute)
+	}
+
+	// 设置 mute=1 后应返回 *1
 	err = svc.UpdateSetting(groupNo, thread.ShortID, testutil.UID, map[string]interface{}{
 		"mute": float64(1),
 	})
@@ -77,17 +90,19 @@ func TestGetThread_ReturnsMuteForLoginUID(t *testing.T) {
 
 	resp, err = svc.GetThread(groupNo, thread.ShortID, testutil.UID)
 	assert.NoError(t, err)
-	assert.Equal(t, 1, resp.Mute)
+	if assert.NotNil(t, resp.Mute) {
+		assert.Equal(t, 1, *resp.Mute)
+	}
 
-	// loginUID 为空时不查询 setting，Mute 为零值
+	// loginUID 为空时不查询 setting，Mute 为 nil
 	resp, err = svc.GetThread(groupNo, thread.ShortID, "")
 	assert.NoError(t, err)
-	assert.Equal(t, 0, resp.Mute)
+	assert.Nil(t, resp.Mute)
 
-	// 其他用户读取应得到自己的设置（默认 0），不串号
+	// 其他用户读取应得到自己的设置（未设置 → nil），不串号
 	resp, err = svc.GetThread(groupNo, thread.ShortID, "other-uid")
 	assert.NoError(t, err)
-	assert.Equal(t, 0, resp.Mute)
+	assert.Nil(t, resp.Mute)
 }
 
 func TestUpdateSetting_InvalidMuteValue(t *testing.T) {

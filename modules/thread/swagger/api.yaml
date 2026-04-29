@@ -505,7 +505,13 @@ definitions:
       mute:
         type: integer
         enum: [0, 1]
-        description: 当前登录用户的免打扰状态，0=未静音，1=静音。仅单条详情接口填充，列表接口始终为 0。
+        nullable: true
+        description: |
+          当前登录用户对该子区的免打扰设置（仅单条详情接口填充）：
+          - null：用户未对该子区设置过免打扰，前端应继承父群组 mute
+          - 0：用户显式设置为未静音，不继承父群组
+          - 1：用户显式设置为静音
+          列表接口（GetThreads）始终返回 null，不代表真实状态。
       created_at:
         type: string
       updated_at:
