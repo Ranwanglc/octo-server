@@ -93,7 +93,9 @@ func newTestOIDC(t *testing.T, mp *MockProvider, users *fakeUserLookup, store *f
 	}
 	cfg := &Config{
 		Enabled: true,
-		Aegis: ProviderConfig{
+		Provider: ProviderConfig{
+			ID:                   "aegis",
+			Name:                 "Aegis",
 			Issuer:               mp.Issuer,
 			ClientID:             mp.ClientID,
 			RedirectURI:          "https://app.example.com/callback",
@@ -107,7 +109,7 @@ func newTestOIDC(t *testing.T, mp *MockProvider, users *fakeUserLookup, store *f
 		Log:        log.NewTLog("OIDC-test"),
 		cfg:        cfg,
 		client:     client,
-		service:    newService(cfg.Aegis, store, users),
+		service:    newService(cfg.Provider, store, users),
 		store:      store,
 		stateStore: newMemoryStateStore(),
 		authcode:   newFakeAuthcode(),
@@ -284,8 +286,9 @@ func TestAPI_Callback_E2E_ExistingUser(t *testing.T) {
 }
 
 // 成功路径若 SetAuthcode 写 LoginRespJSON 失败,应:
-//   1. 立刻补写 "0" 让前端轮询尽早感知
-//   2. redirect URL 拼 ?oidc_error=1
+//  1. 立刻补写 "0" 让前端轮询尽早感知
+//  2. redirect URL 拼 ?oidc_error=1
+//
 // 不能让前端傻等 1 分钟 TTL 超时。
 func TestAPI_Callback_SetAuthcodeFailureSurfacesToFrontend(t *testing.T) {
 	mp := NewMockProvider(t)

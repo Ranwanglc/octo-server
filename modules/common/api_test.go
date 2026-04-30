@@ -129,6 +129,123 @@ func TestGetAppConfig_OIDCAccountURLFallsBackToIssuer(t *testing.T) {
 	assert.NotContains(t, body, "oidc_reset_password_url")
 }
 
+// 单 OIDC provider 元数据下发: provider id/name/authorize_path 让前端不再硬编码,
+// 接入新 IdP（Aegis/Google/...）时只改部署 env 即可,前端无需改代码。
+func TestGetAppConfig_OIDCProvidersWithCustomID(t *testing.T) {
+	t.Setenv("DM_OIDC_ENABLED", "true")
+	t.Setenv("DM_OIDC_PROVIDER_ID", "google")
+	t.Setenv("DM_OIDC_PROVIDER_NAME", "Google")
+	t.Setenv("DM_OIDC_ACCOUNT_URL", "https://accounts.google.com/")
+	t.Setenv("DM_OIDC_RESET_PASSWORD_URL", "https://accounts.google.com/signin/recovery")
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+	err = f.appConfigDB.insert(&appConfigModel{})
+	assert.NoError(t, err)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/common/appconfig", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	body := w.Body.String()
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, body, `"oidc_providers":[`)
+	assert.Contains(t, body, `"id":"google"`)
+	assert.Contains(t, body, `"name":"Google"`)
+	assert.Contains(t, body, `"authorize_path":"/v1/auth/oidc/google/authorize"`)
+	assert.Contains(t, body, `"account_url":"https://accounts.google.com/"`)
+	assert.Contains(t, body, `"reset_password_url":"https://accounts.google.com/signin/recovery"`)
+}
+
+// 未配置 PROVIDER_ID/NAME 时 provider 元数据回退到默认值,保证基础部署即可工作。
+func TestGetAppConfig_OIDCProvidersDefaults(t *testing.T) {
+	t.Setenv("DM_OIDC_ENABLED", "true")
+	t.Setenv("DM_OIDC_PROVIDER_ID", "")
+	t.Setenv("DM_OIDC_PROVIDER_NAME", "")
+	t.Setenv("DM_OIDC_AEGIS_ISSUER", "https://accounts.imocto.cn")
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+	err = f.appConfigDB.insert(&appConfigModel{})
+	assert.NoError(t, err)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/common/appconfig", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	body := w.Body.String()
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, body, `"id":"oidc"`)
+	assert.Contains(t, body, `"name":"SSO"`)
+	assert.Contains(t, body, `"authorize_path":"/v1/auth/oidc/oidc/authorize"`)
+}
+
+// account_url 仅配 PROVIDER_ISSUER (新 key,无 ACCOUNT_URL/AEGIS_ISSUER) 时也要回退,
+// 防止迁移到新 env 名后 account_url 变空。
+func TestGetAppConfig_OIDCAccountURLFallsBackToProviderIssuer(t *testing.T) {
+	t.Setenv("DM_OIDC_ENABLED", "true")
+	t.Setenv("DM_OIDC_ACCOUNT_URL", "")
+	t.Setenv("DM_OIDC_PROVIDER_ISSUER", "https://accounts.example.com")
+	t.Setenv("DM_OIDC_AEGIS_ISSUER", "")
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+	err = f.appConfigDB.insert(&appConfigModel{})
+	assert.NoError(t, err)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/common/appconfig", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	body := w.Body.String()
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, body, `"oidc_account_url":"https://accounts.example.com"`)
+	assert.Contains(t, body, `"account_url":"https://accounts.example.com"`)
+}
+
+// 畸形 PROVIDER_ID 不应进 authorize_path,common 模块独立校验确保即便
+// oidc 模块 LoadConfig 失败/未运行,appconfig 也不会下发坏值。
+func TestGetAppConfig_OIDCProvidersInvalidIDFallsBackToDefault(t *testing.T) {
+	t.Setenv("DM_OIDC_ENABLED", "true")
+	t.Setenv("DM_OIDC_PROVIDER_ID", "bad/id")
+	t.Setenv("DM_OIDC_PROVIDER_NAME", "Bad")
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+	err = f.appConfigDB.insert(&appConfigModel{})
+	assert.NoError(t, err)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/common/appconfig", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	body := w.Body.String()
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, body, `"id":"oidc"`)
+	assert.NotContains(t, body, "bad/id")
+	assert.Contains(t, body, `"authorize_path":"/v1/auth/oidc/oidc/authorize"`)
+}
+
+// OIDC 关闭时 oidc_providers 整个不下发,与已有 oidc_account_url/reset 保持一致行为。
+func TestGetAppConfig_OIDCProvidersDisabledOmitted(t *testing.T) {
+	t.Setenv("DM_OIDC_ENABLED", "false")
+	t.Setenv("DM_OIDC_PROVIDER_ID", "google")
+	t.Setenv("DM_OIDC_ACCOUNT_URL", "https://accounts.google.com/")
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+	err = f.appConfigDB.insert(&appConfigModel{})
+	assert.NoError(t, err)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/common/appconfig", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	body := w.Body.String()
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.NotContains(t, body, "oidc_providers")
+}
+
 // OIDC 未启用时，即使 issuer/url 已配置也不下发，避免误导前端。
 func TestGetAppConfig_OIDCDisabledOmitsAll(t *testing.T) {
 	t.Setenv("DM_OIDC_ENABLED", "false")

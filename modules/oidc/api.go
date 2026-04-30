@@ -115,16 +115,16 @@ func New(ctx *config.Context) *OIDC {
 		callbackGuardWindowFromEnv(),
 	)
 
-	cctx, cancel := context.WithTimeout(context.Background(), cfg.Aegis.HTTPTimeout)
+	cctx, cancel := context.WithTimeout(context.Background(), cfg.Provider.HTTPTimeout)
 	defer cancel()
 	client, cerr := NewClient(cctx, ClientConfig{
-		Issuer:       cfg.Aegis.Issuer,
-		ClientID:     cfg.Aegis.ClientID,
-		ClientSecret: cfg.Aegis.ClientSecret,
-		RedirectURI:  cfg.Aegis.RedirectURI,
-		Scopes:       cfg.Aegis.Scopes,
-		HTTPTimeout:  cfg.Aegis.HTTPTimeout,
-		ClockSkew:    cfg.Aegis.ClockSkew,
+		Issuer:       cfg.Provider.Issuer,
+		ClientID:     cfg.Provider.ClientID,
+		ClientSecret: cfg.Provider.ClientSecret,
+		RedirectURI:  cfg.Provider.RedirectURI,
+		Scopes:       cfg.Provider.Scopes,
+		HTTPTimeout:  cfg.Provider.HTTPTimeout,
+		ClockSkew:    cfg.Provider.ClockSkew,
 	})
 	if cerr != nil {
 		o.Error("OIDC Discovery 失败,handlers 将返回 500", zap.Error(cerr))
@@ -155,32 +155,54 @@ func (o *OIDC) Init() error {
 	if !ok {
 		return fmt.Errorf("oidc: Init: expected user.IService, got %T", raw)
 	}
-	o.service = newService(o.cfg.Aegis, o.store, newUserAdapter(userSvc, o.db))
+	o.service = newService(o.cfg.Provider, o.store, newUserAdapter(userSvc, o.db))
 
 	// SyncWorker:Aegis 侧账号状态变更(封号/改密/登出)→ DMWork 主动感知。
 	// Interval=0 视为禁用,适合本地开发 / DB 还没准备好 RT 行的早期阶段。
-	if o.cfg.Aegis.SyncInterval > 0 && o.db != nil && o.killer != nil {
-		enc, err := NewEncryptor(o.cfg.Aegis.RefreshTokenEncryptionKey)
+	if o.cfg.Provider.SyncInterval > 0 && o.db != nil && o.killer != nil {
+		enc, err := NewEncryptor(o.cfg.Provider.RefreshTokenEncryptionKey)
 		if err != nil {
 			return fmt.Errorf("oidc: Init: encryptor: %w", err)
 		}
 		// 注入 Redis tick lock:多实例同 tick 只一个跑,IdP 流量降到 1/N。
 		o.tickLock = newRedisTickLock(o.ctx)
 		o.worker = NewSyncWorker(SyncWorkerConfig{
-			Interval:    o.cfg.Aegis.SyncInterval,
-			Concurrency: o.cfg.Aegis.SyncConcurrency,
+			Interval:    o.cfg.Provider.SyncInterval,
+			Concurrency: o.cfg.Provider.SyncConcurrency,
 		}, o.db, enc, clientRefresher{c: o.client}, o.killer, o.audit, o.tickLock)
 		o.worker.Start(context.Background())
 	}
 	return nil
 }
 
+// legacyProviderPathID Route 在 provider ID 与之不同时额外挂一组路径作为前端兼容,
+// 保证已发布的 web 客户端在后端 PR 合入当天仍能登录。一个迭代后随老前端下线一并删除。
+const legacyProviderPathID = "aegis"
+
 // Route 路由注册。Enabled=false 时所有端点返回 404,避免漏配置静默通过。
+//
+// 路径段从 cfg.Provider.ID 取,默认 "oidc";老前端硬编码的 "/aegis" 路径在 ID
+// 不为 "aegis" 时同时挂载作为兼容入口,迁移完成后删除 legacyProviderPathID 即可。
 //
 // authorize/callback 是公开端点(IdP 重定向到 callback 时不带 dmwork token);
 // logout 必须 AuthMiddleware 校验后拿 uid 才能踢线 + 吊销 RT,所以单独分组。
 func (o *OIDC) Route(r *wkhttp.WKHttp) {
-	pub := r.Group("/v1/auth/oidc/aegis")
+	id := ""
+	if o.cfg != nil {
+		id = o.cfg.Provider.ID
+	}
+	if id == "" {
+		id = "oidc"
+	}
+	o.routeAt(r, id)
+	if id != legacyProviderPathID {
+		o.routeAt(r, legacyProviderPathID)
+	}
+}
+
+func (o *OIDC) routeAt(r *wkhttp.WKHttp, pathID string) {
+	base := "/v1/auth/oidc/" + pathID
+	pub := r.Group(base)
 	if o.cfg == nil || !o.cfg.Enabled {
 		// disabled 路径三个端点都返 404,所以 logout 挂在 pub 而非 authed 没有
 		// 安全影响 —— 不挂 AuthMiddleware 反而避免在 OIDC 关闭时给 /logout 引入
@@ -192,7 +214,7 @@ func (o *OIDC) Route(r *wkhttp.WKHttp) {
 	}
 	pub.GET("/authorize", o.authorize)
 	pub.GET("/callback", o.callback)
-	authed := r.Group("/v1/auth/oidc/aegis", o.ctx.AuthMiddleware(r))
+	authed := r.Group(base, o.ctx.AuthMiddleware(r))
 	authed.POST("/logout", o.logout)
 }
 
@@ -217,7 +239,7 @@ func (o *OIDC) authorize(c *wkhttp.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, errMsg("authcode invalid"))
 		return
 	}
-	cleanReturnTo, err := ValidateReturnTo(c.Query("return_to"), o.cfg.Aegis.ReturnToHosts)
+	cleanReturnTo, err := ValidateReturnTo(c.Query("return_to"), o.cfg.Provider.ReturnToHosts)
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, errMsg(err.Error()))
 		return
@@ -244,7 +266,7 @@ func (o *OIDC) authorize(c *wkhttp.Context) {
 		}
 	}
 	sd := &StateData{
-		Provider:       "aegis",
+		Provider:       o.cfg.Provider.ID,
 		CodeVerifier:   verifier,
 		Nonce:          nonce,
 		IP:             util.GetClientPublicIP(c.Request),
@@ -739,7 +761,7 @@ func fallbackReturnTo(rt string) string {
 //  2. **失败信号**:failed=true 时在 URL 拼 ?oidc_error=1,前端轮询拿到 "0" 时
 //     可结合 query 提示用户重试,而不是傻等 ThirdAuthcode 1 分钟超时。
 func (o *OIDC) redirectAfterCallback(c *wkhttp.Context, sd *StateData, failed bool) {
-	target, err := ValidateReturnTo(sd.ReturnTo, o.cfg.Aegis.ReturnToHosts)
+	target, err := ValidateReturnTo(sd.ReturnTo, o.cfg.Provider.ReturnToHosts)
 	if err != nil {
 		o.Warn("callback return_to 二次校验失败,回退根路径", zap.Error(err))
 		target = ""

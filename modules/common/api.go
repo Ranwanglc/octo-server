@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -65,7 +66,7 @@ func (cn *Common) Route(r *wkhttp.WKHttp) {
 		// commonNoAuth.GET("/keepalive", cn.getKeepAliveVideo)   // 获取后台运行引导视频
 		commonNoAuth.GET("/updater/:os/:version", cn.updater)  // 版本更新检查（兼容tauri）
 		commonNoAuth.GET("/pcupdater/:os", cn.getPCNewVersion) // pc版本更新检查
-		commonNoAuth.GET("/changelog", cn.changelog)            // 版本更新日志（公开）
+		commonNoAuth.GET("/changelog", cn.changelog)           // 版本更新日志（公开）
 	}
 
 	r.GET("/v1/health", func(c *wkhttp.Context) {
@@ -400,17 +401,60 @@ func (cn *Common) appConfig(c *wkhttp.Context) {
 		DestroyCoolingOffDays:          destroyCoolingOffDaysOrDefault(appConfigM.DestroyCoolingOffDays),
 		OIDCAccountURL:                 oidcAccountURL(),
 		OIDCResetPasswordURL:           oidcResetPasswordURL(),
+		OIDCProviders:                  oidcProviders(),
 	})
 }
 
+// oidcProviders 返回 OIDC provider 元数据数组,让前端不再硬编码 provider id/name/authorize_path。
+//
+// 单 provider 设计期下数组长度恒为 0 或 1:OIDC 启用时返回一个元素;关闭则空数组。
+// 用 omitempty 让关闭状态下整个字段从 JSON 里消失,与现有 oidc_account_url 保持一致。
+//
+// 字段来源:
+//   - id   : DM_OIDC_PROVIDER_ID (默认 "oidc"),与 oidc 模块路由路径段保持一致
+//   - name : DM_OIDC_PROVIDER_NAME (默认 "SSO"),前端用于按钮/菜单文案
+//   - authorize_path : 由 id 拼出 /v1/auth/oidc/<id>/authorize
+//   - account_url / reset_password_url : 复用顶层老字段的取值逻辑
+func oidcProviders() []oidcProviderResp {
+	if !oidcEnabled() {
+		return nil
+	}
+	id := os.Getenv("DM_OIDC_PROVIDER_ID")
+	if id == "" || !providerIDRe.MatchString(id) {
+		// 与 oidc 模块 LoadConfig 同义:非法 ID 视为未配置,回退到默认值,
+		// 避免畸形值进 authorize_path 把前端引到不存在的路由。
+		id = "oidc"
+	}
+	name := os.Getenv("DM_OIDC_PROVIDER_NAME")
+	if name == "" {
+		name = "SSO"
+	}
+	return []oidcProviderResp{{
+		ID:               id,
+		Name:             name,
+		AuthorizePath:    "/v1/auth/oidc/" + id + "/authorize",
+		AccountURL:       oidcAccountURL(),
+		ResetPasswordURL: oidcResetPasswordURL(),
+	}}
+}
+
+// providerIDRe 与 oidc/config.go 保持一致,避免 common 模块反向依赖 oidc 包。
+// 两处同一来源是 ops env,语义统一即可。
+var providerIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+
 // oidcAccountURL 返回 OIDC 账户中心首页 URL，仅在 OIDC 启用时下发。
-// 优先取 DM_OIDC_ACCOUNT_URL；未配置时回退到 DM_OIDC_AEGIS_ISSUER（Aegis 的
-// issuer 即账户首页，避免重复维护两份 URL）。
+//
+// 优先级:DM_OIDC_ACCOUNT_URL  >  DM_OIDC_PROVIDER_ISSUER  >  DM_OIDC_AEGIS_ISSUER。
+// 多数标准 OIDC IdP（Aegis/Keycloak/...）的 issuer 即账户首页，可省一份配置；
+// AEGIS_ISSUER 是过渡 alias，迁移完成后随 oidc 模块同步删除。
 func oidcAccountURL() string {
 	if !oidcEnabled() {
 		return ""
 	}
 	if v := os.Getenv("DM_OIDC_ACCOUNT_URL"); v != "" {
+		return v
+	}
+	if v := os.Getenv("DM_OIDC_PROVIDER_ISSUER"); v != "" {
 		return v
 	}
 	return os.Getenv("DM_OIDC_AEGIS_ISSUER")
@@ -619,8 +663,19 @@ type appConfigResp struct {
 	CanModifyApiUrl                int    `json:"can_modify_api_url"`                  // 允许修改api地址
 	ThreadOn                       int    `json:"thread_on"`                           // 子区功能开关
 	DestroyCoolingOffDays          int    `json:"destroy_cooling_off_days"`            // 注销冷静期天数（默认 7）
-	OIDCAccountURL                 string `json:"oidc_account_url,omitempty"`          // OIDC 账户中心首页 URL（如 Aegis 个人主页）
-	OIDCResetPasswordURL           string `json:"oidc_reset_password_url,omitempty"`   // OIDC 修改/重置密码 URL
+	OIDCAccountURL                 string `json:"oidc_account_url,omitempty"`          // OIDC 账户中心首页 URL（保留兼容老前端，新前端读 oidc_providers[].account_url）
+	OIDCResetPasswordURL           string `json:"oidc_reset_password_url,omitempty"`   // OIDC 修改/重置密码 URL（保留兼容老前端）
+	// OIDCProviders 单 provider 元数据数组（本期长度 ≤ 1）。让前端不再硬编码 provider id/name/authorize_path，
+	// 接入新 IdP 时只改部署 env 即可。OIDC 关闭时整个字段被 omitempty 隐去。
+	OIDCProviders []oidcProviderResp `json:"oidc_providers,omitempty"`
+}
+
+type oidcProviderResp struct {
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	AuthorizePath    string `json:"authorize_path"`
+	AccountURL       string `json:"account_url,omitempty"`
+	ResetPasswordURL string `json:"reset_password_url,omitempty"`
 }
 
 type appVersionReq struct {
