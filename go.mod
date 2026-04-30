@@ -4,6 +4,7 @@ go 1.20
 
 require (
 	firebase.google.com/go/v4 v4.13.0
+	github.com/DATA-DOG/go-sqlmock v1.5.0
 	github.com/alibabacloud-go/darabonba-openapi v0.2.1
 	github.com/alibabacloud-go/sms-intl-20180501 v1.0.1
 	github.com/alibabacloud-go/tea v1.2.1
