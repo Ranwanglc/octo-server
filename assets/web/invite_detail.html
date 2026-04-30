@@ -33,6 +33,26 @@
             margin-top: 5px;
         }
 
+        /* YUJ-168 / GH #1243: 外部群邀请 landing 页 Space 信任锚点样式。 */
+        .space-info {
+            margin-top: 4px;
+            font-size: 13px;
+            color: #666;
+            text-align: center;
+        }
+
+        .badge-external {
+            display: inline-block;
+            margin-left: 6px;
+            padding: 1px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            line-height: 16px;
+            background: #fff3e0;
+            color: #f57c00;
+            vertical-align: middle;
+        }
+
         .tip {
             margin-top: 15px;
         }
@@ -81,6 +101,7 @@
         <div class="top">
             <img class="avatar" />
             <div class="inviter"></div>
+            <div class="space-info" style="display:none"></div>
             <div class="tip"></div>
             <div class="remark"></div>
         </div>
@@ -102,6 +123,17 @@
             let data = resp;
             $(".avatar").attr('src', `${apiURL}users/${data.inviter}/avatar`);
             $(".inviter").text(data.inviter_name);
+            // YUJ-168 / GH #1243: 展示群所属 Space 信任锚点。
+            // - space_name 非空 → 渲染「来自 ${space_name}」（即使访问者未登录也显示）
+            // - is_external==1 → 追加「外部」徽标（仅对登录态访问且跨 Space 时置位）
+            if (data.space_name) {
+                let $info = $(".space-info");
+                $info.text(`来自 ${data.space_name}`);
+                if (data.is_external == 1) {
+                    $info.append(' <span class="badge-external">外部</span>');
+                }
+                $info.show();
+            }
             $(".tip").text(`邀请${data.items.length}位朋友加入群聊`);
             if (data.remark && data.remark != '') {
                 $(".remark").text(`"${data.remark}"`);

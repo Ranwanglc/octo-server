@@ -547,7 +547,21 @@ func (g *Group) groupDetailGet(c *wkhttp.Context) {
 		c.ResponseError(errors.New("查询成员数量失败！"))
 		return
 	}
-	c.Response(groupDetailResp{}.from(groupModel, memberCount))
+	// YUJ-168 / GH #1243: 外部群 H5 邀请 landing 页的信任锚点。
+	// - space_name：群所属 Space 名（无 SpaceID 时为空，前端据此决定是否渲染"来自 xx"）。
+	// - is_external：访问者相对群 Space 的外部性。仅在已登录且 loginUID 不是该 Space 成员时置 1。
+	//   Space 查询 / 成员校验任一失败都视为非外部（0），保证展示降级而非阻塞主接口。
+	spaceName, _ := spacepkg.GetSpaceName(g.ctx.DB(), groupModel.SpaceID)
+	isExternal := 0
+	if groupModel.SpaceID != "" && loginUID != "" {
+		inSpace, checkErr := spacepkg.CheckMembership(g.ctx.DB(), groupModel.SpaceID, loginUID)
+		if checkErr != nil {
+			g.Warn("检查 Space 成员失败", zap.Error(checkErr), zap.String("group_no", groupNo))
+		} else if !inSpace {
+			isExternal = 1
+		}
+	}
+	c.Response(groupDetailResp{}.from(groupModel, memberCount, spaceName, isExternal))
 }
 
 // list 我保存的群聊
@@ -3533,9 +3547,15 @@ type groupDetailResp struct {
 	UpdatedAt   string `json:"updated_at"`
 	MemberCount int64  `json:"member_count"` // 成员数量
 	Version     int64  `json:"version"`      // 群数据版本
+	// YUJ-168 / GH #1243: 外部群 H5 邀请 landing 页需要的信任锚点字段。
+	// SpaceName 始终下发（即使访问者未登录），只要群挂在某 Space 下；
+	// IsExternal 仅在访问者已登录且不是该 Space 成员时为 1，
+	// 未登录或同 Space 成员访问时为 0 —— 前端据此决定是否渲染"外部"徽标。
+	SpaceName  string `json:"space_name"`  // 群所属 Space 名称（空字符串表示无 Space）
+	IsExternal int    `json:"is_external"` // 访问者视角：0=内部/未登录，1=跨 Space 外部访问者
 }
 
-func (g groupDetailResp) from(model *Model, memberCount int64) groupDetailResp {
+func (g groupDetailResp) from(model *Model, memberCount int64, spaceName string, isExternal int) groupDetailResp {
 	return groupDetailResp{
 		GroupNo:     model.GroupNo,
 		Name:        model.Name,
@@ -3545,6 +3565,8 @@ func (g groupDetailResp) from(model *Model, memberCount int64) groupDetailResp {
 		MemberCount: memberCount,
 		CreatedAt:   model.CreatedAt.String(),
 		UpdatedAt:   model.UpdatedAt.String(),
+		SpaceName:   spaceName,
+		IsExternal:  isExternal,
 	}
 }
 
@@ -3840,12 +3862,31 @@ func (g *Group) groupInviteDetail(c *wkhttp.Context) {
 		status = groupInviteStatusExternalBlocked
 	}
 
+	// YUJ-168 / GH #1243: 为公开 H5 landing 提供信任锚点字段。
+	// - space_name 始终下发（前端判断非空才渲染"来自 xx"）。
+	// - is_external：公开接口场景下，如果访问者带着合法 token 经过可选登录态也会
+	//   通过 c.GetLoginUID() 拿到；未登录访问者 loginUID=="" → is_external=0，
+	//   前端不渲染"外部"徽标，仅保留 space_name 文案。
+	spaceName, _ := spacepkg.GetSpaceName(g.ctx.DB(), groupModel.SpaceID)
+	isExternal := 0
+	loginUID := c.GetLoginUID()
+	if groupModel.SpaceID != "" && loginUID != "" {
+		inSpace, checkErr := spacepkg.CheckMembership(g.ctx.DB(), groupModel.SpaceID, loginUID)
+		if checkErr != nil {
+			g.Warn("检查 Space 成员失败", zap.Error(checkErr), zap.String("group_no", groupNo))
+		} else if !inSpace {
+			isExternal = 1
+		}
+	}
+
 	c.Response(gin.H{
 		"status":       status,
 		"group_no":     groupNo,
 		"group_name":   groupModel.Name,
 		"avatar":       fmt.Sprintf("groups/%s/avatar", groupNo),
 		"member_count": memberCount,
+		"space_name":   spaceName,
+		"is_external":  isExternal,
 	})
 }
 

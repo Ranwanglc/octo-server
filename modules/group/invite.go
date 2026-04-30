@@ -15,6 +15,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkevent"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
+	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -400,7 +401,25 @@ func (g *Group) groupMemberInviteDetail(c *wkhttp.Context) {
 	}
 
 	g.Debug("inviteItems-", zap.Int("len", len(inviteItems)))
-	c.Response(InviteDetailResp{}.From(inviteDetilModel, inviteItems))
+	resp := InviteDetailResp{}.From(inviteDetilModel, inviteItems)
+	// YUJ-168 / GH #1243: 给 H5 邀请详情 landing 补上 Space 信任锚点字段。
+	// 取 invite 对应群的 space_id → space.name，再按 loginUID 计算相对外部性。
+	// 查询失败不阻塞主响应（保持原有 H5 预览可用），仅字段缺省。
+	if groupModel, gErr := g.db.QueryWithGroupNo(inviteDetilModel.GroupNo); gErr == nil && groupModel != nil {
+		spaceName, _ := spacepkg.GetSpaceName(g.ctx.DB(), groupModel.SpaceID)
+		resp.SpaceName = spaceName
+		if groupModel.SpaceID != "" && loginUID != "" {
+			inSpace, checkErr := spacepkg.CheckMembership(g.ctx.DB(), groupModel.SpaceID, loginUID)
+			if checkErr != nil {
+				g.Warn("检查 Space 成员失败", zap.Error(checkErr), zap.String("group_no", inviteDetilModel.GroupNo))
+			} else if !inSpace {
+				resp.IsExternal = 1
+			}
+		}
+	} else if gErr != nil {
+		g.Warn("查询群资料失败（不影响 invite 主响应）", zap.Error(gErr), zap.String("group_no", inviteDetilModel.GroupNo))
+	}
+	c.Response(resp)
 }
 
 // InviteReq 群邀请
@@ -426,6 +445,11 @@ type InviteDetailResp struct {
 	InviterName string                 `json:"inviter_name"` // 邀请者名称
 	Status      int                    `json:"status"`       // 状态 0.未确认 1.已确认
 	Items       []InviteItemDetailResp `json:"items"`        // 邀请项详情
+	// YUJ-168 / GH #1243: 外部群 H5 邀请 landing 的信任锚点字段。
+	// SpaceName 始终下发（前端判断非空才渲染"来自 xx"），
+	// IsExternal 仅在当前登录用户不属于该 Space 时置 1。
+	SpaceName  string `json:"space_name"`  // 群所属 Space 名称（空字符串表示无 Space）
+	IsExternal int    `json:"is_external"` // 访问者视角：0=内部/未登录，1=跨 Space 外部访问者
 }
 
 // From From

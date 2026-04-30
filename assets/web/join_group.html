@@ -10,6 +10,27 @@
     <meta name="format-detection" content="telephone=no, email=no"/><!--忽略页面中的数字识别为电话，忽略email识别 -->
     <link rel="stylesheet" type="text/css" href="css/join_group.css" />
     <link rel="stylesheet" type="text/css" href="css/index.css" />
+    <style type="text/css">
+        /* YUJ-168 / GH #1243: 外部群 H5 加群 landing 页 Space 信任锚点样式。 */
+        .space-info {
+            margin-top: 4px;
+            font-size: 13px;
+            color: #666;
+            text-align: center;
+        }
+
+        .badge-external {
+            display: inline-block;
+            margin-left: 6px;
+            padding: 1px 8px;
+            border-radius: 10px;
+            font-size: 11px;
+            line-height: 16px;
+            background: #fff3e0;
+            color: #f57c00;
+            vertical-align: middle;
+        }
+    </style>
     <script type="text/javascript" src="js/config.js"></script>
     <script type="text/javascript" src="js/jquery-3.4.1.min.js"></script>
     <script type="text/javascript" src="js/IMJSBridge.js"></script>
@@ -22,6 +43,7 @@
            <div class="group-info">
                <img class="group-avatar"  />
                <p class="name"></p>
+               <div class="space-info" style="display:none"></div>
                <p class="num"></p>
            </div>
        </div>
@@ -43,6 +65,17 @@
             let data = resp;
             $(".group-avatar").attr('src',`${apiURL}groups/${groupNo}/avatar`);
             $(".name").text(data.name);
+            // YUJ-168 / GH #1243: 展示群所属 Space 信任锚点。
+            // - space_name 非空 → 渲染「来自 ${space_name}」（访问者未登录也显示）
+            // - is_external==1 → 追加「外部」徽标（仅登录态访问且跨 Space 时置位）
+            if (data.space_name) {
+                let $info = $(".space-info");
+                $info.text(`来自 ${data.space_name}`);
+                if (data.is_external == 1) {
+                    $info.append(' <span class="badge-external">外部</span>');
+                }
+                $info.show();
+            }
             $(".num").text(`（共${data.member_count}人）`);
         })
         $("#ok").click(function(){

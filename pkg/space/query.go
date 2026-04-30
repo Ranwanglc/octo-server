@@ -86,3 +86,25 @@ type GroupSpaceInfo struct {
 	GroupNo string
 	SpaceID string
 }
+
+// GetSpaceName returns the name of an active Space by ID. Returns an empty
+// string (without error) when the Space does not exist, has status=0, or
+// spaceID is empty — callers can treat "no space info" uniformly.
+//
+// Used by H5 invite / join landing pages (YUJ-168 / GH #1243) to show
+// "来自 {space_name}" below the group name so that external-group invitees
+// have a trust anchor before they tap "加入群聊".
+func GetSpaceName(session *dbr.Session, spaceID string) (string, error) {
+	if spaceID == "" {
+		return "", nil
+	}
+	var name string
+	err := session.SelectBySql(
+		"SELECT name FROM space WHERE space_id=? AND status=1",
+		spaceID,
+	).LoadOne(&name)
+	if err != nil && err != dbr.ErrNotFound {
+		return "", err
+	}
+	return name, nil
+}
