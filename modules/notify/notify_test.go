@@ -39,9 +39,15 @@ func TestDedupTargets_EmptyStrings(t *testing.T) {
 
 func TestNotifyBotUID(t *testing.T) {
 	uid := NotifyBotUID("sp_abc123")
-	expected := "notify_sp_abc123_bot"
+	expected := "ntf_sp_abc123"
 	if uid != expected {
 		t.Errorf("expected %q, got %q", expected, uid)
+	}
+
+	// Verify a 32-char hex spaceID stays within VARCHAR(40)
+	long := NotifyBotUID("37ee82d33d704c54b21e5c1fe815eee0")
+	if len(long) > 40 {
+		t.Errorf("UID %q length %d exceeds VARCHAR(40)", long, len(long))
 	}
 }
 

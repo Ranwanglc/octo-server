@@ -13,8 +13,10 @@ import (
 )
 
 // NotifyBotUID 返回 Space 通知 Bot 的 UID。导出供 space 模块引用，避免字符串重复。
+// 格式：ntf_{spaceID}，总长 4+32=36 字符，在 user.uid VARCHAR(40) 限制内。
+// 历史：原格式 notify_{spaceID}_bot=43 字符，超 VARCHAR(40) 导致 MySQL 1406。
 func NotifyBotUID(spaceID string) string {
-	return fmt.Sprintf("notify_%s_bot", spaceID)
+	return fmt.Sprintf("ntf_%s", spaceID)
 }
 
 // ensureNotifyBots 启动时为所有活跃 Space 补建通知 Bot。
