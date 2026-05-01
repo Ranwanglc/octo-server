@@ -1101,6 +1101,25 @@ func (g *Group) addMembersTxWithSpace(members []string, groupNo string, operator
 		if operatorMemberForSpace == nil {
 			operatorMemberForSpace, _ = g.db.QueryMemberWithUID(operator, groupNo)
 		}
+		// YUJ-201 / GH#1268：纵深防御——inviterSpaceID 来自 X-Space-ID header，
+		// client 可以任意伪造。如果 operator 并不是该 Space 成员，就不能把它
+		// 写进 source_space_id（否则外部成员会被挂到 operator 看不见的 Space）。
+		// 校验失败降级为空串，让下面 switch 走 operator/home 兜底，同时 Warn 记录。
+		if inviterSpaceID != "" {
+			inSpace, membershipErr := spacepkg.CheckMembership(g.ctx.DB(), inviterSpaceID, operator)
+			if membershipErr != nil {
+				g.Error("邀请确认 X-Space-ID 成员校验失败",
+					zap.String("uid", operator),
+					zap.String("spaceId", inviterSpaceID),
+					zap.Error(membershipErr))
+				inviterSpaceID = ""
+			} else if !inSpace {
+				g.Warn("addmembers X-Space-ID not member, ignoring",
+					zap.String("uid", operator),
+					zap.String("spaceId", inviterSpaceID))
+				inviterSpaceID = ""
+			}
+		}
 		for _, uid := range members {
 			inSpace, spaceErr := spacepkg.CheckMembership(g.ctx.DB(), groupModel.SpaceID, uid)
 			if spaceErr != nil {
@@ -1957,9 +1976,28 @@ func (g *Group) groupScanJoin(c *wkhttp.Context) {
 			// 扫码入群后，群会错落在 B 的 home（ExampleCorp）视图。
 			// 三端（Android/iOS/Web React）的 header 拦截器（YUJ-88/GH#1038/EP3）
 			// 早就把 X-Space-ID 注入在每个请求上，这里只需读取 + 兜底 home。
+			//
+			// YUJ-201 / GH#1268：纵深防御——client 可以任意伪造 X-Space-ID
+			// header，如果 scaner 并不是那个 Space 的成员，就不能用它作为
+			// source_space_id（否则把群错落到 scaner 看不见的外部 Space）。
+			// 校验失败时降级成空串走 home 兜底，并 Warn 记一笔方便排查。
 			if headerSpaceID := strings.TrimSpace(c.GetHeader("X-Space-ID")); headerSpaceID != "" {
 				sourceSpaceID = headerSpaceID
-			} else {
+				inSpace, membershipErr := spacepkg.CheckMembership(g.ctx.DB(), headerSpaceID, scaner)
+				if membershipErr != nil {
+					g.Error("扫码入群 X-Space-ID 成员校验失败",
+						zap.String("uid", scaner),
+						zap.String("spaceId", headerSpaceID),
+						zap.Error(membershipErr))
+					sourceSpaceID = "" // 降级到 home Space，不阻断主流程
+				} else if !inSpace {
+					g.Warn("scanjoin X-Space-ID not member, ignoring",
+						zap.String("uid", scaner),
+						zap.String("spaceId", headerSpaceID))
+					sourceSpaceID = "" // 降级，不写脏数据
+				}
+			}
+			if sourceSpaceID == "" {
 				sourceSpaceID = spacemod.GetUserDefaultSpaceID(g.ctx, scaner)
 			}
 		}
