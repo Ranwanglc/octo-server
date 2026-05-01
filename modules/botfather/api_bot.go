@@ -7,11 +7,11 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/group"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/modules/group"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -194,6 +194,11 @@ func (bf *BotFather) getGroupMembers(c *wkhttp.Context) {
 	c.Response(members)
 }
 
+// threadChannelIDSeparator marks a thread (sub-topic) channel id as
+// "{parent_group_no}____{short_id}". The main-group GROUP.md endpoint does not
+// operate on thread channel ids; callers must use /threads/{short_id}/md.
+const threadChannelIDSeparator = "____"
+
 // getGroupMd returns GROUP.md content for a bot
 func (bf *BotFather) getGroupMd(c *wkhttp.Context) {
 	robotID := getRobotIDFromContext(c)
@@ -202,6 +207,10 @@ func (bf *BotFather) getGroupMd(c *wkhttp.Context) {
 		return
 	}
 	groupNo := c.Param("group_no")
+	if strings.Contains(groupNo, threadChannelIDSeparator) {
+		c.ResponseErrorf("thread channel id is not accepted here; use /v1/bot/groups/<group_no>/threads/<short_id>/md instead", nil)
+		return
+	}
 
 	// Verify bot is a group member
 	isMember, err := bf.groupService.ExistMember(groupNo, robotID)
@@ -246,6 +255,10 @@ func (bf *BotFather) updateGroupMd(c *wkhttp.Context) {
 		return
 	}
 	groupNo := c.Param("group_no")
+	if strings.Contains(groupNo, threadChannelIDSeparator) {
+		c.ResponseErrorf("thread channel id is not accepted here; use /v1/bot/groups/<group_no>/threads/<short_id>/md instead", nil)
+		return
+	}
 
 	// Verify bot is a group member
 	isMember, err := bf.groupService.ExistMember(groupNo, robotID)

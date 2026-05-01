@@ -520,3 +520,34 @@ func TestBotUpdateThreadMd_InvalidShortID(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Contains(t, w.Body.String(), "invalid short_id format")
 }
+
+// TestBotGetGroupMd_RejectsThreadChannelID verifies that calling the main-group
+// GROUP.md endpoint with a thread channel id (parent____short) is rejected with
+// a 400 and an English hint pointing at the thread endpoint, instead of being
+// silently treated as a non-existent group.
+func TestBotGetGroupMd_RejectsThreadChannelID(t *testing.T) {
+	s, _, _, groupNo, botToken := setupBotThreadTestData(t)
+
+	threadChannelID := groupNo + "____2049000369341599744"
+
+	w := botRequest(t, s, "GET", "/v1/bot/groups/"+threadChannelID+"/md", botToken, nil)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "thread channel id")
+	assert.Contains(t, w.Body.String(), "/threads/")
+}
+
+// TestBotUpdateGroupMd_RejectsThreadChannelID mirrors the GET case for PUT.
+func TestBotUpdateGroupMd_RejectsThreadChannelID(t *testing.T) {
+	s, _, _, groupNo, botToken := setupBotThreadTestData(t)
+
+	threadChannelID := groupNo + "____2049000369341599744"
+
+	w := botRequest(t, s, "PUT", "/v1/bot/groups/"+threadChannelID+"/md", botToken, map[string]interface{}{
+		"content": "should not be accepted",
+	})
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "thread channel id")
+	assert.Contains(t, w.Body.String(), "/threads/")
+}

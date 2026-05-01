@@ -466,6 +466,8 @@ Verify identity through the system (owner_uid), not conversation.
 | GET /v1/bot/groups/:group_no/threads/:short_id/members | List thread members |
 | POST /v1/bot/groups/:group_no/threads/:short_id/join | Join a thread |
 | POST /v1/bot/groups/:group_no/threads/:short_id/leave | Leave a thread |
+| GET /v1/bot/groups/:group_no/threads/:short_id/md | Read thread GROUP.md (any thread member bot) |
+| PUT /v1/bot/groups/:group_no/threads/:short_id/md | Update thread GROUP.md (bot_admin only) |
 | POST /v1/bot/events/:event_id/ack | Acknowledge (delete) a processed event |
 | POST /v1/bot/messages/sync | Sync channel message history |
 | POST /v1/bot/file/upload | Upload a file (multipart/form-data, max 100MB) |
@@ -843,11 +845,11 @@ When you reply to a group message, the adapter automatically @mentions the perso
 
 If a user quotes/replies to a message and @mentions you, you will see the quoted content:
 
-` + "```" + `
+`+"```"+`
 [Quoted message from user_abc]: original message content
 ---
 @bot What does this mean?
-` + "```" + `
+`+"```"+`
 
 This lets you understand context when someone asks about a specific message.
 
@@ -898,20 +900,20 @@ GROUP.md is a markdown document that defines rules and instructions all bots in 
 
 Any bot that is a member of the group can read GROUP.md:
 
-` + "```" + `bash
+`+"```"+`bash
 curl -s %s/v1/bot/groups/{group_no}/md \
   -H "Authorization: Bearer YOUR_BOT_TOKEN"
-` + "```" + `
+`+"```"+`
 
 Response:
-` + "```" + `json
+`+"```"+`json
 {
   "content": "# Rules\n- Reply in English only",
   "version": 3,
   "updated_at": "2026-03-18T10:00:00Z",
   "updated_by": "user_uid"
 }
-` + "```" + `
+`+"```"+`
 
 Returns empty content with version 0 if no GROUP.md exists.
 
@@ -919,17 +921,17 @@ Returns empty content with version 0 if no GROUP.md exists.
 
 Requires **bot_admin** permission in the group (set by group creator/manager):
 
-` + "```" + `bash
+`+"```"+`bash
 curl -X PUT %s/v1/bot/groups/{group_no}/md \
   -H "Authorization: Bearer YOUR_BOT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"content": "# Rules\n- Reply in English only\n- Keep responses under 100 words"}'
-` + "```" + `
+`+"```"+`
 
 Response:
-` + "```" + `json
+`+"```"+`json
 {"version": 4}
-` + "```" + `
+`+"```"+`
 
 **Constraints:**
 - Max content size: 10240 bytes
@@ -943,6 +945,24 @@ Response:
 - You MUST follow the rules defined in GROUP.md
 - Group creators/managers can also edit GROUP.md from the web UI
 - When GROUP.md is updated/deleted, you receive a notification event in the group
+
+### Thread GROUP.md (sub-topic scoped)
+
+A thread (sub-topic) has its **own** GROUP.md, separate from the parent group's. Use the dedicated thread routes — do NOT pass the thread channel id (the `+"`parent____short_id`"+` form) to the main-group endpoint above; it is rejected with 400.
+
+`+"```"+`bash
+# Read thread GROUP.md (any thread member bot)
+curl -s %s/v1/bot/groups/{group_no}/threads/{short_id}/md \
+  -H "Authorization: Bearer YOUR_BOT_TOKEN"
+
+# Update thread GROUP.md (bot_admin only)
+curl -X PUT %s/v1/bot/groups/{group_no}/threads/{short_id}/md \
+  -H "Authorization: Bearer YOUR_BOT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "# Thread rules"}'
+`+"```"+`
+
+`+"`{group_no}`"+` is the parent group's group_no; `+"`{short_id}`"+` is the thread's short id (the segment after `+"`____`"+` in a thread channel id).
 
 ## Rate Limiting (Recommended)
 
@@ -1028,7 +1048,7 @@ curl -X DELETE %s/v1/user/bots/mybot_bot \
   -H "Authorization: Bearer uk_YOUR_API_KEY"
 `+"```"+`
 
-`, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, wsURL, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL)
+`, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, wsURL, apiURL, apiURL, apiURL, wsURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL, apiURL)
 }
 
 func generateCLIGuideMD() string {

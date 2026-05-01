@@ -62,10 +62,6 @@ func (m *mockFileServiceForUpload) PresignedPutURL(objectPath string, contentTyp
 	return "https://example.com/upload?" + objectPath, "https://example.com/download/" + objectPath, nil
 }
 
-func (m *mockFileServiceForUpload) PresignedGetURL(objectPath string, filename string, disposition string, expires time.Duration) (string, error) {
-	return "https://example.com/signed-get/" + objectPath, nil
-}
-
 func TestBotUploadPresigned_FilenameSanitization(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
