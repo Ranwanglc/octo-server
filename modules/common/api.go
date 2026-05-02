@@ -20,6 +20,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -367,7 +368,8 @@ func (cn *Common) appConfig(c *wkhttp.Context) {
 	}
 	if versionI64 != 0 && int(versionI64) >= appConfigM.Version {
 		c.JSON(http.StatusOK, &appConfigResp{
-			Version: appConfigM.Version,
+			Version:       appConfigM.Version,
+			SystemBotUIDs: spacepkg.SystemBotList(),
 		})
 		return
 	}
@@ -402,6 +404,7 @@ func (cn *Common) appConfig(c *wkhttp.Context) {
 		OIDCAccountURL:                 oidcAccountURL(),
 		OIDCResetPasswordURL:           oidcResetPasswordURL(),
 		OIDCProviders:                  oidcProviders(),
+		SystemBotUIDs:                  spacepkg.SystemBotList(),
 	})
 }
 
@@ -668,6 +671,11 @@ type appConfigResp struct {
 	// OIDCProviders 单 provider 元数据数组（本期长度 ≤ 1）。让前端不再硬编码 provider id/name/authorize_path，
 	// 接入新 IdP 时只改部署 env 即可。OIDC 关闭时整个字段被 omitempty 隐去。
 	OIDCProviders []oidcProviderResp `json:"oidc_providers,omitempty"`
+	// SystemBotUIDs 系统级 Bot UID 列表（跨 Space 可见），单一真源为
+	// pkg/space.SystemBots = {botfather, u_10000, fileHelper}。客户端用于
+	// 替换 ChatActivity/iOS WKApp.config 中硬编码的 botfather，避免三端漂移
+	// 后 u_10000 / fileHelper 的 history 跨 Space 泄漏 (YUJ-219 / GH#1283)。
+	SystemBotUIDs []string `json:"system_bot_uids"`
 }
 
 type oidcProviderResp struct {

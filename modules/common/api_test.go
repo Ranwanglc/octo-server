@@ -85,6 +85,36 @@ func TestGetAppConfig(t *testing.T) {
 	req.Header.Set("token", testutil.Token)
 	s.GetRoute().ServeHTTP(w, req)
 	assert.Equal(t, true, strings.Contains(w.Body.String(), `"invite_system_account_join_group_on":1`))
+	// YUJ-219 / GH#1283: system_bot_uids 必须出现在 appconfig 响应里，
+	// 作为三端消除 SYSTEM_BOTS 硬编码漂移的单一真源。
+	body := w.Body.String()
+	assert.Contains(t, body, `"system_bot_uids":`)
+	assert.Contains(t, body, `"botfather"`)
+	assert.Contains(t, body, `"u_10000"`)
+	assert.Contains(t, body, `"fileHelper"`)
+}
+
+// YUJ-219 / GH#1283: 即使客户端带上相同 version 触发短路分支，
+// appconfig 也必须回吐 system_bot_uids，避免客户端升级后因 version 命中
+// 缓存短路永远拿不到新字段（旧客户端只跟 Version 走）。
+func TestGetAppConfig_SystemBotUIDsOnVersionShortCircuit(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+	err = f.appConfigDB.insert(&appConfigModel{})
+	assert.NoError(t, err)
+	w := httptest.NewRecorder()
+	// 带一个极大 version 强制命中短路分支
+	req, _ := http.NewRequest("GET", "/v1/common/appconfig?version=99999999", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, `"system_bot_uids":`)
+	assert.Contains(t, body, `"botfather"`)
+	assert.Contains(t, body, `"u_10000"`)
+	assert.Contains(t, body, `"fileHelper"`)
 }
 
 func TestGetAppConfig_OIDCURLsExplicit(t *testing.T) {

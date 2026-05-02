@@ -557,6 +557,11 @@ paths:
               oidc_reset_password_url:
                 type: string
                 description: "OIDC 修改/重置密码 URL。仅在 DM_OIDC_ENABLED=true 且 DM_OIDC_RESET_PASSWORD_URL 配置时下发"
+              system_bot_uids:
+                type: array
+                items:
+                  type: string
+                description: "系统级 Bot UID 列表（跨 Space 可见），单一真源 pkg/space.SystemBots = {botfather, u_10000, fileHelper}。客户端据此替换硬编码 botfather 判定，避免 SYSTEM_BOTS 跨端漂移 (YUJ-219 / GH#1283)"
         400:
           description: "错误"
           schema:
