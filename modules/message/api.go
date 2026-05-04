@@ -218,7 +218,12 @@ func New(ctx *config.Context) *Message {
 func (m *Message) Route(r *wkhttp.WKHttp) {
 	// UID 限流：所有认证路由组共享同一桶（详见 SharedUIDRateLimiter 注释）
 	uidLimit := appwkhttp.SharedUIDRateLimiter(m.ctx)
-	message := r.Group("/v1/message", m.ctx.AuthMiddleware(r), uidLimit)
+	// SpaceMiddleware 对齐 /v1/conversation：opt-in，未声明 X-Space-ID / space_id
+	// query 时直接放行；一旦声明就做成员校验并把 validated spaceID 写入 gin
+	// context。syncChannelMessage 的 Person 过滤（YUJ-219-A §4.1）因此读取 context
+	// 值而不是 raw header，防止任何 authenticated client 指定别人 Space 的
+	// X-Space-ID 来撞 SystemBot 历史消息（YUJ-226 / PR#1284 lml P1-1）。
+	message := r.Group("/v1/message", m.ctx.AuthMiddleware(r), uidLimit, spacepkg.SpaceMiddleware(m.ctx))
 	{
 
 		message.POST("/sync", m.sync)                             // 同步消息 (写模式才用到 TODO：此方法未来将弃用)
@@ -257,7 +262,7 @@ func (m *Message) Route(r *wkhttp.WKHttp) {
 	{
 		reaction.POST("/sync", m.syncReaction)
 	}
-	msg := r.Group("/v1/message", m.ctx.AuthMiddleware(r), uidLimit)
+	msg := r.Group("/v1/message", m.ctx.AuthMiddleware(r), uidLimit, spacepkg.SpaceMiddleware(m.ctx))
 	{
 		msg.POST("/send", m.sendMsg) // 代发消息
 	}
@@ -372,6 +377,10 @@ func (m *Message) sendMsg(c *wkhttp.Context) {
 }
 
 func (m *Message) sendMessage(channelID string, channelType uint8, fromUID string, payload map[string]interface{}) error {
+	// YUJ-219-A / GH#1283 (analysis-report.md §4.5 / §7.4)：
+	// 派发前为消息 payload 注入权威 space_id，让客户端 SpaceFilter 拿到可信字段，
+	// race 窗口的 fail-open 语义可降级为 fail-closed。
+	payload = m.enrichPayloadWithSpaceID(channelID, channelType, payload)
 	err := m.ctx.SendMessage(&config.MsgSendReq{
 		Header: config.MsgHeader{
 			RedDot: 1,
@@ -386,6 +395,108 @@ func (m *Message) sendMessage(channelID string, channelType uint8, fromUID strin
 		return errors.New("发送消息错误")
 	}
 	return nil
+}
+
+// enrichPayloadWithSpaceID 在派发消息前给 payload 写入权威 space_id。
+//
+// 背景 (YUJ-219-A / GH#1283，对应 analysis-report.md §4.5 / §7.4)：
+// 客户端 SpaceFilter / filterPersonMessagesBySpace 依赖 payload.space_id
+// 判定跨 Space 污染。老路径下该字段只在 PERSONAL DM 由发送端自带，GROUP /
+// COMMUNITY_TOPIC 的实时推送完全没有 Space 标签，导致客户端只能靠 channelInfo
+// 缓存的 space_id 推导，冷启动 race 窗口里命中 fail-open 分支，跨 Space 消息
+// 冒顶。本函数为后端权威源：
+//   - payload 已携带 space_id → 尊重发送端上送（PERSONAL 场景）
+//   - GROUP → 查 group.SpaceID 写入
+//   - COMMUNITY_TOPIC → 解析父群 groupNo，再查父群 SpaceID 写入（与
+//     filterThreadConv / enrichThreadCreatedMessages 对齐）
+//   - PERSONAL 无 space_id 且不是上述情况 → 不注入，保持老行为
+//
+// 查不到群或解析失败时静默跳过（注入是优化，缺失回落到老语义，不能因此
+// 阻断发送）；同一原则：payload 为 nil 时初始化一个空 map，避免调用方踩空。
+func (m *Message) enrichPayloadWithSpaceID(channelID string, channelType uint8, payload map[string]interface{}) map[string]interface{} {
+	lookup := func(groupNo string) (string, error) {
+		g, err := m.groupService.GetGroupWithGroupNo(groupNo)
+		if err != nil {
+			return "", err
+		}
+		if g == nil {
+			return "", nil
+		}
+		return g.SpaceID, nil
+	}
+	return enrichPayloadWithSpaceIDCore(channelID, channelType, payload, lookup, func(s string, fields ...zap.Field) {
+		m.Warn(s, fields...)
+	})
+}
+
+// enrichPayloadWithSpaceIDCore 是 enrichPayloadWithSpaceID 的纯函数核心，不依赖
+// *Message 接收器，便于单测。lookupGroupSpace(groupNo) 返回群的 space_id；
+// 查询失败（例如 DB 出错、群不存在）时返回 error，本函数记一条 warn 并跳过注入，
+// 保证发送流程不被阻断。logWarn 在生产使用 m.Warn，测试里传入 no-op。
+//
+// 分支顺序（YUJ-226 / lml P1-2 修复）：**先按 channelType 派发服务端权威路径，
+// 再 fallback 到 PERSONAL 的客户端上送**。老版本在最前面做 "sid 存在就 return"
+// 的短路，会让 Group/CommunityTopic 消息被客户端伪造的 payload.space_id 绕过，
+// 导致跨 Space 信号污染。新版本对 Group / CommunityTopic 一律以群表/父群
+// SpaceID 为准，无论客户端是否上送 space_id。只有 PERSONAL 才尊重客户端值
+// （DM Space 模式下 sender 自己声明会话归属）。
+func enrichPayloadWithSpaceIDCore(
+	channelID string,
+	channelType uint8,
+	payload map[string]interface{},
+	lookupGroupSpace func(groupNo string) (string, error),
+	logWarn func(string, ...zap.Field),
+) map[string]interface{} {
+	if payload == nil {
+		payload = make(map[string]interface{})
+	}
+	switch channelType {
+	case common.ChannelTypeGroup.Uint8():
+		// 服务端权威：GROUP 消息的 space_id 以群表为准，无条件覆盖客户端上送值，
+		// 防止 sender 给群消息塞错 Space tag（lml P1-2）。
+		spaceID, err := lookupGroupSpace(channelID)
+		if err != nil {
+			if logWarn != nil {
+				logWarn("enrichPayloadWithSpaceID: 查群失败，跳过 space_id 注入",
+					zap.String("channelID", channelID), zap.Error(err))
+			}
+			return payload
+		}
+		if spaceID != "" {
+			payload["space_id"] = spaceID
+		} else {
+			// 老群无 SpaceID：删除客户端可能伪造的 space_id，避免跨 Space 污染。
+			delete(payload, "space_id")
+		}
+		return payload
+	case common.ChannelTypeCommunityTopic.Uint8():
+		// 子区按父群反推，同样强制覆盖（父群是 Space 权威来源）。
+		parentNo, _, perr := thread.ParseChannelID(channelID)
+		if perr != nil || parentNo == "" {
+			if logWarn != nil {
+				logWarn("enrichPayloadWithSpaceID: 解析子区 channelID 失败，跳过 space_id 注入",
+					zap.String("channelID", channelID), zap.Error(perr))
+			}
+			return payload
+		}
+		spaceID, err := lookupGroupSpace(parentNo)
+		if err != nil {
+			if logWarn != nil {
+				logWarn("enrichPayloadWithSpaceID: 查父群失败，跳过 space_id 注入",
+					zap.String("parentGroupNo", parentNo), zap.Error(err))
+			}
+			return payload
+		}
+		if spaceID != "" {
+			payload["space_id"] = spaceID
+		} else {
+			delete(payload, "space_id")
+		}
+		return payload
+	}
+	// PERSONAL / 其它 channel type：尊重发送端上送值（DM Space 约定），不主动注入。
+	// 如果 payload["space_id"] 不存在或为空，保持原样，客户端按老语义处理。
+	return payload
 }
 
 // 消息编辑
@@ -877,6 +988,22 @@ func (m *Message) syncChannelMessage(c *wkhttp.Context) {
 		// content.users 每个元素的 is_external / source_space_name / home_space_*。
 		// 详见 Mininglamp-OSS/octo-server#1188。
 		m.enrichExternalMarkers(req.ChannelID, syncResp.Messages)
+	}
+
+	// YUJ-219-A / GH#1283 (analysis-report.md §4.1)：
+	// 对 Person (DM) 历史消息按已校验的 Space 做消息级过滤。GROUP 路径靠
+	// channel_id 本身 Space 隔离，不在此函数处理，避免误杀老群。客户端
+	// 仍会做一层 filter 兜底，这里的过滤是后端权威源——只能减，不能加。
+	//
+	// YUJ-226 / lml P1-1：/v1/message 路由组已挂 SpaceMiddleware，这里只读
+	// middleware 写入的 validated spaceID。middleware 已经对 X-Space-ID 的
+	// 成员身份做 fail-closed 校验（非成员直接 403），未声明时 spaceID == ""
+	// 跳过过滤（向前兼容老客户端）。**不允许**再回退到 c.GetHeader("X-Space-ID")，
+	// 否则 hardening 会被绕过。
+	if req.ChannelType == common.ChannelTypePerson.Uint8() {
+		if spaceID := spacepkg.GetSpaceID(c); spaceID != "" {
+			syncResp.Messages = filterPersonMessagesBySpace(syncResp.Messages, req.ChannelID, spaceID)
+		}
 	}
 
 	c.Response(syncResp)

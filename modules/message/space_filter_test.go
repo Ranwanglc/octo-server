@@ -536,3 +536,149 @@ func TestSyncPipeline_SystemBotsAlwaysReturned(t *testing.T) {
 		})
 	}
 }
+
+// ---------------- YUJ-219-A / GH#1283 · filterPersonMessagesBySpace ----------------
+//
+// 单测覆盖四种场景（analysis-report.md §4.1）：
+//   1) SystemBot 跨 Space 历史消息 → 丢弃；当前 Space 消息 → 保留
+//   2) 普通 DM 老消息（无 space_id）→ 保留（向前兼容）
+//   3) 普通 DM 跨 Space 消息 → 丢弃
+//   4) 空 spaceID / 空列表 / nil 消息的 no-op 行为
+
+func newMsgWithSpaceID(messageID int64, spaceID string) *MsgSyncResp {
+	payload := map[string]interface{}{
+		"content": "hi",
+	}
+	if spaceID != "" {
+		payload["space_id"] = spaceID
+	}
+	return &MsgSyncResp{
+		MessageID: messageID,
+		Payload:   payload,
+	}
+}
+
+func TestFilterPersonMessagesBySpace_SystemBot(t *testing.T) {
+	// channelID = "botfather"（SystemBot）
+	// 当前 Space = spaceA，按规则：
+	//   - spaceA 消息保留
+	//   - spaceB 消息丢弃
+	//   - 无 space_id 消息丢弃（SystemBot 老消息默认隐藏，对齐 Android filterSystemBotMessages）
+	msgs := []*MsgSyncResp{
+		newMsgWithSpaceID(1, "spaceA"),
+		newMsgWithSpaceID(2, "spaceB"),
+		newMsgWithSpaceID(3, ""), // 老 SystemBot 消息
+		newMsgWithSpaceID(4, "spaceA"),
+	}
+
+	got := filterPersonMessagesBySpace(msgs, "botfather", "spaceA")
+	assert.Len(t, got, 2)
+	assert.Equal(t, int64(1), got[0].MessageID)
+	assert.Equal(t, int64(4), got[1].MessageID)
+}
+
+func TestFilterPersonMessagesBySpace_OrdinaryDMLegacyCompat(t *testing.T) {
+	// channelID = "peer_uid"（非 SystemBot）
+	// 当前 Space = spaceA：
+	//   - spaceA 消息保留
+	//   - spaceB 消息丢弃
+	//   - 无 space_id 消息保留（普通 DM 向前兼容，对齐 filterConversationsCore 普通 DM 口径）
+	msgs := []*MsgSyncResp{
+		newMsgWithSpaceID(10, "spaceA"),
+		newMsgWithSpaceID(11, ""), // 老 DM 消息，无 space_id
+		newMsgWithSpaceID(12, "spaceB"),
+	}
+
+	got := filterPersonMessagesBySpace(msgs, "peer_uid", "spaceA")
+	assert.Len(t, got, 2)
+	ids := []int64{got[0].MessageID, got[1].MessageID}
+	assert.Contains(t, ids, int64(10))
+	assert.Contains(t, ids, int64(11))
+	assert.NotContains(t, ids, int64(12))
+}
+
+func TestFilterPersonMessagesBySpace_CrossSpaceDropped(t *testing.T) {
+	// 所有消息都属于 spaceB，当前 Space = spaceA → 全部丢弃。
+	msgs := []*MsgSyncResp{
+		newMsgWithSpaceID(20, "spaceB"),
+		newMsgWithSpaceID(21, "spaceB"),
+	}
+	got := filterPersonMessagesBySpace(msgs, "peer_uid", "spaceA")
+	assert.Len(t, got, 0)
+}
+
+func TestFilterPersonMessagesBySpace_AllInSpaceKept(t *testing.T) {
+	// 所有消息都属于 spaceA → 全部保留。
+	msgs := []*MsgSyncResp{
+		newMsgWithSpaceID(30, "spaceA"),
+		newMsgWithSpaceID(31, "spaceA"),
+		newMsgWithSpaceID(32, "spaceA"),
+	}
+	got := filterPersonMessagesBySpace(msgs, "peer_uid", "spaceA")
+	assert.Len(t, got, 3)
+}
+
+func TestFilterPersonMessagesBySpace_EmptySpaceIDNoOp(t *testing.T) {
+	// spaceID 空 → 不过滤，原样返回。保证老客户端未发送 X-Space-ID header
+	// 时行为不变（向前兼容）。
+	msgs := []*MsgSyncResp{
+		newMsgWithSpaceID(40, "spaceA"),
+		newMsgWithSpaceID(41, ""),
+		newMsgWithSpaceID(42, "spaceB"),
+	}
+	got := filterPersonMessagesBySpace(msgs, "botfather", "")
+	assert.Equal(t, msgs, got)
+}
+
+func TestFilterPersonMessagesBySpace_EmptySliceReturnsSame(t *testing.T) {
+	got := filterPersonMessagesBySpace(nil, "botfather", "spaceA")
+	assert.Nil(t, got)
+
+	empty := []*MsgSyncResp{}
+	got = filterPersonMessagesBySpace(empty, "botfather", "spaceA")
+	assert.Equal(t, empty, got)
+}
+
+func TestFilterPersonMessagesBySpace_NilMessagesSkipped(t *testing.T) {
+	// 切片里混入 nil 条目时不应 panic，且 nil 被跳过。
+	msgs := []*MsgSyncResp{
+		nil,
+		newMsgWithSpaceID(50, "spaceA"),
+		nil,
+		newMsgWithSpaceID(51, "spaceB"),
+	}
+	got := filterPersonMessagesBySpace(msgs, "peer_uid", "spaceA")
+	assert.Len(t, got, 1)
+	assert.Equal(t, int64(50), got[0].MessageID)
+}
+
+func TestFilterPersonMessagesBySpace_PayloadSpaceIDWrongType(t *testing.T) {
+	// payload.space_id 不是字符串（例如异常数据）→ 视为空值，按"无 space_id"
+	// 分支处理（普通 DM 保留 / SystemBot 丢弃）。
+	msgA := &MsgSyncResp{MessageID: 60, Payload: map[string]interface{}{"space_id": 123}}
+
+	// 普通 DM：保留
+	got := filterPersonMessagesBySpace([]*MsgSyncResp{msgA}, "peer_uid", "spaceA")
+	assert.Len(t, got, 1)
+
+	// SystemBot：丢弃
+	got = filterPersonMessagesBySpace([]*MsgSyncResp{msgA}, "fileHelper", "spaceA")
+	assert.Len(t, got, 0)
+}
+
+func TestFilterPersonMessagesBySpace_SystemBotListCoverage(t *testing.T) {
+	// 保证三个已知系统 Bot 都走 SystemBot 分支（老消息被丢弃）。
+	msgs := []*MsgSyncResp{newMsgWithSpaceID(70, "")}
+	for _, bot := range spacepkg.SystemBotList() {
+		got := filterPersonMessagesBySpace(msgs, bot, "spaceA")
+		assert.Emptyf(t, got, "SystemBot %s 的无 space_id 消息应被丢弃", bot)
+	}
+}
+
+func TestExtractPayloadSpaceID(t *testing.T) {
+	assert.Equal(t, "", extractPayloadSpaceID(nil))
+	assert.Equal(t, "", extractPayloadSpaceID(map[string]interface{}{}))
+	assert.Equal(t, "", extractPayloadSpaceID(map[string]interface{}{"foo": "bar"}))
+	assert.Equal(t, "", extractPayloadSpaceID(map[string]interface{}{"space_id": 123}))
+	assert.Equal(t, "spaceA", extractPayloadSpaceID(map[string]interface{}{"space_id": "spaceA"}))
+}

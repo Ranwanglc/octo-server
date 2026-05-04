@@ -282,6 +282,76 @@ func newSystemBotPlaceholder(uid string) *SyncUserConversationResp {
 	}
 }
 
+// filterPersonMessagesBySpace 按 X-Space-ID 过滤 Person (DM) 历史消息列表。
+//
+// 背景（YUJ-219-A / GH#1283，对应 analysis-report.md §4.1）：
+//   - /v1/message/channel/sync 原先对消息级 payload.space_id 0 过滤。客户端
+//     进入 botfather / u_10000 / fileHelper 或历史 DM 会话时，会拿到跨 Space
+//     的全部历史消息；配合三端不一致的渲染过滤，用户实际看到跨 Space 消息。
+//   - Phase 3 五层 Defense-in-Depth 全部作用在 conversation-list，message-level
+//     没有权威 Space 标签，这是"BotFather 历史消息跨 Space 可见"回归的根因。
+//
+// 本函数仅针对 Person (DM) 路径：
+//   - GROUP channel_id 本身做 Space 隔离（不同 Space 的群 channel_id 不同），
+//     对历史消息再过滤反而会误杀老群，因此 GROUP/COMMUNITY_TOPIC 路径不走这里。
+//   - 规则（与 Android ChatActivity.filterSystemBotMessages 口径对齐）：
+//       1) payload.space_id == spaceID               → 保留（精确匹配当前 Space）
+//       2) payload.space_id == "" && !isSystemBot    → 保留（老 DM 消息向前兼容）
+//       3) payload.space_id == "" &&  isSystemBot    → 丢弃（SystemBot 无 space
+//          标签的老消息默认隐藏，避免 fileHelper/u_10000 老消息跨 Space 泄露）
+//       4) payload.space_id != "" && != spaceID      → 丢弃（跨 Space 明确污染）
+//
+// 调用方需保证 spaceID != ""（空串视为未启用 Space 过滤，直接返回原列表），
+// 并只对 ChannelTypePerson 调用本函数。
+func filterPersonMessagesBySpace(msgs []*MsgSyncResp, channelID, spaceID string) []*MsgSyncResp {
+	if spaceID == "" || len(msgs) == 0 {
+		return msgs
+	}
+	isSysBot := spacepkg.IsSystemBot(channelID)
+	filtered := make([]*MsgSyncResp, 0, len(msgs))
+	for _, m := range msgs {
+		if m == nil {
+			continue
+		}
+		msid := extractPayloadSpaceID(m.Payload)
+		switch {
+		case msid == spaceID:
+			// 精确匹配当前 Space → 保留
+			filtered = append(filtered, m)
+		case msid == "" && !isSysBot:
+			// 老 DM 消息无 space_id 字段，向前兼容保留，避免 Phase 3 前的历史
+			// 消息被一刀切隐藏（对齐 filterConversationsCore 对普通 DM 的口径）。
+			filtered = append(filtered, m)
+		case msid == "" && isSysBot:
+			// 系统 Bot 的无 space_id 历史消息一律隐藏。对齐 Android
+			// filterSystemBotMessages 和 iOS filterMessagesBySpace，避免
+			// 老的 botfather/fileHelper/u_10000 对话全量跨 Space 暴露。
+			continue
+		case msid != spaceID:
+			// 明确跨 Space，丢弃。
+			continue
+		}
+	}
+	return filtered
+}
+
+// extractPayloadSpaceID 从已反序列化的消息 payload 中读取 space_id 字段。
+// payload 非 map、字段缺失或类型不符时返回 ""，调用方据此走"无 space_id"分支。
+func extractPayloadSpaceID(payload map[string]interface{}) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	v, ok := payload["space_id"]
+	if !ok {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return s
+}
+
 // resolveBotFilter 批量查询 Bot 状态和 Space 成员关系。
 // 返回 botSet（哪些 UID 是 Bot）、botInSpace（哪些 Bot 在 filterSpaceID 中）、skipBotFilter（DB 错误时为 true）。
 func resolveBotFilter(ctx *config.Context, filterSpaceID string, bareDMUIDs []string) (botSet map[string]bool, botInSpace map[string]bool, skipBotFilter bool) {

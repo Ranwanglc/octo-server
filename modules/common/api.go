@@ -404,6 +404,7 @@ func (cn *Common) appConfig(c *wkhttp.Context) {
 		OIDCAccountURL:                 oidcAccountURL(),
 		OIDCResetPasswordURL:           oidcResetPasswordURL(),
 		OIDCProviders:                  oidcProviders(),
+		// YUJ-219-A / GH#1283：单一真源下发系统 Bot UID 列表，替代三端硬编码。
 		SystemBotUIDs:                  spacepkg.SystemBotList(),
 	})
 }
@@ -671,10 +672,20 @@ type appConfigResp struct {
 	// OIDCProviders 单 provider 元数据数组（本期长度 ≤ 1）。让前端不再硬编码 provider id/name/authorize_path，
 	// 接入新 IdP 时只改部署 env 即可。OIDC 关闭时整个字段被 omitempty 隐去。
 	OIDCProviders []oidcProviderResp `json:"oidc_providers,omitempty"`
-	// SystemBotUIDs 系统级 Bot UID 列表（跨 Space 可见），单一真源为
-	// pkg/space.SystemBots = {botfather, u_10000, fileHelper}。客户端用于
-	// 替换 ChatActivity/iOS WKApp.config 中硬编码的 botfather，避免三端漂移
-	// 后 u_10000 / fileHelper 的 history 跨 Space 泄漏 (YUJ-219 / GH#1283)。
+
+	// SystemBotUIDs 下发系统 Bot UID 列表（目前 botfather / u_10000 / fileHelper）。
+	//
+	// 背景 (YUJ-219-A / GH#1283，对应 analysis-report.md §4.2)：
+	// 三端（Android / iOS / Web）原先各自硬编码系统 Bot 集合，跨端漂移：
+	//   - 后端 pkg/space/query.go :: SystemBots = {botfather, u_10000, fileHelper}
+	//   - Android ChatActivity.SYSTEM_BOTS = {"botfather"}    ← 漏 u_10000 / fileHelper
+	//   - iOS 仅用 WKApp.config.botfatherUID                  ← 也只有 botfather
+	// 结果：Android 端点开 u_10000 / fileHelper 时本地 filter 完全失效，
+	// 跨 Space 历史消息全量暴露。
+	//
+	// 解法：后端作为单一真源通过 appconfig 下发 SystemBotUIDs；各端启动时
+	// 消费此字段并替换硬编码常量，保持与后端 SystemBotList() 完全一致。
+	// 未来系统 Bot 列表调整（加新 Bot / 改名）只需改后端，无需同步三端。
 	SystemBotUIDs []string `json:"system_bot_uids"`
 }
 

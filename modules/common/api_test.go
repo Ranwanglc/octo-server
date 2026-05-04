@@ -297,3 +297,26 @@ func TestGetAppConfig_OIDCDisabledOmitsAll(t *testing.T) {
 	assert.NotContains(t, body, "oidc_account_url")
 	assert.NotContains(t, body, "oidc_reset_password_url")
 }
+
+// YUJ-219-A / GH#1283 (analysis-report.md §4.2)：
+// appconfig 下发 system_bot_uids，三端以后端 pkg/space.SystemBots 为单一真源，
+// 替代各端硬编码（Android 只有 "botfather"、iOS 只有 botfatherUID）。
+func TestGetAppConfig_SystemBotUIDsDownstreamed(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+	err = f.appConfigDB.insert(&appConfigModel{})
+	assert.NoError(t, err)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/v1/common/appconfig", nil)
+	req.Header.Set("token", testutil.Token)
+	s.GetRoute().ServeHTTP(w, req)
+	body := w.Body.String()
+	assert.Equal(t, http.StatusOK, w.Code)
+	// 单一真源：后端 pkg/space.SystemBots 里的三个 UID 必须全部出现。
+	assert.Contains(t, body, `"system_bot_uids":`)
+	assert.Contains(t, body, `"botfather"`)
+	assert.Contains(t, body, `"fileHelper"`)
+	assert.Contains(t, body, `"u_10000"`)
+}
