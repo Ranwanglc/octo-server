@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -221,6 +222,76 @@ func TestUserListByUsernameKeyword(t *testing.T) {
 		})
 	}
 }
+
+// SSO 用户的 user.email 由 OIDC claim 写入,但 user.username 仅由 phone 兜底
+// (api.go:2975)。当 IdP 没下发 phone 时,SSO 用户的 username 落空,管理员
+// 只剩 email 作为可识别 ID,因此 /v1/manager/user/list 必须支持按 email 搜索,
+// 且响应里必须带 email 字段,否则后台无法定位这类用户。
+func TestUserListByEmailKeyword(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	m := NewManager(ctx)
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	err = ctx.Cache().Set(ctx.GetConfig().Cache.TokenCachePrefix+testutil.Token, testutil.UID+"@test@"+string(wkhttp.SuperAdmin))
+	assert.NoError(t, err)
+
+	// 模拟一个典型的 SSO email-only 用户:phone 为空,username 兜底也是空,
+	// 只有 email 能用来搜索。
+	err = m.userDB.Insert(&Model{
+		UID:      util.GenerUUID(),
+		ShortNo:  util.GenerUUID(),
+		Username: "",
+		Name:     "Carol",
+		Email:    "carol@example.com",
+		Status:   1,
+		Password: util.MD5(util.MD5("111")),
+	})
+	assert.NoError(t, err)
+	// 另一个对照用户,确保关键字过滤是真实生效的。
+	err = m.userDB.Insert(&Model{
+		UID:      util.GenerUUID(),
+		ShortNo:  util.GenerUUID(),
+		Username: "",
+		Name:     "Dave",
+		Email:    "dave@example.com",
+		Status:   1,
+		Password: util.MD5(util.MD5("222")),
+	})
+	assert.NoError(t, err)
+
+	cases := []struct {
+		name        string
+		keyword     string
+		wantSubstr  string
+		wantMissing string
+	}{
+		{"exact email", "carol@example.com", `"email":"carol@example.com"`, `"email":"dave@example.com"`},
+		{"partial email local-part", "dave@", `"email":"dave@example.com"`, `"email":"carol@example.com"`},
+		{"partial email domain", "@example.com", `"email":"carol@example.com"`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			q := url.Values{}
+			q.Set("page_index", "1")
+			q.Set("page_size", "10")
+			q.Set("keyword", tc.keyword)
+			req, _ := http.NewRequest("GET", "/v1/manager/user/list?"+q.Encode(), nil)
+			req.Header.Set("token", testutil.Token)
+			s.GetRoute().ServeHTTP(w, req)
+			assert.Equal(t, http.StatusOK, w.Code)
+			body := w.Body.String()
+			if tc.wantSubstr != "" {
+				assert.Contains(t, body, tc.wantSubstr)
+			}
+			if tc.wantMissing != "" {
+				assert.NotContains(t, body, tc.wantMissing)
+			}
+		})
+	}
+}
+
 func TestUserDisablelist(t *testing.T) {
 	s, ctx := testutil.NewTestServer()
 	m := NewManager(ctx)

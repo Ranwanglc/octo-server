@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
-	wkutil "github.com/Mininglamp-OSS/octo-server/pkg/util"
-	common2 "github.com/Mininglamp-OSS/octo-server/modules/common"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
+	common2 "github.com/Mininglamp-OSS/octo-server/modules/common"
+	wkutil "github.com/Mininglamp-OSS/octo-server/pkg/util"
 
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
@@ -643,9 +643,11 @@ func (m *Manager) list(c *wkhttp.Context) {
 			}
 			showPhone := getShowPhoneNum(user.Phone)
 			result = append(result, &managerUserResp{
-				UID:            user.UID,
-				Username:       user.Username,
-				Name:           user.Name,
+				UID:      user.UID,
+				Username: user.Username,
+				Name:     user.Name,
+				// Email 不脱敏:管理后台需要据此识别 SSO 邮箱登录用户(username 可能为空)。
+				Email:          user.Email,
 				Phone:          showPhone,
 				Sex:            user.Sex,
 				ShortNo:        user.ShortNo,
@@ -1194,6 +1196,7 @@ type managerUserResp struct {
 	UID            string `json:"uid"`
 	Phone          string `json:"phone"`
 	Username       string `json:"username"`
+	Email          string `json:"email"`
 	ShortNo        string `json:"short_no"`
 	Sex            int    `json:"sex"`
 	RegisterTime   string `json:"register_time"`

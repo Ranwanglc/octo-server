@@ -33,11 +33,11 @@ func (m *managerDB) queryUserListWithPage(pageSize, page uint64, onelineStatus i
 	// return users, err
 
 	var users []*managerUserModel
-	selectStm := m.session.Select("user.uid,user.name,user.username,user.status,user.phone,user.short_no,user.sex,user.is_destroy,user.created_at,user.gitee_uid,user.github_uid,user.wx_openid,max(user_online.online) online").From("user").LeftJoin("user_online", "user.uid=user_online.uid")
+	selectStm := m.session.Select("user.uid,user.name,user.username,user.email,user.status,user.phone,user.short_no,user.sex,user.is_destroy,user.created_at,user.gitee_uid,user.github_uid,user.wx_openid,max(user_online.online) online").From("user").LeftJoin("user_online", "user.uid=user_online.uid")
 	if onelineStatus != -1 {
 		selectStm = selectStm.Where("user_online.online=?", onelineStatus)
 	}
-	selectStm = selectStm.GroupBy("user.uid,user.name,user.username,user.status,user.phone,user.short_no,user.sex,user.is_destroy,user.created_at,user.gitee_uid,user.github_uid,user.wx_openid")
+	selectStm = selectStm.GroupBy("user.uid,user.name,user.username,user.email,user.status,user.phone,user.short_no,user.sex,user.is_destroy,user.created_at,user.gitee_uid,user.github_uid,user.wx_openid")
 
 	// select  from user left join user_online on user.uid=user_online.uid where user_online.online=1  group by user.uid,user.name,user.status,user.phone,user.short_no,user.sex,user.is_destroy,user.created_at  limit 100
 	_, err := selectStm.Offset((page-1)*pageSize).Limit(pageSize).OrderDir("user.created_at", false).Load(&users)
@@ -49,11 +49,13 @@ func (m *managerDB) queryUserListWithPage(pageSize, page uint64, onelineStatus i
 func (m *managerDB) queryUserListWithPageAndKeyword(keyword string, onelineStatus int, pageSize, page uint64) ([]*managerUserModel, error) {
 	var users []*managerUserModel
 	like := "%" + keyword + "%"
-	selectStm := m.session.Select("user.uid,user.name,user.username,user.status,user.phone,user.short_no,user.sex,user.is_destroy,user.created_at,user.gitee_uid,user.github_uid,user.wx_openid,max(user_online.online) online").From("user").LeftJoin("user_online", "user.uid=user_online.uid").Where("user.name like ? or user.username like ? or user.uid like ? or user.phone like ? or user.short_no like ?", like, like, like, like, like)
+	// SSO/OIDC 用户的 user.username 仅在 phone 非空时被填充(api.go createUserWithRespAndTx)
+	// 邮箱登录场景下 username 为空,只能靠 user.email 定位用户,故 WHERE 必须包含 email。
+	selectStm := m.session.Select("user.uid,user.name,user.username,user.email,user.status,user.phone,user.short_no,user.sex,user.is_destroy,user.created_at,user.gitee_uid,user.github_uid,user.wx_openid,max(user_online.online) online").From("user").LeftJoin("user_online", "user.uid=user_online.uid").Where("user.name like ? or user.username like ? or user.uid like ? or user.phone like ? or user.short_no like ? or user.email like ?", like, like, like, like, like, like)
 	if onelineStatus != -1 {
 		selectStm = selectStm.Where("user_online.online=?", onelineStatus)
 	}
-	selectStm = selectStm.GroupBy("user.uid,user.name,user.username,user.status,user.phone,user.short_no,user.sex,user.is_destroy,user.created_at,user.gitee_uid,user.github_uid,user.wx_openid")
+	selectStm = selectStm.GroupBy("user.uid,user.name,user.username,user.email,user.status,user.phone,user.short_no,user.sex,user.is_destroy,user.created_at,user.gitee_uid,user.github_uid,user.wx_openid")
 
 	// select  from user left join user_online on user.uid=user_online.uid where user_online.online=1  group by user.uid,user.name,user.status,user.phone,user.short_no,user.sex,user.is_destroy,user.created_at  limit 100
 	_, err := selectStm.Offset((page-1)*pageSize).Limit(pageSize).OrderDir("user.created_at", false).Load(&users)
@@ -64,7 +66,7 @@ func (m *managerDB) queryUserListWithPageAndKeyword(keyword string, onelineStatu
 func (m *managerDB) queryUserCountWithKeyWord(keyword string) (int64, error) {
 	var count int64
 	like := "%" + keyword + "%"
-	_, err := m.session.Select("count(*)").From("user").Where("user.name like ? or user.username like ? or user.uid like ? or user.phone like ? or user.short_no like ?", like, like, like, like, like).Load(&count)
+	_, err := m.session.Select("count(*)").From("user").Where("user.name like ? or user.username like ? or user.uid like ? or user.phone like ? or user.short_no like ? or user.email like ?", like, like, like, like, like, like).Load(&count)
 	return count, err
 }
 
@@ -123,6 +125,7 @@ type managerUserModel struct {
 	Username  string
 	Name      string
 	UID       string
+	Email     string
 	Status    int
 	Phone     string
 	ShortNo   string
