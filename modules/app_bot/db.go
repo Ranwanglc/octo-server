@@ -164,7 +164,7 @@ func (d *appBotDB) queryAvailableBots(loginUID, spaceIDFilter string) ([]*appBot
 	if spaceIDFilter != "" {
 		_, err := d.session.SelectBySql(`
 			(SELECT `+cols+` FROM app_bot WHERE scope='platform' AND status=1 LIMIT 100)
-			UNION
+			UNION ALL
 			(SELECT `+cols+` FROM app_bot ab
 				INNER JOIN space_member sm ON ab.space_id = sm.space_id
 				WHERE sm.uid = ? AND sm.status = 1
@@ -176,7 +176,7 @@ func (d *appBotDB) queryAvailableBots(loginUID, spaceIDFilter string) ([]*appBot
 	}
 	_, err := d.session.SelectBySql(`
 		(SELECT `+cols+` FROM app_bot WHERE scope='platform' AND status=1 LIMIT 100)
-		UNION
+		UNION ALL
 		(SELECT `+cols+` FROM app_bot ab
 			INNER JOIN space_member sm ON ab.space_id = sm.space_id
 			WHERE sm.uid = ? AND sm.status = 1
