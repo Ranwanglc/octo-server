@@ -457,3 +457,56 @@ func TestTaskEdit_ContainsEmotionReference(t *testing.T) {
 func TestTaskEditOnly_ContainsEmotionReference(t *testing.T) {
 	assert.Contains(t, taskEditOnly, "包括语气保真与情绪标注")
 }
+
+// --- Issue #1327: Space preservation in names with parentheses ---
+
+func TestBuildSystemMessage_SpacePreservationRule(t *testing.T) {
+	msg := buildSystemMessage(true)
+
+	// The prompt must contain the space-preservation rule
+	assert.Contains(t, msg, "空格保真铁律")
+	assert.Contains(t, msg, "有空格就保留空格，没有空格绝对不能添加空格")
+
+	// Positive examples: both with-space and without-space cases
+	assert.Contains(t, msg, `成员列表写 "王磊(Rock)"（无空格）→ 输出 @王磊(Rock)`)
+	assert.Contains(t, msg, `成员列表写 "Li.Wei (李伟)"（有空格）→ 输出 @Li.Wei (李伟)`)
+
+	// Negative examples (forbidden patterns)
+	assert.Contains(t, msg, `禁止：将 "王磊(Rock)" 输出为 "王磊 (Rock)"`)
+	assert.Contains(t, msg, `禁止：将 "Li.Wei (李伟)" 输出为 "Li.Wei(李伟)"`)
+}
+
+func TestBuildSystemMessage_MentionExampleWithParenNoSpace(t *testing.T) {
+	msg := buildSystemMessage(true)
+
+	// The example member list must include a no-space paren name
+	assert.Contains(t, msg, "王磊(Rock),Bob")
+
+	// The example output must show correct no-space format
+	assert.Contains(t, msg, `@王磊(Rock) 看一下这个 bug`)
+	assert.Contains(t, msg, "列表中无空格，输出不加空格")
+}
+
+func TestBuildUserMessage_ParenNameInMemberVocabulary(t *testing.T) {
+	// Simulate the real scenario: member list has "王磊(Rock)" (no space)
+	// and "tomas.fu (托马斯.福)" (with space), no latest_chat_context for 王磊
+	memberCtx := "聊天成员：王磊(Rock),tomas.fu (托马斯.福),张三"
+	chatCtx := "[张三]: 大家好\n[tomas.fu (托马斯.福)]: 你好"
+	merged := BuildVocabularyReference("", memberCtx, chatCtx)
+	userMsg := buildUserMessage("", "", merged)
+
+	// The vocabulary reference must preserve the exact spacing from member list
+	assert.Contains(t, userMsg, "王磊(Rock)")
+	assert.Contains(t, userMsg, "tomas.fu (托马斯.福)")
+
+	// System prompt must have the rule active
+	sysMsg := buildSystemMessage(true)
+	assert.Contains(t, sysMsg, "原样输出")
+}
+
+func TestBuildSystemMessage_PartialNameRuleStrength(t *testing.T) {
+	msg := buildSystemMessage(true)
+
+	// Rule 3 (partial match) must also emphasize verbatim copy
+	assert.Contains(t, msg, "不可自行格式化或调整空格")
+}
