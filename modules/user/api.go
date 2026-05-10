@@ -545,15 +545,19 @@ func (u *User) uploadAvatar(c *wkhttp.Context) {
 					return
 				}
 			case "space":
-				var member struct {
-					Role int `db:"role"`
-				}
-				mCnt, mErr := u.ctx.DB().SelectBySql(
-					"SELECT role FROM space_member WHERE space_id=? AND uid=? AND status=1 LIMIT 1", appBot.SpaceID, loginUID,
-				).Load(&member)
-				if mErr != nil || mCnt == 0 || member.Role < 1 {
-					c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "无权限修改该用户头像", "status": 403})
-					return
+				// superAdmin 可管理任何 space Bot（与 updateBot admin 路由一致）
+				if saErr := c.CheckLoginRoleIsSuperAdmin(); saErr != nil {
+					// 非 superAdmin，fallback 到 space_member 校验
+					var member struct {
+						Role int `db:"role"`
+					}
+					mCnt, mErr := u.ctx.DB().SelectBySql(
+						"SELECT role FROM space_member WHERE space_id=? AND uid=? AND status=1 LIMIT 1", appBot.SpaceID, loginUID,
+					).Load(&member)
+					if mErr != nil || mCnt == 0 || member.Role < 1 {
+						c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "无权限修改该用户头像", "status": 403})
+						return
+					}
 				}
 			default:
 				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "无权限修改该用户头像", "status": 403})

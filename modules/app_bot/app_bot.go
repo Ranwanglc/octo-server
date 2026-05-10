@@ -384,8 +384,18 @@ func (ab *AppBot) createBot(c *wkhttp.Context, scope, spaceID string) {
 		Zone:     "",
 		Robot:    1,
 	}); err != nil {
-		// Rollback: remove app_bot and IM token to avoid orphaned records
+		// Rollback: remove app_bot record and invalidate IM token
 		ab.db.deleteAppBot(req.ID)
+		revokeToken, tokenErr := generateAppBotToken()
+		if tokenErr != nil {
+			revokeToken = fmt.Sprintf("REVOKED-%s-%d", uid, time.Now().UnixNano())
+		}
+		ab.ctx.UpdateIMToken(config.UpdateIMTokenReq{
+			UID:         uid,
+			Token:       revokeToken,
+			DeviceFlag:  config.APP,
+			DeviceLevel: config.DeviceLevelMaster,
+		})
 		ab.Error("create user record for app bot failed, rolled back", zap.Error(err), zap.String("uid", uid))
 		c.ResponseError(errors.New("create app bot failed: user record creation failed"))
 		return
