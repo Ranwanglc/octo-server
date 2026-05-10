@@ -1094,3 +1094,150 @@ func TestBlacklistRemoveUsesFilteredUIDs(t *testing.T) {
 	// Note: updateMembersStatus sets DB status for all req.Uids to normal,
 	// but setGroupBlacklist (IM layer) should only be called for removeUIDs
 }
+
+// TestGroupMemberGet_Hit 调用方是成员，目标 uid 是在群成员 → exists=true 且返回 member
+func TestGroupMemberGet_Hit(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	groupNo := "mcheck_hit"
+	err = f.userDB.Insert(&user.Model{UID: testutil.UID, Name: "调用方", ShortNo: "mck_caller_" + groupNo})
+	assert.NoError(t, err)
+	err = f.userDB.Insert(&user.Model{UID: "target_in", Name: "目标", ShortNo: "mck_target_in"})
+	assert.NoError(t, err)
+
+	err = f.db.Insert(&Model{GroupNo: groupNo, Name: "g", Creator: testutil.UID, Status: 1})
+	assert.NoError(t, err)
+	err = f.db.InsertMember(&MemberModel{GroupNo: groupNo, UID: testutil.UID, Role: MemberRoleCreator, Version: 1})
+	assert.NoError(t, err)
+	err = f.db.InsertMember(&MemberModel{GroupNo: groupNo, UID: "target_in", Role: MemberRoleCommon, Version: 1})
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, err := http.NewRequest("GET", "/v1/groups/"+groupNo+"/members/target_in", nil)
+	req.Header.Set("token", testutil.Token)
+	assert.NoError(t, err)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, `"exists":true`)
+	assert.Contains(t, body, `"uid":"target_in"`)
+}
+
+// TestGroupMemberGet_Miss 调用方是成员，目标 uid 不在群 → exists=false
+func TestGroupMemberGet_Miss(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	groupNo := "mcheck_miss"
+	err = f.userDB.Insert(&user.Model{UID: testutil.UID, Name: "调用方", ShortNo: "mck_caller_" + groupNo})
+	assert.NoError(t, err)
+	err = f.db.Insert(&Model{GroupNo: groupNo, Name: "g", Creator: testutil.UID, Status: 1})
+	assert.NoError(t, err)
+	err = f.db.InsertMember(&MemberModel{GroupNo: groupNo, UID: testutil.UID, Role: MemberRoleCreator, Version: 1})
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, err := http.NewRequest("GET", "/v1/groups/"+groupNo+"/members/not_in", nil)
+	req.Header.Set("token", testutil.Token)
+	assert.NoError(t, err)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, `"exists":false`)
+	assert.NotContains(t, body, `"uid":"not_in"`)
+}
+
+// TestGroupMemberGet_Deleted 目标 uid 之前在群但 is_deleted=1 → exists=false
+func TestGroupMemberGet_Deleted(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	groupNo := "mcheck_del"
+	err = f.userDB.Insert(&user.Model{UID: testutil.UID, Name: "调用方", ShortNo: "mck_caller_" + groupNo})
+	assert.NoError(t, err)
+	err = f.userDB.Insert(&user.Model{UID: "target_del", Name: "已退", ShortNo: "mck_target_del"})
+	assert.NoError(t, err)
+
+	err = f.db.Insert(&Model{GroupNo: groupNo, Name: "g", Creator: testutil.UID, Status: 1})
+	assert.NoError(t, err)
+	err = f.db.InsertMember(&MemberModel{GroupNo: groupNo, UID: testutil.UID, Role: MemberRoleCreator, Version: 1})
+	assert.NoError(t, err)
+	err = f.db.InsertMember(&MemberModel{GroupNo: groupNo, UID: "target_del", Role: MemberRoleCommon, Version: 1, IsDeleted: 1})
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, err := http.NewRequest("GET", "/v1/groups/"+groupNo+"/members/target_del", nil)
+	req.Header.Set("token", testutil.Token)
+	assert.NoError(t, err)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"exists":false`)
+}
+
+// TestGroupMemberGet_Self 调用方查询自己 → exists=true 且返回自身成员信息
+func TestGroupMemberGet_Self(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	groupNo := "mcheck_self"
+	err = f.userDB.Insert(&user.Model{UID: testutil.UID, Name: "调用方", ShortNo: "mck_self"})
+	assert.NoError(t, err)
+	err = f.db.Insert(&Model{GroupNo: groupNo, Name: "g", Creator: testutil.UID, Status: 1})
+	assert.NoError(t, err)
+	err = f.db.InsertMember(&MemberModel{GroupNo: groupNo, UID: testutil.UID, Role: MemberRoleCreator, Version: 1})
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, err := http.NewRequest("GET", "/v1/groups/"+groupNo+"/members/"+testutil.UID, nil)
+	req.Header.Set("token", testutil.Token)
+	assert.NoError(t, err)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"exists":true`)
+	assert.Contains(t, w.Body.String(), `"uid":"`+testutil.UID+`"`)
+}
+
+// TestGroupMemberGet_CallerNotMember 调用方非该群成员 → 403/error
+func TestGroupMemberGet_CallerNotMember(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+
+	groupNo := "mcheck_perm"
+	err = f.userDB.Insert(&user.Model{UID: testutil.UID, Name: "外人", ShortNo: "mck_outsider"})
+	assert.NoError(t, err)
+	err = f.userDB.Insert(&user.Model{UID: "owner", Name: "群主", ShortNo: "mck_owner"})
+	assert.NoError(t, err)
+	err = f.userDB.Insert(&user.Model{UID: "target_in2", Name: "目标", ShortNo: "mck_target_in2"})
+	assert.NoError(t, err)
+
+	err = f.db.Insert(&Model{GroupNo: groupNo, Name: "g", Creator: "owner", Status: 1})
+	assert.NoError(t, err)
+	err = f.db.InsertMember(&MemberModel{GroupNo: groupNo, UID: "owner", Role: MemberRoleCreator, Version: 1})
+	assert.NoError(t, err)
+	err = f.db.InsertMember(&MemberModel{GroupNo: groupNo, UID: "target_in2", Role: MemberRoleCommon, Version: 1})
+	assert.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	req, err := http.NewRequest("GET", "/v1/groups/"+groupNo+"/members/target_in2", nil)
+	req.Header.Set("token", testutil.Token)
+	assert.NoError(t, err)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.True(t, strings.Contains(w.Body.String(), "权限"))
+}

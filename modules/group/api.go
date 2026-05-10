@@ -83,6 +83,7 @@ func (g *Group) Route(r *wkhttp.WKHttp) {
 		groups.POST("/:group_no/members", g.memberAdd)                                     // 添加群成员
 		groups.DELETE("/:group_no/members", g.memberRemove)                                // 移除群成员
 		groups.GET("/:group_no/members", g.membersGet)                                     // 获取群成员
+		groups.GET("/:group_no/members/:uid", g.memberGet)                                  // 查询单个 uid 是否为群成员（命中时返回成员详情）
 		groups.POST("/:group_no/members_delete", g.memberRemove)                           // 移除群成员
 		groups.GET("/:group_no/membersync", g.syncMembers)                                 // 同步群成员
 		groups.GET("/:group_no", g.groupGet)                                               // 获取群信息
@@ -293,6 +294,50 @@ func (g *Group) membersGet(c *wkhttp.Context) {
 	g.fillSpaceRelatedFields(groupNo, "", resps)
 
 	c.Response(resps)
+}
+
+// memberGet 查询单个 uid 是否为该群成员。
+//
+// 鉴权：调用方必须是该群成员（与 membersGet 一致），否则返回 400。
+// 命中：返回 {"exists": true, "member": {...memberDetailResp}}；
+// 未命中或已删除：返回 {"exists": false}。
+func (g *Group) memberGet(c *wkhttp.Context) {
+	groupNo := resolveGroupNo(c.Param("group_no"))
+	targetUID := c.Param("uid")
+	loginUID := c.GetLoginUID()
+
+	isMember, err := g.db.ExistMember(loginUID, groupNo)
+	if err != nil {
+		g.Error("查询群成员关系失败", zap.Error(err))
+		c.ResponseError(errors.New("查询群成员关系失败"))
+		return
+	}
+	if !isMember {
+		c.ResponseError(errors.New("没有权限查看此群成员"))
+		return
+	}
+
+	detail, err := g.db.queryMemberWithGroupNoAndUID(groupNo, targetUID)
+	if err != nil {
+		g.Error("查询群成员失败", zap.Error(err))
+		c.ResponseError(errors.New("查询群成员失败"))
+		return
+	}
+	if detail == nil {
+		c.Response(memberCheckResp{Exists: false})
+		return
+	}
+
+	resps := []memberDetailResp{(memberDetailResp{}).from(detail)}
+	g.fillSpaceRelatedFields(groupNo, "", resps)
+
+	c.Response(memberCheckResp{Exists: true, Member: &resps[0]})
+}
+
+// memberCheckResp memberGet 的响应体。
+type memberCheckResp struct {
+	Exists bool              `json:"exists"`
+	Member *memberDetailResp `json:"member,omitempty"`
 }
 
 func (g *Group) avatarGet(c *wkhttp.Context) {

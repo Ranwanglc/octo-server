@@ -727,6 +727,44 @@ paths:
       security:
         - token: []
   /groups/{group_no}/members/{uid}:
+    get:
+      tags:
+        - "group"
+      summary: "查询单个 uid 是否为该群成员"
+      description: "调用方必须为该群成员；命中时返回 exists=true 与成员详情，未命中或软删时返回 exists=false"
+      operationId: "get member"
+      consumes:
+        - "application/json"
+      produces:
+        - "application/json"
+      parameters:
+        - in: "path"
+          name: "group_no"
+          type: string
+          description: "群编号"
+          required: true
+        - in: "path"
+          name: "uid"
+          type: string
+          description: "目标成员uid"
+          required: true
+      responses:
+        200:
+          description: "返回"
+          schema:
+            type: object
+            properties:
+              exists:
+                type: boolean
+                description: "目标 uid 是否为该群在册成员（is_deleted=0）"
+              member:
+                $ref: "#/definitions/groupMember"
+        400:
+          description: "错误（含调用方非该群成员）"
+          schema:
+            $ref: "#/definitions/response"
+      security:
+        - token: []
     put:
       tags:
         - "group"
