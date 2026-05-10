@@ -132,6 +132,7 @@ func newWorkerHarness(t *testing.T, dueSpecs []dueSpec) (*SyncWorker, *fakeSyncS
 			ID:              sp.id,
 			IdentityID:      sp.identityID,
 			UID:             sp.uid,
+			Subject:         sp.subject,
 			TokenCiphertext: ct,
 			ExpiresAt:       time.Now().Add(time.Hour),
 		})
@@ -194,6 +195,7 @@ type dueSpec struct {
 	identityID int64
 	uid        string
 	plain      string
+	subject    string // optional; 空串合法(老测试默认不设 → DueRefresh.Subject 空)
 }
 
 // 成功 refresh → 旧 RT rotate(成功路径)+ audit refresh_ok。

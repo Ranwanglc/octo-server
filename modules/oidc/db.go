@@ -199,7 +199,7 @@ func (d *DB) DueRefreshes(limit int) ([]*DueRefresh, error) {
 	}
 	var list []*DueRefresh
 	if _, err := d.session.SelectBySql(`
-		SELECT r.id, r.identity_id, i.uid,
+		SELECT r.id, r.identity_id, i.uid, i.subject,
 		       r.token_ciphertext, r.expires_at
 		FROM user_oidc_refresh r
 		JOIN user_oidc_identity i ON i.id = r.identity_id

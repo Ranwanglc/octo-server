@@ -72,8 +72,8 @@ type User struct {
 	onlineService *OnlineService
 	giteeDB       *giteeDB
 	githubDB      *githubDB
-	pinnedDB *PinnedDB
-	pinned   *Pinned
+	pinnedDB      *PinnedDB
+	pinned        *Pinned
 
 	setting *Setting
 	log.Log
@@ -137,6 +137,7 @@ func New(ctx *config.Context) *User {
 	if svc, ok := u.userService.(*Service); ok {
 		svc.SetExternalLoginHandler(u)
 	}
+
 	return u
 }
 
@@ -155,11 +156,11 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 	})
 	// burst 取小值：人类正常重试容忍 + 不给攻击者初始白嫖窗口
 	// tag 用稳定字符串分离 keyspace；注意 register 和 sms 参数相同但语义不同，必须分开
-	loginLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "login", 10.0/60, 5)      // 10 req/min, burst 5
+	loginLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "login", 10.0/60, 5)       // 10 req/min, burst 5
 	verifyLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "verify", 1000.0/60, 100) // 1000 req/min, burst 100 (Gateway traffic)
-	registerLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "register", 5.0/60, 3) // 5 req/min, burst 3
-	smsLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "sms", 5.0/60, 3)           // 5 req/min, burst 3
-	searchLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "search", 30.0/60, 15)   // 30 req/min, burst 15
+	registerLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "register", 5.0/60, 3)  // 5 req/min, burst 3
+	smsLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "sms", 5.0/60, 3)            // 5 req/min, burst 3
+	searchLimit := appwkhttp.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "search", 30.0/60, 15)    // 30 req/min, burst 15
 
 	auth := r.Group("/v1", u.ctx.AuthMiddleware(r))
 	{
@@ -218,9 +219,9 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 	// #################### 用户置顶频道（需要 Space 隔离）####################
 	pinned := r.Group("/v1/user/pinned", u.ctx.AuthMiddleware(r), spacepkg.SpaceMiddleware(u.ctx))
 	{
-		pinned.POST("", u.pinned.Add)           // 添加置顶
-		pinned.DELETE("", u.pinned.Remove)      // 移除置顶
-		pinned.GET("", u.pinned.List)           // 获取置顶列表
+		pinned.POST("", u.pinned.Add)            // 添加置顶
+		pinned.DELETE("", u.pinned.Remove)       // 移除置顶
+		pinned.GET("", u.pinned.List)            // 获取置顶列表
 		pinned.PUT("/sort", u.pinned.UpdateSort) // 更新排序
 	}
 	v := r.Group("/v1")
@@ -240,19 +241,19 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 		v.POST("/user/web3verifysign", u.web3verifySignature)       // 验证签名
 		//v.POST("user/wxlogin", u.wxLogin)
 		v.POST("/user/sms/forgetpwd", smsLimit, u.getForgetPwdSMS) //获取忘记密码验证码
-		v.POST("/user/pwdforget", loginLimit, u.pwdforget) //重置登录密码
-		v.GET("/users/:uid/avatar", u.UserAvatar)        // 用户头像
-		v.GET("/users/:uid/im", u.userIM)                // 获取用户所在IM节点信息
-		v.GET("/user/loginuuid", u.getLoginUUID)         // 获取扫描用的登录uuid
+		v.POST("/user/pwdforget", loginLimit, u.pwdforget)         //重置登录密码
+		v.GET("/users/:uid/avatar", u.UserAvatar)                  // 用户头像
+		v.GET("/users/:uid/im", u.userIM)                          // 获取用户所在IM节点信息
+		v.GET("/user/loginuuid", u.getLoginUUID)                   // 获取扫描用的登录uuid
 		v.GET("/user/loginstatus", u.getloginStatus)
 		v.POST("/user/sms/registercode", smsLimit, u.sendRegisterCode)             //获取注册短信验证码
 		v.POST("/user/login_authcode/:auth_code", loginLimit, u.loginWithAuthCode) // 通过认证码登录
 		v.POST("/user/sms/login_check_phone", smsLimit, u.sendLoginCheckPhoneCode) //发送登录设备验证验证码
-		v.POST("/user/login/check_phone", loginLimit, u.loginCheckPhone) //登录验证设备手机号
+		v.POST("/user/login/check_phone", loginLimit, u.loginCheckPhone)           //登录验证设备手机号
 
 		// #################### Token / Bot 认证验证（供 Gateway 调用） ####################
-		v.POST("/auth/verify", verifyLimit, u.authVerifyToken)    // 验证用户 token
-		v.POST("/auth/verify-bot", verifyLimit, u.authVerifyBot)  // 验证 Bot API Key
+		v.POST("/auth/verify", verifyLimit, u.authVerifyToken)   // 验证用户 token
+		v.POST("/auth/verify-bot", verifyLimit, u.authVerifyBot) // 验证 Bot API Key
 		// ↑ Verify endpoints are rate-limited (1000 req/min/IP). For production,
 		// restrict access at network level (nginx allow internal IPs only) or
 		// add X-Internal-Key header validation.
@@ -3314,22 +3315,22 @@ func newLoginUserDetailResp(m *Model, token string, ctx *config.Context) *loginU
 		DestroyStatus:        destroyStatus,
 		DestroyRemainingDays: destroyRemainingDays,
 		DestroyExpireAt:      destroyExpireAt,
-		UID:             m.UID,
-		AppID:           m.AppID,
-		Name:            m.Name,
-		Username:        m.Username,
-		Sex:             m.Sex,
-		Category:        m.Category,
-		ShortNo:         m.ShortNo,
-		Zone:            m.Zone,
-		Phone:           m.Phone,
-		Token:           token,
-		ChatPwd:         m.ChatPwd,
-		LockScreenPwd:   m.LockScreenPwd,
-		LockAfterMinute: m.LockAfterMinute,
-		ShortStatus:     m.ShortStatus,
-		RSAPublicKey:    base64.StdEncoding.EncodeToString([]byte(ctx.GetConfig().AppRSAPubKey)),
-		MsgExpireSecond: m.MsgExpireSecond,
+		UID:                  m.UID,
+		AppID:                m.AppID,
+		Name:                 m.Name,
+		Username:             m.Username,
+		Sex:                  m.Sex,
+		Category:             m.Category,
+		ShortNo:              m.ShortNo,
+		Zone:                 m.Zone,
+		Phone:                m.Phone,
+		Token:                token,
+		ChatPwd:              m.ChatPwd,
+		LockScreenPwd:        m.LockScreenPwd,
+		LockAfterMinute:      m.LockAfterMinute,
+		ShortStatus:          m.ShortStatus,
+		RSAPublicKey:         base64.StdEncoding.EncodeToString([]byte(ctx.GetConfig().AppRSAPubKey)),
+		MsgExpireSecond:      m.MsgExpireSecond,
 		Setting: setting{
 			SearchByPhone:     m.SearchByPhone,
 			SearchByShort:     m.SearchByShort,
@@ -3353,7 +3354,6 @@ func ValidateName(name string) error {
 	}
 	return nil
 }
-
 
 // ==================== Aegis OIDC Phase 2d — verify-token 翻译层 ====================
 

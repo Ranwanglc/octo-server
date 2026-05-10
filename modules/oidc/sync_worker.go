@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
+	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"go.uber.org/zap"
 	"golang.org/x/oauth2"
 )
@@ -29,8 +30,26 @@ type refresher interface {
 	Refresh(ctx context.Context, refreshToken string) (*RefreshResult, error)
 }
 
+// userInfoFetcher /userinfo 拉取抽象(YUJ-405)。生产实现是 *Client,
+// 测试可注入 fake 断言调用时序、注错误。
+//
+// 抽出来而不是直接持 *Client 是让 sync_worker 单测不必 import 全套 go-oidc。
+type userInfoFetcher interface {
+	UserInfo(ctx context.Context, tok *oauth2.Token) (*UserInfoClaims, error)
+}
+
+// verificationUpserter 写 user_verification 的最小依赖接口复用自 api.go
+// (modules/oidc/api.go 已定义给 callback 路径用,签名完全一致)。
+//
+// 注入语义:ui 和 verif 必须成对(nil/nil 时 sync_worker 不做任何实名同步,
+// 保持 YUJ-405 之前的原行为,向后兼容)。
+
 // RefreshResult Refresh 成功返回的最小子集。
+//
+// AccessToken 用于 YUJ-405:rotate 成功后立刻用新 access_token 调 /userinfo
+// 同步实名 claims。旧调用路径(单纯 RT 轮转)忽略 AccessToken 即可。
 type RefreshResult struct {
+	AccessToken  string
 	RefreshToken string
 	ExpiresAt    time.Time
 }
@@ -46,10 +65,15 @@ type syncStore interface {
 // DueRefresh 待刷新 RT 与所属 identity 的 uid 联合查询结果。
 //
 // uid 必须随 RT 一起取出,否则 invalid_grant 时无法定位要踢谁。
+//
+// Subject(YUJ-409 Round 2):identity 持有的 OIDC sub,用于 rotate 后调
+// /userinfo 时做 ownership 校验 —— 防 RT 串台 / IdP 返回错 subject 把别人
+// 的实名 claims 写到本 uid。callback 路径已有同类校验(modules/oidc/api.go:479)。
 type DueRefresh struct {
 	ID              int64
 	IdentityID      int64
 	UID             string
+	Subject         string
 	TokenCiphertext []byte
 	ExpiresAt       time.Time
 }
@@ -74,6 +98,11 @@ type SyncWorker struct {
 	store  syncStore
 	enc    *Encryptor
 	rfsh   refresher
+	// ui / verif 都必须非 nil 才做实名同步。任一为 nil → sync_worker 保持
+	// YUJ-405 之前的原行为(纯 RT 轮转),向后兼容。生产路径在 OIDC.Init 中
+	// 同时注入(c.client + userSvc),只会一起 nil / 一起就位。
+	ui     userInfoFetcher
+	verif  verificationUpserter
 	killer sessionKiller
 	audit  auditWriter
 	lock   tickLock // nil = 不做多实例互斥(单实例部署 / 测试)
@@ -87,6 +116,8 @@ type SyncWorker struct {
 //
 // lock 传 nil 时退化为"每实例独立 tick" —— rowsAffected 竞态检测仍能保证
 // 不出假阳性踢线,只是 IdP 流量翻 N 倍。生产部署建议注入 RedisTickLock。
+//
+// ui / verif 可选(nil 时 sync_worker 跳过实名同步,保持 YUJ-405 前的原行为)。
 func NewSyncWorker(cfg SyncWorkerConfig, store syncStore, enc *Encryptor,
 	rfsh refresher, killer sessionKiller, audit auditWriter, lock tickLock) *SyncWorker {
 	if cfg.Concurrency <= 0 {
@@ -111,6 +142,14 @@ func NewSyncWorker(cfg SyncWorkerConfig, store syncStore, enc *Encryptor,
 		lock:   lock,
 		Log:    log.NewTLog("OIDC-Sync"),
 	}
+}
+
+// WithVerificationSync 注入 /userinfo + upsert 依赖,启用 YUJ-405 的实名 sync 路径。
+// 生产路径在 OIDC.Init 中调用;传 nil 保持原行为(不做实名同步)。
+func (w *SyncWorker) WithVerificationSync(ui userInfoFetcher, verif verificationUpserter) *SyncWorker {
+	w.ui = ui
+	w.verif = verif
+	return w
 }
 
 // Start 启动后台 ticker goroutine。Interval ≤ 0 视为禁用。
@@ -318,7 +357,93 @@ func (w *SyncWorker) processOne(ctx context.Context, d *DueRefresh) {
 	}
 	metricSyncProcessedTotal.WithLabelValues("ok").Inc()
 	w.writeAudit(d.UID, EventRefreshOK, "")
+
+	// YUJ-405:RT 轮转成功后用新 access_token 拉一次 /userinfo 同步实名 claims。
+	//
+	// 设计语义:
+	//  - 实名同步是 **best-effort**:任何失败(fetch/upsert)都不影响本 tick
+	//    已记账的 refresh_ok,只写 log + 打 metric。
+	//  - 只在 is_verified=true 且 legal_name 非空 且 verified_at 有效时 upsert;
+	//    其他情况走 skipped_unverified,**不**调 DeleteByUID —— 保守策略避免
+	//    Aegis /userinfo 偶发抖动 / 返 null 时误清已有 cache(撤销语义留给
+	//    OIDC callback 的 Upsert gate + 未来 Aegis webhook)。
+	//  - ui/verif 任一为 nil → 直接跳过,保持 YUJ-405 前的原行为(向后兼容)。
+	//  - 独立 context.WithTimeout,避免 /userinfo 慢拖拽同一批其他 RT 的调度。
+	w.syncVerificationAfterRotate(ctx, d, res)
 }
+
+// syncVerificationAfterRotate 在 RotateRefresh 成功后用新 access_token 拉 /userinfo
+// 同步实名 claims(YUJ-405)。失败只 log + metric,不影响 refresh_ok 语义。
+func (w *SyncWorker) syncVerificationAfterRotate(ctx context.Context, d *DueRefresh, res *RefreshResult) {
+	if w.ui == nil || w.verif == nil || res == nil || res.AccessToken == "" {
+		return
+	}
+	tok := &oauth2.Token{
+		AccessToken:  res.AccessToken,
+		RefreshToken: res.RefreshToken,
+		Expiry:       res.ExpiresAt,
+	}
+	ctxUI, cancel := context.WithTimeout(ctx, userInfoSyncTimeout)
+	ui, uerr := w.ui.UserInfo(ctxUI, tok)
+	cancel()
+	if uerr != nil {
+		metricSyncVerificationSyncedTotal.WithLabelValues("fetch_failed").Inc()
+		w.Debug("sync worker userinfo 拉取失败(非致命)",
+			zap.String("uid", d.UID), zap.Int64("rt_id", d.ID), zap.Error(uerr))
+		return
+	}
+	// nil guard(Jerry R1 Non-blocking):UserInfo 实现理论上可能返 (nil, nil)。
+	// 直接 deref 会 panic;此处与 fetch_failed 分开计数,便于运维区分。
+	if ui == nil {
+		metricSyncVerificationSyncedTotal.WithLabelValues("fetch_nil").Inc()
+		w.Warn("sync worker /userinfo 返 nil claims(非致命,跳过)",
+			zap.String("uid", d.UID), zap.Int64("rt_id", d.ID))
+		return
+	}
+	// Ownership 校验(Jerry R1 Blocking):/userinfo.sub 必须等于 identity.subject,
+	// 否则视为 RT 串台 / IdP 实现 bug 返错 subject,绝不能把别人的实名 claims
+	// 写到本 uid。callback 路径在 modules/oidc/api.go:479 已有同类检查。
+	//
+	// 与 callback 路径的关键差异:sync_worker 是后台 tick,**不**在 mismatch
+	// 时 kick/revoke —— 后台踢线没有用户交互上下文、无法给出明确反馈,且假阳性
+	// 代价过高(DB 脏数据 / 单次 IdP 抖动就会殃及全员)。这里只 warn + skip +
+	// metric,把账号踢线语义留给 callback 登录路径做。
+	//
+	// 空 Subject(DB 脏数据防御)也走 skip 分支:没 expected sub 就没法判。
+	if d.Subject == "" || ui.Subject == "" || ui.Subject != d.Subject {
+		metricSyncVerificationSyncedTotal.WithLabelValues("sub_mismatch").Inc()
+		w.Warn("sync worker /userinfo sub mismatch,跳过 upsert(不踢线)",
+			zap.String("uid", d.UID),
+			zap.Int64("rt_id", d.ID),
+			zap.String("expected_sub_hash", subHash(d.Subject)),
+			zap.String("userinfo_sub_hash", subHash(ui.Subject)))
+		return
+	}
+	// gate:未实名 / legal_name 空 / verified_at 无效时跳过,不 upsert 也不 delete。
+	// 保守策略:Aegis /userinfo 偶发不稳定时避免误清 cache。真正的撤销语义留给
+	// OIDC callback 的 Upsert gate(LegalName 非空)以及未来 Aegis webhook。
+	if !ui.IsVerified.Bool() || ui.LegalName == "" || ui.VerifiedAt.Int64() <= 0 {
+		metricSyncVerificationSyncedTotal.WithLabelValues("skipped_unverified").Inc()
+		return
+	}
+	vclaims := user.OIDCVerificationClaims{
+		Subject:          ui.Subject,
+		VerifiedProvider: ui.VerifiedProvider,
+		VerifiedAt:       ui.VerifiedAt.Int64(),
+		LegalName:        ui.LegalName,
+		LegalEmail:       ui.LegalEmail,
+	}
+	if verr := w.verif.UpsertVerificationFromOIDC(ctx, d.UID, vclaims); verr != nil {
+		metricSyncVerificationSyncedTotal.WithLabelValues("upsert_failed").Inc()
+		w.Warn("sync worker 实名 upsert 失败(非致命)",
+			zap.String("uid", d.UID), zap.Error(verr))
+		return
+	}
+	metricSyncVerificationSyncedTotal.WithLabelValues("upserted").Inc()
+}
+
+// userInfoSyncTimeout /userinfo 单次拉取的硬超时。短于 Interval 避免拖死 tick。
+const userInfoSyncTimeout = 10 * time.Second
 
 // writeAudit best-effort 审计;失败仅日志,不影响主流程。
 func (w *SyncWorker) writeAudit(uid string, event AuditEvent, reason string) {
@@ -362,5 +487,9 @@ func (cr clientRefresher) Refresh(ctx context.Context, rt string) (*RefreshResul
 	if err != nil {
 		return nil, err
 	}
-	return &RefreshResult{RefreshToken: tok.RefreshToken, ExpiresAt: tok.Expiry}, nil
+	return &RefreshResult{
+		AccessToken:  tok.AccessToken,
+		RefreshToken: tok.RefreshToken,
+		ExpiresAt:    tok.Expiry,
+	}, nil
 }

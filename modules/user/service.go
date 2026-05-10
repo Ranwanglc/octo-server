@@ -371,6 +371,14 @@ func (s *Service) GetUserDetail(uid string, loginUID string) (*UserDetailResp, e
 
 	// OCTO 实名认证（YUJ-354）：查询 user_verification，命中即标 verified 并回填 real_name。
 	// 失败仅 log 不阻断主响应 —— 实名是增强信息，不能因查询抖动让 profile 不可用。
+	//
+	// YUJ-398 注记:这里读的是 user_verification **cache**(不是 source of truth,
+	// Aegis IdP 才是权威源 — 详见 db_verification.go 文件头)。返回的 RealnameVerified
+	// 可能 stale,最大滞后取决于 OIDC callback / OIDC SyncWorker 触发频率;
+	// 典型场景 "用户刚在 Aegis 完成实名别人查他 profile" 要等对方下次 OIDC 登录
+	// 或 SyncWorker 下轮 tick(生产默认 15min)才会刷新。
+	// 不要在此处直接同步拉 Aegis —— profile 热路径 QPS 很高,同步 admin API
+	// 会把 Aegis 打挂。
 	if vr, vErr := s.verificationDB.QueryByUID(uid); vErr != nil {
 		s.Warn("查询实名认证记录失败", zap.Error(vErr), zap.String("uid", uid))
 	} else if vr != nil {

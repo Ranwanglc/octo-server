@@ -191,6 +191,10 @@ func (o *OIDC) Init() error {
 			Interval:    o.cfg.Provider.SyncInterval,
 			Concurrency: o.cfg.Provider.SyncConcurrency,
 		}, o.db, enc, clientRefresher{c: o.client}, o.killer, o.audit, o.tickLock)
+		// YUJ-405:RT 轮转成功后用新 access_token 调 /userinfo 同步实名 claims。
+		// 覆盖所有 OIDC 登录过的用户,最多 SyncInterval 延迟感知 Aegis 侧实名变化。
+		// ui/verif 同时就位:o.client 已完成 Discovery,userSvc 已确认实现 IService。
+		o.worker.WithVerificationSync(o.client, userSvc)
 		o.worker.Start(context.Background())
 	}
 	return nil

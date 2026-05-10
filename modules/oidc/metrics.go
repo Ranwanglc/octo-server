@@ -47,6 +47,12 @@ func stateConsumeResultLabels() []string  { return []string{"ok", "miss"} }
 func logoutResultLabels() []string        { return []string{"ok", "kick_fail", "revoke_fail"} }
 func syncTickResultLabels() []string      { return []string{"ran", "lock_held", "lock_err"} }
 func syncProcessedResultLabels() []string { return []string{"ok", "invalid_grant", "transient", "panic"} }
+func syncVerificationSyncedResultLabels() []string {
+	// YUJ-405:SyncWorker rotate 后 /userinfo → upsert 的结果维度。
+	// YUJ-409 Round 2:新增 sub_mismatch(ownership 校验失败)和 fetch_nil
+	// (/userinfo 返 (nil,nil) 防御)两个分支。
+	return []string{"upserted", "skipped_unverified", "fetch_failed", "upsert_failed", "sub_mismatch", "fetch_nil"}
+}
 
 // init 把每个声明的 label 都预热成 0 值序列。Prometheus 在没观察到样本前不会
 // 暴露 series,导致 Grafana"区分不出零次"和"未注册"两种状态。
@@ -65,6 +71,9 @@ func init() {
 	}
 	for _, l := range syncProcessedResultLabels() {
 		metricSyncProcessedTotal.WithLabelValues(l).Add(0)
+	}
+	for _, l := range syncVerificationSyncedResultLabels() {
+		metricSyncVerificationSyncedTotal.WithLabelValues(l).Add(0)
 	}
 }
 
@@ -111,4 +120,13 @@ var (
 		Name:      "sync_processed_total",
 		Help:      "SyncWorker per-RT processing outcomes (ok|invalid_grant|transient|panic).",
 	}, []string{"result"})
+
+	// metricSyncVerificationSyncedTotal SyncWorker 在 rotate 成功后调 /userinfo
+	// → UpsertVerificationFromOIDC 的出口分布(YUJ-405)。用于运维观察实名同步
+	// 命中率 + 排查 Aegis /userinfo 异常。
+	metricSyncVerificationSyncedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace,
+		Name:      "sync_verification_synced_total",
+		Help:      "SyncWorker verification sync outcomes after RT rotate (upserted|skipped_unverified|fetch_failed|upsert_failed).",
+	}, []string{"status"})
 )

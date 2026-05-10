@@ -11,8 +11,25 @@ import (
 
 // verificationModel 对应 user_verification 表。
 //
+// ⚠️ 此表是 Aegis identity_verification claims 的 **local read-through cache**,
+// 不是 source of truth。权威源永远是 Aegis IdP,本表只缓存最近一次拉取到的快照,
+// 供 OCTO profile 接口着色徽章用(避免每次 profile 查询都同步打 Aegis admin API)。
+//
+// 写入触发点(2026-05-10 起 Aegis OIDC 直切之后):
+//  1. OIDC 登录 callback (modules/oidc/api.go) —— 用户走 IdP 登录时顺带同步
+//  2. OIDC SyncWorker (modules/oidc/sync_worker.go) —— RT 轮转成功后用新 access_token
+//     调一次 /userinfo,命中实名 claims 就 UpsertVerificationFromOIDC
+//     (YUJ-405,覆盖所有 OIDC 登录过的用户,最多 Interval 延迟感知 Aegis 侧变化)
+//
+// (YUJ-398 基于 Aegis admin API + client_credentials 的 pull-from-aegis 方案已归档:
+// Aegis 不提供 admin API + client_credentials grant,生产无法工作。见 YUJ-405。)
+//
+// 读取路径默认可能 stale,最大滞后取决于上面 2 个写入触发点的触发频率;
+// 典型场景"用户刚在 Aegis 完成实名别人查他 profile"依赖对方下次 OIDC 登录或
+// SyncWorker 下一轮 tick 才会刷新(延迟 ≤ SyncInterval,生产默认 15min)。
+//
 // 自 2026-05-10 起（YUJ-382 / Aegis OIDC Phase 1),OIDC callback(modules/oidc/api.go)
-// 是 user_verification 表的唯一写入方,权威源从 dmwork-verify-service 迁移到 Aegis IdP。
+// 首次成为 user_verification 表的写入方,权威源从 dmwork-verify-service 迁移到 Aegis IdP。
 // 历史:此前由 dmwork-verify-service 经 HMAC POST /v1/internal/verification/complete
 //       写入,该链路已随 Aegis OIDC 直切方案废弃;api_verification.go 整个文件被删除。
 //
@@ -120,4 +137,36 @@ func nullableVerificationString(s string) dbr.NullString {
 		return dbr.NullString{}
 	}
 	return dbr.NullString{NullString: sql.NullString{String: s, Valid: true}}
+}
+
+// DeleteByUID 删除单个用户的实名记录(YUJ-398 Round 1 Jerry-Xin Crit 2 + YUJ-399 Round 3 Crit 4)。
+//
+// 背景:user_verification 是 local read-through cache,Aegis 才是权威源。
+// 当 Aegis 侧用户"取消实名" / "账号注销" / "is_verified=false" 权威态时,
+// 如果不清 local row,service.go::GetUserDetail 只要查到任意行就标 RealnameVerified=true,
+// 会造成**徽章永久假阳**(Aegis 说未实名,OCTO 徽章仍亮)。
+//
+// 当前调用方:目前没有调用方(YUJ-405:sync_worker 保守不在 /userinfo is_verified=false
+// 时 Delete,避免 Aegis 抖动误清;OIDC callback 通过 Upsert 的 LegalName 非空 gate
+// 拒绝写,而非 Delete 旧行)。保留本方法为未来 Aegis webhook 收到明确撤销事件时用。
+//
+// 调用合同(严格限定,任何一点错都会造成误删):
+//   必须在 Aegis **权威确认**用户未实名时才调 —— 例如 Aegis 主动推送的撤销 webhook。
+//   严禁在以下场景调:
+//     - /userinfo 拉取异常 / 5xx / token 拿不到 → 保守保留旧 row
+//     - JSON 解析失败 / 配置错 → 同上
+//     - DB 查询错误 → 不触及
+//   误删代价:某一次 Aegis 短暂抖动,所有 pulled 用户 cache 被清,下次 pull 又 upsert 回来 ——
+//   但中间这段窗口 OCTO 徽章会误显示"未实名",用户发 support ticket。保守是这里的默认。
+//
+// 语义:
+//   - uid 空串 → no-op + nil err(防御编程错误,不让 DELETE FROM ... WHERE user_id='' 误删)
+//   - 行不存在 → 仍 nil err(幂等);调用方不依赖"是否删掉了"的返回值
+//   - DB error → 原样返回给调用方记 warn
+func (d *verificationDB) DeleteByUID(uid string) error {
+	if strings.TrimSpace(uid) == "" {
+		return nil
+	}
+	_, err := d.session.DeleteFrom("user_verification").Where("user_id=?", uid).Exec()
+	return err
 }
