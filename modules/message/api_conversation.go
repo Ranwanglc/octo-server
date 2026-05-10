@@ -489,6 +489,22 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 		}
 	}
 
+	// ---------- App Bot 标记 ----------
+	appBotUIDs := make(map[string]bool)
+	if len(uids) > 0 {
+		var abUIDs []string
+		_, abErr := co.ctx.DB().SelectBySql(
+			"SELECT uid FROM app_bot WHERE uid IN ? AND status=1", uids,
+		).Load(&abUIDs)
+		if abErr != nil {
+			co.Warn("batch query app_bot failed, skip bot_type tagging", zap.Error(abErr))
+		} else {
+			for _, uid := range abUIDs {
+				appBotUIDs[uid] = true
+			}
+		}
+	}
+
 	// ---------- 群设置  ----------
 	groups := make([]*group.GroupResp, 0)
 	if len(groupNos) > 0 {
@@ -607,6 +623,10 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 					syncUserConversationResp.CategoryID = categorySetting.CategoryID
 					syncUserConversationResp.CategorySort = categorySetting.CategorySort
 				}
+			}
+			// 填充 App Bot 标记
+			if conversation.ChannelType == common.ChannelTypePerson.Uint8() && appBotUIDs[conversation.ChannelID] {
+				syncUserConversationResp.BotType = "app_bot"
 			}
 			if len(syncUserConversationResp.Recents) > 0 {
 				syncUserConversationResps = append(syncUserConversationResps, syncUserConversationResp)
@@ -1236,6 +1256,7 @@ type SyncUserConversationResp struct {
 	Version          int64                  `json:"version,omitempty"`            // 数据版本
 	Recents          []*MsgSyncResp         `json:"recents,omitempty"`            // 最近N条消息
 	Extra            *conversationExtraResp `json:"extra,omitempty"`              // 扩展
+	BotType          string                 `json:"bot_type,omitempty"`            // Bot 类型（"app_bot" 表示应用 Bot）
 }
 
 func newSyncUserConversationResp(resp *config.SyncUserConversationResp, extra *conversationExtraResp, loginUID string, messageExtraDB *messageExtraDB, messageReactionDB *messageReactionDB, messageUserExtraDB *messageUserExtraDB, mute int, stick int, channelOffsetM *channelOffsetModel, deviceOffsetM *deviceOffsetModel, channelOffsetMessageSeq uint32) *SyncUserConversationResp {

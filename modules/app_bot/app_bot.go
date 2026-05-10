@@ -249,7 +249,7 @@ func (ab *AppBot) loadRegistryFromDB(authRegistry *bot_api.AppBotRegistryAdapter
 			UID:         bot.UID,
 			DisplayName: bot.DisplayName,
 			Description: bot.Description,
-			Avatar:      bot.Avatar,
+			Avatar:      ab.ctx.GetConfig().GetAvatarPath(bot.UID),
 			Scope:       bot.Scope,
 			SpaceID:     bot.SpaceID,
 			Token:       bot.Token,
@@ -267,6 +267,8 @@ func (ab *AppBot) loadRegistryFromDB(authRegistry *bot_api.AppBotRegistryAdapter
 			Username: bot.UID,
 			Name:     bot.DisplayName,
 			ShortNo:  bot.UID,
+			Phone:    "",
+			Zone:     "",
 			Robot:    1,
 		})
 	}
@@ -300,7 +302,6 @@ func (ab *AppBot) createBot(c *wkhttp.Context, scope, spaceID string) {
 		ID          string `json:"id" binding:"required"`
 		DisplayName string `json:"display_name" binding:"required"`
 		Description string `json:"description"`
-		Avatar      string `json:"avatar"`
 		WelcomeMsg  string `json:"welcome_msg"`
 	}
 	if err := c.BindJSON(&req); err != nil {
@@ -337,7 +338,6 @@ func (ab *AppBot) createBot(c *wkhttp.Context, scope, spaceID string) {
 		UID:         uid,
 		DisplayName: req.DisplayName,
 		Description: req.Description,
-		Avatar:      req.Avatar,
 		Scope:       scope,
 		SpaceID:     spaceID,
 		Status:      StatusDraft,
@@ -371,15 +371,36 @@ func (ab *AppBot) createBot(c *wkhttp.Context, scope, spaceID string) {
 		return
 	}
 
-	// Create user record so SDK can resolve avatar/name for message rows
+	// Create user record so SDK can resolve avatar/name for message rows.
+	// This is a hard dependency — without it, avatar and permission checks fail (404).
 	if err := ab.userService.AddUser(&user.AddUserReq{
 		UID:      uid,
 		Username: uid,
 		Name:     req.DisplayName,
 		ShortNo:  uid,
+		Phone:    "",
+		Zone:     "",
 		Robot:    1,
 	}); err != nil {
-		ab.Warn("create user record for app bot failed (non-fatal)", zap.Error(err), zap.String("uid", uid))
+		// Rollback: remove app_bot record and invalidate IM token
+		if delErr := ab.db.deleteAppBot(req.ID); delErr != nil {
+			ab.Warn("rollback deleteAppBot failed", zap.Error(delErr), zap.String("id", req.ID))
+		}
+		revokeToken, tokenErr := generateAppBotToken()
+		if tokenErr != nil {
+			revokeToken = fmt.Sprintf("REVOKED-%s-%d", uid, time.Now().UnixNano())
+		}
+		if _, imErr := ab.ctx.UpdateIMToken(config.UpdateIMTokenReq{
+			UID:         uid,
+			Token:       revokeToken,
+			DeviceFlag:  config.APP,
+			DeviceLevel: config.DeviceLevelMaster,
+		}); imErr != nil {
+			ab.Warn("rollback UpdateIMToken failed", zap.Error(imErr), zap.String("uid", uid))
+		}
+		ab.Error("create user record for app bot failed, rolled back", zap.Error(err), zap.String("uid", uid))
+		c.ResponseError(errors.New("create app bot failed: user record creation failed"))
+		return
 	}
 
 	c.Response(gin.H{
@@ -480,7 +501,7 @@ func (ab *AppBot) getBotDetail(c *wkhttp.Context) {
 		"uid":          bot.UID,
 		"display_name": bot.DisplayName,
 		"description":  bot.Description,
-		"avatar":       bot.Avatar,
+		"avatar":       ab.ctx.GetConfig().GetAvatarPath(bot.UID),
 		"welcome_msg":  bot.WelcomeMsg,
 		"scope":        bot.Scope,
 		"space_id":     bot.SpaceID,
@@ -512,7 +533,6 @@ func (ab *AppBot) updateBot(c *wkhttp.Context) {
 	var req struct {
 		DisplayName *string `json:"display_name"`
 		Description *string `json:"description"`
-		Avatar      *string `json:"avatar"`
 		WelcomeMsg  *string `json:"welcome_msg"`
 	}
 	if err := c.BindJSON(&req); err != nil {
@@ -539,9 +559,6 @@ func (ab *AppBot) updateBot(c *wkhttp.Context) {
 	if req.Description != nil {
 		updates["description"] = *req.Description
 	}
-	if req.Avatar != nil {
-		updates["avatar"] = *req.Avatar
-	}
 	if req.WelcomeMsg != nil {
 		updates["welcome_msg"] = *req.WelcomeMsg
 	}
@@ -564,7 +581,7 @@ func (ab *AppBot) updateBot(c *wkhttp.Context) {
 			UID:         bot.UID,
 			DisplayName: bot.DisplayName,
 			Description: bot.Description,
-			Avatar:      bot.Avatar,
+			Avatar:      ab.ctx.GetConfig().GetAvatarPath(bot.UID),
 			Scope:       bot.Scope,
 			SpaceID:     bot.SpaceID,
 			Token:       bot.Token,
@@ -722,7 +739,7 @@ func (ab *AppBot) rotateToken(c *wkhttp.Context) {
 			UID:         bot.UID,
 			DisplayName: bot.DisplayName,
 			Description: bot.Description,
-			Avatar:      bot.Avatar,
+			Avatar:      ab.ctx.GetConfig().GetAvatarPath(bot.UID),
 			Scope:       bot.Scope,
 			SpaceID:     bot.SpaceID,
 			Token:       newToken,
@@ -816,7 +833,7 @@ func (ab *AppBot) publishBot(c *wkhttp.Context) {
 		UID:         bot.UID,
 		DisplayName: bot.DisplayName,
 		Description: bot.Description,
-		Avatar:      bot.Avatar,
+		Avatar:      ab.ctx.GetConfig().GetAvatarPath(bot.UID),
 		Scope:       bot.Scope,
 		SpaceID:     bot.SpaceID,
 		Token:       bot.Token,
@@ -922,7 +939,7 @@ func (ab *AppBot) discoverBots(c *wkhttp.Context) {
 			"uid":          bot.UID,
 			"display_name": bot.DisplayName,
 			"description":  bot.Description,
-			"avatar":       bot.Avatar,
+			"avatar":       ab.ctx.GetConfig().GetAvatarPath(bot.UID),
 			"scope":        bot.Scope,
 		})
 	}
@@ -938,7 +955,7 @@ func (ab *AppBot) toBotListResp(bots []*appBotModel) []gin.H {
 			"id":           bot.ID,
 			"uid":          bot.UID,
 			"display_name": bot.DisplayName,
-			"avatar":       bot.Avatar,
+			"avatar":       ab.ctx.GetConfig().GetAvatarPath(bot.UID),
 			"status":       bot.Status,
 			"scope":        bot.Scope,
 			"created_at":   bot.CreatedAt,

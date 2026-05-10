@@ -85,6 +85,7 @@ func CheckBotsInSpace(session *dbr.Session, spaceID string, botUIDs map[string]b
 	for uid := range botUIDs {
 		uids = append(uids, uid)
 	}
+	// Check space_member (User Bots and manually added bots)
 	var memberUIDs []string
 	_, err := session.Select("uid").From("space_member").
 		Where("space_id=? AND uid IN ? AND status=1", spaceID, uids).
@@ -93,6 +94,18 @@ func CheckBotsInSpace(session *dbr.Session, spaceID string, botUIDs map[string]b
 		return nil, err
 	}
 	for _, uid := range memberUIDs {
+		result[uid] = true
+	}
+	// Check app_bot: platform bots are visible in ALL spaces;
+	// space bots are visible in their own space.
+	var appBotUIDs []string
+	_, err = session.Select("uid").From("app_bot").
+		Where("uid IN ? AND status=1 AND (scope='platform' OR (scope='space' AND space_id=?))", uids, spaceID).
+		Load(&appBotUIDs)
+	if err != nil {
+		return nil, err
+	}
+	for _, uid := range appBotUIDs {
 		result[uid] = true
 	}
 	return result, nil

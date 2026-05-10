@@ -134,6 +134,11 @@ func (bf *BotFather) createUserBot(c *wkhttp.Context) {
 				return
 			}
 		}
+		// 禁止 app_ 前缀以避免与 App Bot UID 命名空间冲突
+		if strings.HasPrefix(reqUsername, "app_") {
+			c.ResponseError(errors.New("username 不能以 app_ 开头，该前缀为应用 Bot 保留"))
+			return
+		}
 		reqUsername = reqUsername + BotUsernameSuffix
 
 		// 唯一性预检
