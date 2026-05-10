@@ -17,10 +17,10 @@ const (
 )
 
 const (
-	defaultTimeout       = 30
-	defaultTotalTimeout  = 45
-	defaultMaxDuration   = 60
-	defaultMaxFileSize = 3 * 1024 * 1024 // 3MB
+	defaultTimeout      = 30
+	defaultTotalTimeout = 45
+	defaultMaxDuration  = 60
+	defaultMaxFileSize  = 3 * 1024 * 1024 // 3MB
 )
 
 // Package-private default values for voice context limits
@@ -58,6 +58,11 @@ type VoiceConfig struct {
 	PromptFile string // Path to voice_prompts.yaml (env: VOICE_PROMPT_FILE)
 
 	EmotionEmoji bool // Enable emotion emoji annotation in output (env: VOICE_EMOTION_EMOJI, default: true)
+
+	LocalEnabled       bool   // 是否允许前端使用本地模型（env: VOICE_LOCAL_ENABLED, default: true）
+	LocalTimeoutMs     int    // 本地模型请求超时毫秒（env: VOICE_LOCAL_TIMEOUT_MS, default: 10000）
+	LocalProbeURL      string // Full URL for local model health probe (env: VOICE_LOCAL_PROBE_URL, default: "http://localhost:8787/")
+	LocalTranscribeURL string // Full URL for local model transcription (env: VOICE_LOCAL_TRANSCRIBE_URL, default: "http://localhost:8787/v1/voice/transcribe")
 
 	MaxVoiceContextLength  int // max personal voice context runes (env: VOICE_MAX_VOICE_CONTEXT_LENGTH)
 	MaxContextTextLength   int // max context_text runes (env: VOICE_MAX_CONTEXT_TEXT_LENGTH)
@@ -208,6 +213,33 @@ func NewVoiceConfigFromEnv() *VoiceConfig {
 		cfg.EditMode = "append"
 	}
 
+	cfg.LocalEnabled = true
+	if v := os.Getenv("VOICE_LOCAL_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.LocalEnabled = b
+		}
+	}
+
+	cfg.LocalTimeoutMs = 10000
+	if v := os.Getenv("VOICE_LOCAL_TIMEOUT_MS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			if n > 60000 {
+				n = 60000
+			}
+			cfg.LocalTimeoutMs = n
+		}
+	}
+
+	cfg.LocalProbeURL = "http://localhost:8787/"
+	if v := os.Getenv("VOICE_LOCAL_PROBE_URL"); v != "" {
+		cfg.LocalProbeURL = v
+	}
+
+	cfg.LocalTranscribeURL = "http://localhost:8787/v1/voice/transcribe"
+	if v := os.Getenv("VOICE_LOCAL_TRANSCRIBE_URL"); v != "" {
+		cfg.LocalTranscribeURL = v
+	}
+
 	return cfg
 }
 
@@ -287,16 +319,16 @@ func TruncateRunesTail(s string, max int) string {
 
 // modelAbbreviations maps full model names to short identifiers
 var modelAbbreviations = map[string]string{
-	"gemini-3.1-pro-preview":  "g31pp",
-	"gemini-3-flash-preview":  "g3fp",
-	"gemini-2.5-pro":          "g25p",
-	"gemini-2.0-flash":        "g20f",
-	"gemini-2.0-flash-lite":   "g20fl",
-	"gpt-4o-transcribe":       "gpt4ot",
-	"gpt-4o-mini-transcribe":  "gpt4omt",
-	"whisper-1":               "w1",
-	"whisper-large-v3":        "wlv3",
-	"qwen3.5-omni-plus":       "q35op",
+	"gemini-3.1-pro-preview": "g31pp",
+	"gemini-3-flash-preview": "g3fp",
+	"gemini-2.5-pro":         "g25p",
+	"gemini-2.0-flash":       "g20f",
+	"gemini-2.0-flash-lite":  "g20fl",
+	"gpt-4o-transcribe":      "gpt4ot",
+	"gpt-4o-mini-transcribe": "gpt4omt",
+	"whisper-1":              "w1",
+	"whisper-large-v3":       "wlv3",
+	"qwen3.5-omni-plus":      "q35op",
 }
 
 // ShortenModelName returns a short identifier for a model name.
