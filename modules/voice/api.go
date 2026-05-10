@@ -193,11 +193,15 @@ func (v *Voice) transcribe(c *wkhttp.Context) {
 func (v *Voice) getConfig(c *wkhttp.Context) {
 	enabled := v.cfg.Validate() == nil
 	c.JSON(http.StatusOK, gin.H{
-		"enabled":       enabled,
-		"max_duration":  v.cfg.MaxDuration,
-		"max_file_size": v.cfg.MaxFileSize,
-		"engine":        ShortenEngineName(v.cfg.Engine),
-		"edit_mode":     v.cfg.EditMode,
+		"enabled":              enabled,
+		"max_duration":         v.cfg.MaxDuration,
+		"max_file_size":        v.cfg.MaxFileSize,
+		"engine":               ShortenEngineName(v.cfg.Engine),
+		"edit_mode":            v.cfg.EditMode,
+		"local_enabled":        v.cfg.LocalEnabled,
+		"local_timeout_ms":     v.cfg.LocalTimeoutMs,
+		"local_probe_url":      v.cfg.LocalProbeURL,
+		"local_transcribe_url": v.cfg.LocalTranscribeURL,
 	})
 }
 
