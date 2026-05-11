@@ -1,27 +1,17 @@
-// YUJ-438 overlay workaround (octo-release, 2026-05-11).
+// Module import ordering notes:
 //
-// This file is an OSS-only overlay that ONLY affects the published
-// Mininglamp-OSS/octo-server mirror — the internal dmwork-org/dmworkim
-// source tree is NOT touched.
+// The import order in this file is significant — gorp migrations run
+// in module-registration (i.e. import) order.
 //
-// Why it exists:
-//   `docker-compose up` on a fresh OSS install runs the built-in gorp
-//   migrations in module-import order. The migration
-//   `botfather-20260417-01.sql` does `ALTER TABLE robot ...`, but the
-//   `robot` table is created by the `modules/robot` module's migrations.
-//   The original import order (`botfather` at position 3, `robot` at
-//   position 14) therefore panics octo-server on first boot for OSS
-//   users.
+//   - `robot` must appear BEFORE `botfather` because
+//     `botfather-20260417-01.sql` does `ALTER TABLE robot ...` which
+//     requires the `robot` table to already exist.
 //
-// The fix here re-orders the two imports so that `robot` runs before
-// `botfather`. The internal source keeps the original order because the
-// internal production MySQL already has the `robot` table seeded by an
-// earlier snapshot; only OSS first-time installers hit the ordering
-// bug. Keeping the fix in the tool layer avoids a noisy patch to
-// `dmwork-org/dmworkim`.
+//   - `bot_api` must appear BEFORE `app_bot` because `app_bot`
+//     imports `bot_api` at the Go package level.
 //
-// Ref: YUJ-438 ("OCTO octo-temp 工具层紧急修复 — migration fix +
-//       MASTER_KEY 文档 + gitlab-ci 拉黑"), Yu 2026-05-11.
+//   - Both `bot_api` and `app_bot` appear AFTER `user` and `robot`
+//     since they query those tables at runtime.
 
 package modules
 
@@ -29,9 +19,7 @@ package modules
 import (
 	_ "github.com/Mininglamp-OSS/octo-server/modules/backup"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/base"
-	// YUJ-438: `robot` must import BEFORE `botfather` so that the
-	// `robot` table exists by the time `botfather-20260417-01.sql`
-	// runs its `ALTER TABLE robot ...`.
+	// `robot` before `botfather`: botfather migrations ALTER the robot table.
 	_ "github.com/Mininglamp-OSS/octo-server/modules/robot"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/botfather"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/category"
