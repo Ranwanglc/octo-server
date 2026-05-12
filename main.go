@@ -18,6 +18,7 @@ import (
 	_ "github.com/Mininglamp-OSS/octo-server/internal"
 	commonapi "github.com/Mininglamp-OSS/octo-server/modules/base/common"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
+	octodb "github.com/Mininglamp-OSS/octo-server/pkg/db"
 	"github.com/Mininglamp-OSS/octo-server/pkg/metrics"
 	"github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/gin-gonic/gin"
@@ -136,6 +137,33 @@ func runAPI(ctx *config.Context) {
 	s.GetRoute().UseGin(wkhttp.SecureCORSOverrideMiddleware(
 		wkhttp.ParseAllowedOrigins(os.Getenv("DM_CORS_ALLOWED_ORIGINS")),
 	))
+	// Legacy-database upgrade shim: rewrite the historical filename IDs in
+	// gorp_migrations to the new timestamp-prefixed format before
+	// module.Setup (which internally calls migrate.Exec) runs. Without
+	// this, sql-migrate's PlanMigration stage panics with "unknown
+	// migration in database" the moment it sees an ID that's no longer
+	// on disk. Idempotent: a fresh install (gorp_migrations table absent)
+	// is a clean no-op; restarting an already-rewritten database is also
+	// a no-op.
+	rewriteCtx, rewriteCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := octodb.RewriteLegacyMigrationIDs(rewriteCtx, ctx.DB().DB); err != nil {
+		rewriteCancel()
+		panic(fmt.Errorf("rewrite legacy migration IDs: %w", err))
+	}
+	// Snapshot-built-thread compatibility: when an older init-db.sql
+	// already created thread / thread_member / thread_setting but
+	// gorp_migrations has no matching thread-* rows, pre-seed those six
+	// IDs. The thread module's SQLDir is now registered unconditionally,
+	// so without this reconciliation sql-migrate would see the embedded
+	// thread migrations as un-applied, try to run `CREATE TABLE thread`
+	// (no IF NOT EXISTS) against an existing table, and panic with
+	// MySQL 1050.
+	if err := octodb.ReconcileThreadSchemaRecords(rewriteCtx, ctx.DB().DB); err != nil {
+		rewriteCancel()
+		panic(fmt.Errorf("reconcile thread schema records: %w", err))
+	}
+	rewriteCancel()
+
 	// 模块安装
 	err := module.Setup(ctx)
 	if err != nil {
