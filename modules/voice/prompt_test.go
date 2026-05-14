@@ -46,6 +46,7 @@ func TestBuildSystemMessage_ContainsMentionRule(t *testing.T) {
 	assert.Contains(t, msg, "艾特")
 	assert.Contains(t, msg, "@Pythagoras")
 	assert.Contains(t, msg, "@Boris")
+	assert.Contains(t, msg, "让皮皮处理")
 }
 
 func TestBuildSystemMessage_MentionV2Scenarios(t *testing.T) {
@@ -76,6 +77,7 @@ func TestBuildSystemMessage_MentionV2Scenarios(t *testing.T) {
 
 	// Disambiguation line
 	assert.Contains(t, msg, "暂不联系/延迟处理")
+	assert.Contains(t, msg, "@Bob")
 }
 
 func TestBuildSystemMessage_MentionRuleOrder(t *testing.T) {
@@ -256,6 +258,7 @@ func TestBuildUserMessage_Append_DoesNotContainEditInstructions(t *testing.T) {
 	msg := buildUserMessage("append", "some text", "")
 	assert.NotContains(t, msg, "删掉")
 	assert.NotContains(t, msg, "改成")
+	assert.NotContains(t, msg, "编辑指令")
 }
 
 // --- XML tag structure tests ---
@@ -578,7 +581,7 @@ func TestSystemPromptExampleSectionsAreWrapped(t *testing.T) {
 	}
 
 	// Verify no example-style keywords appear outside <EXAMPLE> blocks
-	exampleKeywords := []string{"示例1", "示例2", "正确输出：", "❌ 错误输出：", "❌ 错误："}
+	exampleKeywords := []string{"示例1", "示例2", "正确输出：", "❌ 错误输出：", "❌ 错误：", "❌ 禁止："}
 	outsideText := extractTextOutsideExampleTags(msg)
 	for _, kw := range exampleKeywords {
 		assert.NotContains(t, outsideText, kw,
@@ -610,14 +613,13 @@ func TestSystemPromptContainsEditInstructionRecognition(t *testing.T) {
 	msg := buildSystemMessage(true)
 	assert.Contains(t, msg, "编辑指令识别")
 	assert.Contains(t, msg, "追加新内容")
-	assert.Contains(t, msg, "在edit模式下")
+	assert.Contains(t, msg, "在 edit 模式下")
 }
 
 func TestAppendMode_NoEditModeTrigger(t *testing.T) {
 	sysMsg := buildSystemMessage(true)
 	assert.NotContains(t, sysMsg, "当用户消息中包含 <input_buffer> 时，你处于")
 	assert.Contains(t, sysMsg, "在 edit 模式下")
-	assert.Contains(t, sysMsg, "在edit模式下")
 }
 
 func TestEditOnlyMode_NoAppendFallback(t *testing.T) {
