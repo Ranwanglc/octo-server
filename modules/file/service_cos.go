@@ -96,6 +96,18 @@ func (sc *ServiceCOS) getClient() (*minio.Client, error) {
 //     shape and is reachable from the browser when deployers do not
 //     stand up a custom domain.
 //
+// Limitation — non-bucket-prefixed BucketURL: a custom CDN / accelerator
+// domain that does NOT carry a `<bucket>.` subdomain (e.g.
+// `BucketURL=https://cdn.example.com`) is currently not supported. The
+// SDK is configured with `BucketLookupDNS` (line 66 / 160 below), so it
+// will virtual-host the bucket back onto whatever host we hand it,
+// producing `https://<bucket>.cdn.example.com` — a hostname that does
+// not exist in DNS. If your CDN routes `cdn.example.com/<bucket>/...`
+// in path-style instead, drop BucketURL (use the default SDK endpoint)
+// and front it with a plain reverse proxy, or open a tracker to add a
+// `BucketLookupPath` override knob here. The supported BucketURL shapes
+// are documented in `configs/tsdd.yaml` and the `docker/octo` config.
+//
 // Returned `host` is the bare host[:port] suitable for `minio.New` (no
 // scheme, no path). `secure` reflects the URL scheme — `http://` flips it
 // to false so HTTP-only deployments (e.g. local emulators) do not get
