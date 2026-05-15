@@ -688,6 +688,11 @@ func (bf *BotFather) sendMessage(c *wkhttp.Context) {
 	}
 
 	channelID := bf.resolveSpaceChannelID(robotID, req.ChannelID, req.ChannelType)
+
+	// NOTE: This handler is currently NOT routed (the active /v1/bot/sendMessage
+	// route is wired through modules/bot_api/bot_api.go to ba.sendMessage). It is
+	// kept here as legacy code for the older /v1/botfather surface. Authoritative
+	// space_id enrichment is performed by the active route only.
 	result, err := bf.ctx.SendMessageWithResult(&config.MsgSendReq{
 		Header: config.MsgHeader{
 			RedDot: 1,

@@ -424,7 +424,10 @@ func (m *Message) sendMsg(c *wkhttp.Context) {
 			return
 		}
 	}
-	err = m.sendMessage(req.ReceiveChannelID, req.ReceiveChannelType, uid, req.Payload)
+	// YUJ-644 / Mininglamp-OSS#33: 把 SpaceMiddleware 已校验的发送方 SpaceID 透传给
+	// sendMessage，作为 PERSONAL DM 的权威 space_id 注入源（不信客户端 body）。
+	senderSpaceID := spacepkg.GetSpaceID(c)
+	err = m.sendMessage(req.ReceiveChannelID, req.ReceiveChannelType, uid, req.Payload, senderSpaceID)
 	if err != nil {
 		c.ResponseError(err)
 		return
@@ -432,11 +435,18 @@ func (m *Message) sendMsg(c *wkhttp.Context) {
 	c.ResponseOK()
 }
 
-func (m *Message) sendMessage(channelID string, channelType uint8, fromUID string, payload map[string]interface{}) error {
+// sendMessage 派发消息。senderSpaceID 是 SpaceMiddleware 已校验的发送方 SpaceID
+// （来自 X-Space-ID / query），用于 PERSONAL 路径的服务端权威 space_id 注入
+// （YUJ-644 / Mininglamp-OSS#33）。空串 senderSpaceID 表示发送方未声明 Space
+// （非 Space 模式 / 老客户端兼容），PERSONAL 走老 passthrough 行为。
+func (m *Message) sendMessage(channelID string, channelType uint8, fromUID string, payload map[string]interface{}, senderSpaceID string) error {
 	// YUJ-219-A / GH#1283 (analysis-report.md §4.5 / §7.4)：
 	// 派发前为消息 payload 注入权威 space_id，让客户端 SpaceFilter 拿到可信字段，
 	// race 窗口的 fail-open 语义可降级为 fail-closed。
-	payload = m.enrichPayloadWithSpaceID(channelID, channelType, payload)
+	// YUJ-644：扩展到 PERSONAL（DM）—— 发送方 SpaceMiddleware 已校验的 SpaceID
+	// 直接覆盖客户端 payload.space_id，跨 Space 推送时收端 SpaceFilter 拿到权威值
+	// 立刻丢弃，不再依赖 channelInfo 缓存命中。
+	payload = m.enrichPayloadWithSpaceID(channelID, channelType, payload, senderSpaceID)
 	err := m.ctx.SendMessage(&config.MsgSendReq{
 		Header: config.MsgHeader{
 			RedDot: 1,
@@ -460,16 +470,22 @@ func (m *Message) sendMessage(channelID string, channelType uint8, fromUID strin
 // 判定跨 Space 污染。老路径下该字段只在 PERSONAL DM 由发送端自带，GROUP /
 // COMMUNITY_TOPIC 的实时推送完全没有 Space 标签，导致客户端只能靠 channelInfo
 // 缓存的 space_id 推导，冷启动 race 窗口里命中 fail-open 分支，跨 Space 消息
-// 冒顶。本函数为后端权威源：
-//   - payload 已携带 space_id → 尊重发送端上送（PERSONAL 场景）
-//   - GROUP → 查 group.SpaceID 写入
-//   - COMMUNITY_TOPIC → 解析父群 groupNo，再查父群 SpaceID 写入（与
-//     filterThreadConv / enrichThreadCreatedMessages 对齐）
-//   - PERSONAL 无 space_id 且不是上述情况 → 不注入，保持老行为
+// 冒顶。
+//
+// YUJ-644 / Mininglamp-OSS#33：扩展到 PERSONAL（DM）路径 —— 服务端用
+// SpaceMiddleware 已校验的发送方 SpaceID 覆盖客户端上送 payload.space_id，
+// 不再信任客户端任何字段。WuKongIM 对 DM 仅用裸 uid 路由（无 Space 概念），
+// 客户端 SpaceFilter 是唯一的过滤层，必须有可信信号。
+//
+// 本函数为后端权威源：
+//   - GROUP → 查 group.SpaceID 写入（无条件覆盖）
+//   - COMMUNITY_TOPIC → 解析父群 groupNo，再查父群 SpaceID 写入（无条件覆盖）
+//   - PERSONAL：senderSpaceID 非空 → 覆盖 payload.space_id（服务端权威）；
+//     senderSpaceID 为空 → 老 passthrough（兼容非 Space 部署 / 老客户端）。
 //
 // 查不到群或解析失败时静默跳过（注入是优化，缺失回落到老语义，不能因此
 // 阻断发送）；同一原则：payload 为 nil 时初始化一个空 map，避免调用方踩空。
-func (m *Message) enrichPayloadWithSpaceID(channelID string, channelType uint8, payload map[string]interface{}) map[string]interface{} {
+func (m *Message) enrichPayloadWithSpaceID(channelID string, channelType uint8, payload map[string]interface{}, senderSpaceID string) map[string]interface{} {
 	lookup := func(groupNo string) (string, error) {
 		g, err := m.groupService.GetGroupWithGroupNo(groupNo)
 		if err != nil {
@@ -480,7 +496,7 @@ func (m *Message) enrichPayloadWithSpaceID(channelID string, channelType uint8, 
 		}
 		return g.SpaceID, nil
 	}
-	return enrichPayloadWithSpaceIDCore(channelID, channelType, payload, lookup, func(s string, fields ...zap.Field) {
+	return enrichPayloadWithSpaceIDCore(channelID, channelType, payload, senderSpaceID, lookup, func(s string, fields ...zap.Field) {
 		m.Warn(s, fields...)
 	})
 }
@@ -494,12 +510,21 @@ func (m *Message) enrichPayloadWithSpaceID(channelID string, channelType uint8, 
 // 再 fallback 到 PERSONAL 的客户端上送**。老版本在最前面做 "sid 存在就 return"
 // 的短路，会让 Group/CommunityTopic 消息被客户端伪造的 payload.space_id 绕过，
 // 导致跨 Space 信号污染。新版本对 Group / CommunityTopic 一律以群表/父群
-// SpaceID 为准，无论客户端是否上送 space_id。只有 PERSONAL 才尊重客户端值
-// （DM Space 模式下 sender 自己声明会话归属）。
+// SpaceID 为准，无论客户端是否上送 space_id。
+//
+// PERSONAL（YUJ-644 / YUJ-660 High-3）：senderSpaceID 是 SpaceMiddleware 已校验
+// 的发送方 Space 上下文（X-Space-ID / query?space_id），非空时覆盖 payload.space_id
+// 作为服务端权威值；空串时无条件剥离 payload.space_id（YUJ-660 fail-open 修复，
+// 见下文 PERSONAL case 注释），不再相信客户端在 SpaceMiddleware opt-in 缺失下
+// 提交的任何 space_id。
+//
+// 内部 emitWarn helper：当 PERSONAL 派发后 payload.space_id 仍为空时记一条结构化
+// warn 日志（key=enrich_payload_space_id_empty=true），可作为日志告警的稳态指标。
 func enrichPayloadWithSpaceIDCore(
 	channelID string,
 	channelType uint8,
 	payload map[string]interface{},
+	senderSpaceID string,
 	lookupGroupSpace func(groupNo string) (string, error),
 	logWarn func(string, ...zap.Field),
 ) map[string]interface{} {
@@ -549,9 +574,35 @@ func enrichPayloadWithSpaceIDCore(
 			delete(payload, "space_id")
 		}
 		return payload
+	case common.ChannelTypePerson.Uint8():
+		// YUJ-644 / Mininglamp-OSS#33：PERSONAL DM 用发送方 SpaceMiddleware 已校验
+		// 的 SpaceID 覆盖客户端上送，作为客户端 SpaceFilter 的权威信号源。
+		if senderSpaceID != "" {
+			payload["space_id"] = senderSpaceID
+			return payload
+		}
+		// YUJ-660 (High-3 FAIL-OPEN fix): senderSpaceID == "" 表示发送方未声明 Space
+		// (非 Space 部署 / 老客户端没带 X-Space-ID)。在这条路径下任何客户端
+		// payload.space_id 都不可信 —— 攻击者只要省略 X-Space-ID 即可塞入伪造值。
+		// 服务端无条件剥离，避免 SpaceMiddleware 的 opt-in 语义留下 fail-open 缝隙。
+		// 这与 GROUP / COMMUNITY_TOPIC 的"老群无 SpaceID 时删除客户端伪造 space_id"
+		// 行为对齐：当服务端无可信权威值时，不允许客户端旁路注入信号。
+		_, hadClientSpaceID := payload["space_id"]
+		delete(payload, "space_id")
+		if logWarn != nil {
+			// 监测：未设置 senderSpaceID → 派发后收端走 fail-open 兼容分支。
+			// 稳态下应为 0；非零持续上升即说明仍有路径绕过 SpaceMiddleware 透传，
+			// 或老客户端在 Space 路由上不带 X-Space-ID。
+			logWarn("enrich_payload_space_id_empty",
+				zap.Bool("enrich_payload_space_id_empty", true),
+				zap.Bool("client_space_id_stripped", hadClientSpaceID),
+				zap.String("channelID", channelID),
+				zap.Uint8("channelType", channelType),
+			)
+		}
+		return payload
 	}
-	// PERSONAL / 其它 channel type：尊重发送端上送值（DM Space 约定），不主动注入。
-	// 如果 payload["space_id"] 不存在或为空，保持原样，客户端按老语义处理。
+	// 未知 channel_type：保持原样。
 	return payload
 }
 
