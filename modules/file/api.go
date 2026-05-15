@@ -394,12 +394,22 @@ func (f *File) getFile(c *wkhttp.Context) {
 //   - Content-Type: signed by every backend that supports presigned PUT
 //     (MinIO, COS, OSS). Any deviation produces 403 SignatureDoesNotMatch
 //     at the gateway.
-//   - Content-Length: signed by every backend (MinIO/COS via SigV4
-//     `signedHeaders`, OSS via the `oss.ContentLength` SignURL option).
-//     Any deviation — wrong value, missing header — produces 403
-//     SignatureDoesNotMatch (S3/COS) or InvalidArgument (OSS). This is
-//     the server-side enforcement of `MaxFileSize` for the presigned
-//     path: a client cannot upload more bytes than the server signed for.
+//   - Content-Length (MinIO + COS, S3 SigV4): signed via `signedHeaders`
+//     in the SigV4 canonical string. Any deviation — wrong value, missing
+//     header — produces 403 SignatureDoesNotMatch at the gateway. This
+//     IS the server-side enforcement of `MaxFileSize` for the presigned
+//     path on SigV4 backends: a client cannot upload more bytes than
+//     the server signed for.
+//   - Content-Length (OSS V1 signing): the OSS V1 canonical-string
+//     algorithm does NOT cover Content-Length even when `oss.ContentLength`
+//     is passed into SignURL. The signed URL therefore does NOT enforce
+//     the byte budget — OSS will accept a PUT of any size under that URL.
+//     The `maxFileSize` value still flows through the API contract, but
+//     on OSS it is advisory. Operators who need a hard size cap on OSS
+//     must enforce it at the bucket / RAM-policy / lifecycle layer, or
+//     migrate to a SigV4 backend (MinIO/COS) where the signature itself
+//     covers Content-Length. (Roadmap: OSS V4 signing covers Content-Length
+//     canonically; tracked separately from this PR.)
 //   - Content-Disposition (MinIO + COS, S3 SigV4): signed across the
 //     canonical-headers section. Any deviation, including alternate
 //     casing or omission, produces 403 SignatureDoesNotMatch.

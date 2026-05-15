@@ -145,22 +145,33 @@ func (s *ServiceOSS) normalizeOSSObjectKey(objectPath string) string {
 // echoes the same value, and the OSS gateway records it on the resulting
 // object.
 //
-// fileSize is signed via `oss.ContentLength` so the OSS gateway rejects
-// any PUT whose Content-Length deviates from the value the server
-// committed to. This is the OSS-side analogue of the SigV4
-// Content-Length signing on MinIO/COS — both close the size-bypass gap
-// where any authenticated caller could otherwise upload arbitrary bytes
-// under an allowed extension. Pass a non-positive `fileSize` and the
-// function errors out rather than silently producing an unbounded URL.
+// Caveat — Content-Length on OSS V1: the OSS V1 canonical-string algorithm
+// does NOT cover Content-Length. Although we pass `oss.ContentLength` into
+// SignURL the resulting signature is computed over Date / Content-Type /
+// Canonicalized OSSHeaders / Resource — the size is advisory only and
+// the OSS gateway accepts a PUT of any byte length under the signed URL.
+// This is the OSS-side deviation from the SigV4 backends (MinIO/COS),
+// where Content-Length IS folded into `X-Amz-SignedHeaders` and a wrong
+// or missing value at PUT time returns 403 SignatureDoesNotMatch. To
+// enforce a hard size budget on OSS, operators must rely on bucket /
+// account-level policies (e.g. lifecycle quotas, RAM/STS policies that
+// cap object size) — this server's signed URL alone cannot. We still
+// require a positive `fileSize` so the request is well-formed and the
+// API contract (`maxFileSize` echo) stays consistent across backends.
 //
-// Caveat — Content-Disposition on OSS V1: the OSS V1 canonical-string
-// algorithm does NOT include Content-Disposition in the signed headers,
+// Caveat — Content-Disposition on OSS V1: same root cause. The OSS V1
+// canonical-string algorithm also does NOT include Content-Disposition,
 // so a deviating value at PUT time does NOT produce SignatureDoesNotMatch
 // the way it does on MinIO/COS. The browser-supplied Content-Disposition
 // (or absence of one) is silently persisted. Operators who need strict
-// disposition enforcement should migrate to a SigV4 backend or run a
-// post-upload validator. See `getUploadCredentials` docstring for the
-// full deviation matrix.
+// disposition or size enforcement should migrate to a SigV4 backend
+// (MinIO/COS), or run a post-upload validator. See `getUploadCredentials`
+// docstring for the full per-header deviation matrix.
+//
+// Roadmap — OSS V4 signing covers Content-Length canonically; switching
+// the SDK call to `oss.WithSignVersion(oss.SignVersionV4)` would close
+// this gap. Tracked separately so this PR can ship the customer-facing
+// SigV4 fix without dragging the OSS SDK uplift along.
 func (s *ServiceOSS) PresignedPutURL(objectPath string, contentType string, contentDisposition string, fileSize int64, expires time.Duration) (uploadURL string, downloadURL string, err error) {
 	if fileSize <= 0 {
 		return "", "", fmt.Errorf("预签名上传必须提供正向的 fileSize（字节数），用于在签名中固定 Content-Length")
