@@ -44,6 +44,14 @@ wukongIM:
   managerToken: ""
 
 # ---------- Object storage (MinIO, S3-compatible) ----------------------------
+# Note: For browser-direct upload via presigned PUT, the object-storage
+# bucket must allow PUT from the octo-web origin. For Aliyun OSS this is a
+# CORS rule on the bucket (Aliyun OSS console → 权限管理 → 跨域设置).
+# The same caveat applies to MinIO and Tencent COS whenever the upload host
+# differs from the octo-web origin (e.g. files.example.com vs octo.example.com).
+# Without the CORS rule the browser will block the PUT before it ever leaves
+# the page, regardless of how the URL was signed.
+#
 # Presigned-URL support matrix (current as of the file/presigned-URL implementation):
 #
 #   fileService value | presigned PUT (browser direct upload) | presigned GET (signed download)
