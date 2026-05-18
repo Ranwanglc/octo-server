@@ -313,6 +313,7 @@ func (bf *BotFather) initBotFatherUser() {
 func (bf *BotFather) registerBotFatherCommands() {
 	commands := []map[string]string{
 		{"command": CmdInstall, "description": "安装/更新 Octo 插件"},
+		{"command": CmdDaemon, "description": "获取 Agent Runtime 监控启动命令"},
 		{"command": CmdQuickstart, "description": "AI Agent 快速入门"},
 		{"command": CmdNewBot, "description": "创建新机器人"},
 		{"command": CmdMyBots, "description": "查看我的机器人"},
