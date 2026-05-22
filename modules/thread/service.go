@@ -243,7 +243,30 @@ func (s *Service) CreateThread(req *CreateThreadReq) (*ThreadResp, error) {
 		return nil, fmt.Errorf("create IM channel: %w", err)
 	}
 
-	// 拷贝源消息到子区作为首条消息
+	// 给所有"已对父 channel 开启 auto_follow_threads=1"的用户 fanout 一行 thread ext。
+	//
+	// 顺序约束（round-2 lml2468 blocker → round-4 Jerry-Xin/lml2468 重申）：
+	// fanout 必须发生在**任何客户端可观察的子区频道消息之前**。当前 thread 创建路径
+	// 里两个客户端可观察事件是：
+	//   1. sendSourceMessage —— 把源消息拷贝到新子区频道（可推送），
+	//   2. sendThreadCreatedMessage —— 在父群发送"X 创建了子区 Y"通知。
+	// 任意一个先于 fanout commit 都让客户端可能在 thread ext 行尚未存在时拉 sidebar，
+	// 漏看新子区。所以 OnThreadCreated 放在 IM 频道建好之后 + 两条消息之前。
+	//
+	// 与 IM 频道 / 源消息一样在 commit 之后做 best-effort：失败只警告，不让 thread
+	// 创建本身回滚（用户已经看到子区，下次 FollowChannel / refollow 会把缺失的
+	// fanout 补齐）。GetGlobalConvExtService 在单测环境（未 init 单例）返回 nil 时跳过。
+	if convSvc := conversation_ext.GetGlobalConvExtService(); convSvc != nil {
+		if err := convSvc.OnThreadCreated(req.GroupNo, shortID); err != nil {
+			s.Warn("OnThreadCreated fanout 失败（thread 已创建，sidebar 会延迟到下次 FollowChannel/refollow 补齐）",
+				zap.String("groupNo", req.GroupNo),
+				zap.String("shortID", shortID),
+				zap.Error(err))
+		}
+	}
+
+	// 拷贝源消息到子区作为首条消息（顺序：在 fanout 之后，客户端收到这条消息时
+	// thread ext 行已 commit）。
 	if req.SourceMessageID != nil && len(req.SourceMessagePayload) > 0 {
 		// 从消息表查询原始发送者，防止客户端伪造
 		sourceFromUID, err := s.db.QueryMessageFromUID(req.GroupNo, *req.SourceMessageID)
@@ -258,7 +281,7 @@ func (s *Service) CreateThread(req *CreateThreadReq) (*ThreadResp, error) {
 		s.sendSourceMessage(channelID, sourceFromUID, req.SourceMessagePayload)
 	}
 
-	// 在父群发送子区创建消息
+	// 在父群发送子区创建消息（同样在 fanout 之后；与 sendSourceMessage 同序约束）。
 	s.sendThreadCreatedMessage(req.GroupNo, shortID, req.Name, req.CreatorUID, req.CreatorName, req.SourceMessageID, req.SourceMessagePayload)
 
 	resp := s.toThreadRespWithID(thread)
