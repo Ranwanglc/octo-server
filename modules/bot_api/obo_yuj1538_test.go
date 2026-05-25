@@ -220,17 +220,36 @@ func TestFanout_YUJ1538_GroupMentionAisBooleanShapeSummonsPersona(t *testing.T) 
 	}
 }
 
-// TestFanout_YUJ1538_DMStillRequiresScopeRow — the new
-// channel-type-aware lookup path must NOT relax DM behavior. DMs
-// remain strict: a grant without a matching `obo_scopes` row
-// (channel_type=1, channel_id=peer uid) gets zero dispatches even
-// when `global_enabled=1`. Pins the contract from the issue:
+// TestFanout_YUJ1538_DMStillRequiresScopeRow — Mininglamp-OSS/octo-server#161
+// (YUJ-1977) INVERSION. The YUJ-1538 invariant ("DMs remain strict — a
+// grant without a matching scope row gets zero dispatches even when
+// global_enabled=1") was the bug behind issue #161: a grantor who flips
+// `global_enabled=1` on a DM-shaped grant without ever installing a per-
+// peer scope row expected fan-out symmetrical to the group-shaped
+// `findGlobalGrantsWithoutScope` path (PR#121) and got silence instead.
 //
-//   "Do NOT change DM fan-out behavior (must still require scope rows)"
+// Post-#161 the DM fan-out path consults `findGlobalGrantsForDM` after
+// `findActiveGrantsForChannel`, so a `global_enabled=1` grant with zero
+// scope rows now DOES fan out for any DM peer the grantor has live
+// access to (the friend-gate / `grantorCanReadChannel` re-check inside
+// `fanoutForMessage` enforces the access invariant; the explicit scope
+// row is no longer the sole opt-in signal).
+//
+// This test pins the new behavior — what was previously a "must NOT
+// dispatch" assertion is now a "must dispatch exactly one copy"
+// assertion. The original YUJ-1538 intent (group fan-out without scope
+// rows) is unchanged and still covered by the sibling tests in this
+// file; only the DM half of the contract flipped.
+//
+// The lower-level new tests live in obo_fanout_test.go:
+// TestFanout_DM_GlobalEnabled_NoScopes / WithExplicitScope /
+// GlobalDisabled_NoScopes — they assert the dispatch payload + dedup
+// contract; this test is the YUJ-1538 file's parity assertion that the
+// DM-side regression is closed.
 func TestFanout_YUJ1538_DMStillRequiresScopeRow(t *testing.T) {
 	const peer = "u_bob"
 	ct := common.ChannelTypePerson.Uint8()
-	s := seedGrantNoScope(t) // grant exists with global_enabled=1, but no DM scope
+	s := seedGrantNoScope(t) // grant exists with global_enabled=1, no DM scope row
 	fc := &fanoutCapture{}
 	ba := newBAforFanout(s, fc)
 
@@ -240,8 +259,8 @@ func TestFanout_YUJ1538_DMStillRequiresScopeRow(t *testing.T) {
 		ChannelType: ct,
 		Payload:     []byte(`{"type":1,"content":"hey, can we chat?"}`),
 	}
-	if got := ba.fanoutForMessage(msg); got != 0 {
-		t.Fatalf("YUJ-1538: DM with no scope row must NOT fan out (issue spec: DM behavior unchanged), got %d", got)
+	if got := ba.fanoutForMessage(msg); got != 1 {
+		t.Fatalf("issue #161 (YUJ-1977): DM with global_enabled=1 + no scope row must fan out via implicit-scope feeder, got %d", got)
 	}
 }
 
@@ -465,18 +484,53 @@ func TestCheckOBO_YUJ1538_CommunityTopicNoScopeRow_GlobalEnabledAuthorizes(t *te
 	}
 }
 
-// TestCheckOBO_YUJ1538_DMNoScope_StillUnauthorized — regression guard.
-// The PR#114 fix MUST NOT relax DM behavior: a grant with
-// `global_enabled=1` but no scope row for the DM peer must still deny.
-// DMs have no in-message narrowing signal (mentions don't apply), so
-// the per-peer scope row is the only explicit opt-in.
+// TestCheckOBO_YUJ1538_DMNoScope_StillUnauthorized — read/write symmetry
+// pin. Originally this test asserted that DM with `global_enabled=1` and
+// no scope row must DENY (the YUJ-1538-era intent). PR#162 inverted that
+// invariant on the read path (`findGlobalGrantsForDM` delivers the inbound
+// DM under the same predicate as the group implicit-scope feeder), and
+// the follow-up (Mininglamp-OSS/octo-server#162 R1) extended `checkOBO`
+// to honor the same predicate on the write path — otherwise the bot
+// receives the DM via fan-out but its reply 403s.
+//
+// The test name is preserved so the historical YUJ-1538 pin stays
+// findable in git blame; the assertion is now flipped to APPROVE the
+// reply when the friend-gate (`grantorCanReadChannel` →
+// `oboChannelAccessOverride`, defaulted to true in
+// `newBotAPIForCheckYUJ1538`) confirms live access. The companion
+// regression test `TestCheckOBO_DM_GlobalEnabled_NoScope_FriendGateDenied`
+// pins the deny side: friend-gate denial must still block the reply.
 func TestCheckOBO_YUJ1538_DMNoScope_StillUnauthorized(t *testing.T) {
 	const dmPeer = "u_bob"
 	s := seedGrantNoScope(t) // grant exists with global_enabled=1, but no scope
 	ba := newBotAPIForCheckYUJ1538(s)
+	if err := ba.checkOBO(tBot, tGrantor, dmPeer, common.ChannelTypePerson.Uint8()); err != nil {
+		t.Fatalf("Mininglamp-OSS/octo-server#162 R1: DM with global_enabled=1 and no scope row must APPROVE when friend-gate allows access (read/write symmetry), got %v", err)
+	}
+}
+
+// TestCheckOBO_DM_GlobalEnabled_NoScope_FriendGateDenied — deny-side
+// regression for the PR#162 R1 DM implicit-scope branch. With
+// `global_enabled=1`, no scope row, but the friend-gate
+// (`grantorCanReadChannel` → `IsFriend`) returning false, the reply
+// MUST still 403. This pins that the friend-gate is the load-bearing
+// safety net: removing it (or letting an error fall through to "ok")
+// would let an unrelated peer's DM authorize a reply, because there
+// is no per-peer scope row in the picture.
+func TestCheckOBO_DM_GlobalEnabled_NoScope_FriendGateDenied(t *testing.T) {
+	const dmPeer = "u_stranger"
+	s := seedGrantNoScope(t) // grant exists with global_enabled=1, but no scope
+	ba := newBotAPIForCheckYUJ1538(s)
+	// Friend-gate denies access for this peer.
+	ba.oboChannelAccessOverride = func(uid, channelID string, channelType uint8) (bool, error) {
+		if channelType == common.ChannelTypePerson.Uint8() && channelID == dmPeer {
+			return false, nil
+		}
+		return true, nil
+	}
 	err := ba.checkOBO(tBot, tGrantor, dmPeer, common.ChannelTypePerson.Uint8())
 	if !errors.Is(err, ErrOBONotAuthorized) {
-		t.Fatalf("YUJ-1538 / PR#114: DM with no scope row must STILL deny (regression guard), got %v", err)
+		t.Fatalf("Mininglamp-OSS/octo-server#162 R1: DM with global_enabled=1 and no scope row must STILL deny when friend-gate returns false, got %v", err)
 	}
 }
 
