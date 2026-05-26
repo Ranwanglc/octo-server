@@ -562,34 +562,80 @@ func (f *File) getDownloadURL(c *wkhttp.Context) {
 		parsed, parseErr := url.Parse(ph)
 		if parseErr == nil {
 			ph = parsed.Path
-			cosCfg := f.ctx.GetConfig().COS
-			// Path-style CDN: when BucketURL is set and its host does
-			// NOT carry a `<bucket>.` subdomain (e.g.
-			// `BucketURL=https://cdn.example.com`), the URL we issued
-			// to the browser is `<host>/<bucket>/<prefix>/<key>` (see
-			// publicURL / PresignedGetURL with BucketLookupPath). When
-			// the client round-trips that full URL back to us, the
-			// parsed path therefore begins with `/<bucket>/`, and the
-			// bucket segment must be stripped BEFORE the COS.Prefix
-			// strip below — otherwise PresignedGetURL signs the bucket
-			// as part of the object key and the resulting GET 404s.
-			//
-			// Detection mirrors `publicEndpoint`: BucketURL set, parsed
-			// successfully, host does NOT begin with `<bucket>.`.
-			if strings.TrimSpace(cosCfg.BucketURL) != "" && cosCfg.Bucket != "" {
-				if bu, buErr := url.Parse(strings.TrimRight(strings.TrimSpace(cosCfg.BucketURL), "/")); buErr == nil && bu.Host != "" {
-					if !strings.HasPrefix(bu.Host, cosCfg.Bucket+".") {
-						ph = strings.TrimPrefix(ph, "/"+cosCfg.Bucket)
+			// Gate the per-backend strip blocks by the active fileService
+			// so a COS-style bucket segment is never mistakenly stripped
+			// off an S3 URL (and vice versa). Pre-gate, both blocks ran
+			// for every URL — harmless when prefixes/buckets don't overlap
+			// across backends, but a footgun if they do.
+			switch f.ctx.GetConfig().FileService {
+			case config.FileServiceTencentCOS:
+				cosCfg := f.ctx.GetConfig().COS
+				// Path-style CDN: when BucketURL is set and its host does
+				// NOT carry a `<bucket>.` subdomain (e.g.
+				// `BucketURL=https://cdn.example.com`), the URL we issued
+				// to the browser is `<host>/<bucket>/<prefix>/<key>` (see
+				// publicURL / PresignedGetURL with BucketLookupPath). When
+				// the client round-trips that full URL back to us, the
+				// parsed path therefore begins with `/<bucket>/`, and the
+				// bucket segment must be stripped BEFORE the COS.Prefix
+				// strip below — otherwise PresignedGetURL signs the bucket
+				// as part of the object key and the resulting GET 404s.
+				//
+				// Detection mirrors `publicEndpoint`: BucketURL set, parsed
+				// successfully, host does NOT begin with `<bucket>.`.
+				if strings.TrimSpace(cosCfg.BucketURL) != "" && cosCfg.Bucket != "" {
+					if bu, buErr := url.Parse(strings.TrimRight(strings.TrimSpace(cosCfg.BucketURL), "/")); buErr == nil && bu.Host != "" {
+						if !strings.HasPrefix(bu.Host, cosCfg.Bucket+".") {
+							ph = strings.TrimPrefix(ph, "/"+cosCfg.Bucket)
+						}
 					}
 				}
-			}
-			// Strip the COS prefix (e.g. /bucket-prefix) from the path
-			cosPrefix := strings.TrimSpace(cosCfg.Prefix)
-			if cosPrefix != "" {
-				ph = strings.TrimPrefix(ph, "/"+cosPrefix)
+				// Strip the COS prefix (e.g. /bucket-prefix) from the path
+				cosPrefix := strings.TrimSpace(cosCfg.Prefix)
+				if cosPrefix != "" {
+					ph = strings.TrimPrefix(ph, "/"+cosPrefix)
+				}
+
+			case fileServiceAwsS3:
+				// S3 backend: mirror the COS handling. When the client
+				// round-trips a full URL we previously issued, the URL
+				// path carries the configured prefix (and the bucket
+				// segment in path-style deployments) — both must come
+				// off before PresignedGetURL re-applies the prefix via
+				// ServiceS3.withPrefix, otherwise the signed object key
+				// double-prefixes and the GET 404s.
+				//
+				// Bucket-segment strip is gated by DownloadURL being
+				// empty: ServiceS3.publicURL emits `<downloadURL>/<key>`
+				// (no bucket in path) when DownloadURL is set, so the
+				// bucket only appears in the path under the canonical
+				// path-style shape (`https://<endpoint>/<bucket>/<key>`).
+				// Without this gate, a deployment with bucket name
+				// matching the first object-key segment (e.g. bucket
+				// "chat", URL "https://files.example.com/chat/foo.jpg")
+				// would lose the real key segment and sign the wrong
+				// object. Reported by Jerry-Xin in PR #147 review.
+				s3Cfg := f.ctx.GetConfig().S3
+				downloadURLEmpty := strings.TrimSpace(s3Cfg.DownloadURL) == ""
+				if downloadURLEmpty && s3Cfg.UsePathStyle && s3Cfg.Bucket != "" {
+					ph = strings.TrimPrefix(ph, "/"+s3Cfg.Bucket)
+				}
+				s3Prefix := strings.TrimSpace(s3Cfg.Prefix)
+				if s3Prefix != "" {
+					ph = strings.TrimPrefix(ph, "/"+s3Prefix)
+				}
 			}
 		}
 	}
+	// Drop any leading slash so the key handed to the signer is a clean
+	// relative key. ServiceS3.PresignedGetURL runs validatePresignObjectKey,
+	// which rejects keys with leading "/" because the SigV4 canonical URI
+	// would acquire a "//<key>" segment that gateway path-normalization
+	// rewrites to "/<key>" mid-flight, breaking signature validation.
+	// ServiceCOS happens to tolerate this because it doesn't validate;
+	// ServiceS3 is strict. The trim lives outside the http-URL branch so
+	// bare paths like `?path=/chat/foo` are normalized the same way.
+	ph = strings.TrimPrefix(ph, "/")
 
 	sanitized, err := sanitizePath(ph)
 	if err != nil {
