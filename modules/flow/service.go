@@ -88,6 +88,9 @@ func (s *Service) CreateFlow(spaceID, name, description string, definition *Defi
 	if definition == nil {
 		definition = &Definition{}
 	}
+	if err := ValidateDefinitionTriggers(definition); err != nil {
+		return nil, err
+	}
 	defJSON, err := json.Marshal(definition)
 	if err != nil {
 		return nil, fmt.Errorf("marshal definition: %w", err)
@@ -145,6 +148,16 @@ func (s *Service) UpdateFlow(id, name, description string, definition *Definitio
 		f.Description = description
 	}
 	if definition != nil {
+		if err := ValidateDefinitionTriggers(definition); err != nil {
+			// 校验失败但状态可能已 deactivate；尝试还原
+			if wasActive {
+				if rerr := s.activateTriggers(f); rerr != nil {
+					s.log.Warn("rollback re-activate after validation error",
+						zap.String("flow_id", f.ID), zap.Error(rerr))
+				}
+			}
+			return nil, err
+		}
 		defJSON, err := json.Marshal(definition)
 		if err != nil {
 			return nil, err
@@ -201,6 +214,13 @@ func (s *Service) Activate(id string) error {
 	}
 	if f == nil {
 		return ErrNotFound
+	}
+	def, err := f.DecodeDefinition()
+	if err != nil {
+		return fmt.Errorf("decode definition: %w", err)
+	}
+	if err := ValidateDefinitionTriggers(def); err != nil {
+		return err
 	}
 	if err := s.activateTriggers(f); err != nil {
 		return err
@@ -299,6 +319,64 @@ func (s *Service) GetExecution(id string) (*Execution, []*NodeExecution, error) 
 // CancelExecution 取消
 func (s *Service) CancelExecution(id string) error {
 	return s.engine.CancelExecution(id)
+}
+
+// NextTriggerAt 返回 flow 下一次定时触发的时间。
+//
+// 如果 flow 没有 cron 触发器，或当前未激活（cron 未注册到调度器），返回 nil。
+// 如果有多个 cron 触发器，返回最早的一次。
+func (s *Service) NextTriggerAt(flowID string) *time.Time {
+	if flowID == "" {
+		return nil
+	}
+	triggers, err := s.db.ListTriggersByFlow(flowID)
+	if err != nil {
+		s.log.Warn("NextTriggerAt: list triggers",
+			zap.String("flow_id", flowID), zap.Error(err))
+		return nil
+	}
+	var earliest time.Time
+	for _, t := range triggers {
+		if t.Type != TriggerTypeCron {
+			continue
+		}
+		next := s.cron.Next(t.ID)
+		if next.IsZero() {
+			continue
+		}
+		if earliest.IsZero() || next.Before(earliest) {
+			earliest = next
+		}
+	}
+	if earliest.IsZero() {
+		return nil
+	}
+	return &earliest
+}
+
+// ValidateDefinitionTriggers 校验 definition 中所有触发器的格式是否合法。
+//
+// 目前仅校验 cron 触发器：expression 必填、合法；timezone 可选但若提供必须有效。
+// webhook / manual 类型不在这里强校验（webhook 的 path 校验在 activateTriggers 阶段做）。
+func ValidateDefinitionTriggers(def *Definition) error {
+	if def == nil {
+		return nil
+	}
+	for i, td := range def.Triggers {
+		switch td.Type {
+		case TriggerTypeCron:
+			expr, _ := td.Config["expression"].(string)
+			tz, _ := td.Config["timezone"].(string)
+			if err := trigger.ValidateExpression(expr, tz); err != nil {
+				return fmt.Errorf("trigger[%d] (id=%s): %w", i, td.ID, err)
+			}
+		case TriggerTypeWebhook, TriggerTypeManual, "":
+			// 不在此处强校验
+		default:
+			return fmt.Errorf("trigger[%d] (id=%s): unsupported type %q", i, td.ID, td.Type)
+		}
+	}
+	return nil
 }
 
 // activateTriggers 根据 flow.definition 注册 webhook / cron 触发器

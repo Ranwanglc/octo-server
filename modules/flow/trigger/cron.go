@@ -104,6 +104,37 @@ func (s *CronScheduler) Count() int {
 	return len(s.registry)
 }
 
+// Next 返回 triggerID 对应的下次触发时间。未注册时返回零值 time.Time。
+func (s *CronScheduler) Next(triggerID string) time.Time {
+	s.mu.Lock()
+	id, ok := s.registry[triggerID]
+	s.mu.Unlock()
+	if !ok {
+		return time.Time{}
+	}
+	entry := s.cron.Entry(id)
+	return entry.Next
+}
+
+// ValidateExpression 校验 cron 表达式（5/6 字段均允许）以及可选 timezone。
+// 用于 flow 创建/更新前置校验，不会向调度器注册任何 job。
+func ValidateExpression(expression, timezone string) error {
+	if expression == "" {
+		return errors.New("cron: expression required")
+	}
+	if timezone != "" {
+		if _, err := time.LoadLocation(timezone); err != nil {
+			return fmt.Errorf("cron: invalid timezone %q: %w", timezone, err)
+		}
+	}
+	parser := cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour |
+		cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	if _, err := parser.Parse(expression); err != nil {
+		return fmt.Errorf("cron: parse %q: %w", expression, err)
+	}
+	return nil
+}
+
 // scheduleInLocation 让 schedule 在指定时区下计算 Next
 type scheduleInLocation struct {
 	cron.Schedule

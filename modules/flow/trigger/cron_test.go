@@ -65,3 +65,54 @@ func TestCronScheduler_InvalidTimezone(t *testing.T) {
 		t.Fatalf("expected tz err")
 	}
 }
+
+func TestCronScheduler_Next(t *testing.T) {
+	s, _ := NewCronScheduler(func(string, time.Time) {})
+	s.Start()
+	defer s.Stop(context.Background())
+
+	// 未注册的 trigger 返回零值
+	if got := s.Next("missing"); !got.IsZero() {
+		t.Fatalf("expected zero time for unknown trigger, got %v", got)
+	}
+
+	// 注册后应该能拿到未来的下次时间
+	if err := s.Add("trg", "*/1 * * * *", ""); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	got := s.Next("trg")
+	if got.IsZero() {
+		t.Fatalf("expected non-zero next time")
+	}
+	if !got.After(time.Now()) {
+		t.Fatalf("expected next time in the future, got %v", got)
+	}
+}
+
+func TestValidateExpression(t *testing.T) {
+	cases := []struct {
+		name    string
+		expr    string
+		tz      string
+		wantErr bool
+	}{
+		{"empty", "", "", true},
+		{"valid 5-field", "*/1 * * * *", "", false},
+		{"valid 6-field", "*/30 * * * * *", "", false},
+		{"valid timezone", "0 0 * * *", "UTC", false},
+		{"invalid expr", "not-a-cron", "", true},
+		{"too many fields", "1 2 3 4 5 6 7 8", "", true},
+		{"invalid timezone", "* * * * *", "Mars/Olympus", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateExpression(tc.expr, tc.tz)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}

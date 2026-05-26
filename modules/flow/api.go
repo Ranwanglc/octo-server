@@ -133,7 +133,13 @@ func (f *FlowAPI) getFlow(c *wkhttp.Context) {
 		c.ResponseError(ErrNotFound)
 		return
 	}
-	c.Response(flowToResp(flow))
+	resp := flowToResp(flow)
+	if next := f.service.NextTriggerAt(flow.ID); next != nil {
+		resp["next_trigger_at"] = next
+	} else {
+		resp["next_trigger_at"] = nil
+	}
+	c.Response(resp)
 }
 
 type updateFlowReq struct {
