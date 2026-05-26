@@ -52,4 +52,6 @@ import (
 	_ "github.com/Mininglamp-OSS/octo-server/modules/voice_adapter"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/webhook"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/workplace"
+	// Octo Flow 编排引擎（Phase 1）：数据模型 + DAG 引擎 + 基础节点 + 触发器 + REST API。
+	_ "github.com/Mininglamp-OSS/octo-server/modules/flow"
 )
