@@ -106,13 +106,18 @@ func runAPI(ctx *config.Context) {
 	// 替换web下的配置文件
 	replaceWebConfig(ctx.GetConfig())
 	// 初始化api
-	trustedLangCIDRs, err := octoi18n.ParseCIDRList(os.Getenv("DM_TRUSTED_LANG_HEADER_CIDRS"))
+	trustedLangCIDRs, err := octoi18n.TrustedLangHeaderCIDRsFromEnv()
 	if err != nil {
-		panic(fmt.Errorf("parse DM_TRUSTED_LANG_HEADER_CIDRS: %w", err))
+		panic(err)
+	}
+	trustedProxyCIDRs, err := octoi18n.TrustedProxyCIDRsFromEnv()
+	if err != nil {
+		panic(err)
 	}
 	route.UseGin(octoi18n.EarlyMiddleware(octoi18n.MiddlewareOptions{
 		DefaultLanguage:        defaultLanguage,
 		TrustedLangHeaderCIDRs: trustedLangCIDRs,
+		TrustedProxyCIDRs:      trustedProxyCIDRs,
 	}))
 	route.UseGin(ctx.Tracer().GinMiddle()) // 需要放在 api.Route(s.GetRoute())的前面
 	// HTTP 入口指标(per-route latency / status / in-flight)。
