@@ -19,9 +19,9 @@ func TestNegotiateLanguagePriority(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: CookieLanguage, Value: "en-US"})
 
 	got := NegotiateLanguage(req, LanguageNegotiationOptions{
-		DefaultLanguage:          "en-US",
+		DefaultLanguage:        "en-US",
 		TrustedLangHeaderCIDRs: cidrs,
-		UserLanguage:             "en-US",
+		UserLanguage:           "en-US",
 	})
 	if got.Language != "zh-CN" || got.Source != LanguageSourceTrustedHeader {
 		t.Fatalf("NegotiateLanguage = %#v, want trusted zh-CN", got)
@@ -40,7 +40,7 @@ func TestNegotiateLanguageIgnoresUntrustedXOctoLang(t *testing.T) {
 	req.Header.Set("X-Forwarded-For", "10.1.2.3")
 
 	got := NegotiateLanguage(req, LanguageNegotiationOptions{
-		DefaultLanguage:          "zh-CN",
+		DefaultLanguage:        "zh-CN",
 		TrustedLangHeaderCIDRs: cidrs,
 	})
 	if got.Language != "en-US" || got.Source != LanguageSourceQuery {
@@ -50,11 +50,11 @@ func TestNegotiateLanguageIgnoresUntrustedXOctoLang(t *testing.T) {
 
 func TestNegotiateLanguageSourceOrder(t *testing.T) {
 	tests := []struct {
-		name    string
-		req     *http.Request
-		user    string
-		want    string
-		source  LanguageSource
+		name   string
+		req    *http.Request
+		user   string
+		want   string
+		source LanguageSource
 	}{
 		{
 			name: "query beats cookie user and accept",

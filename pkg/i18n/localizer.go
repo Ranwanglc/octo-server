@@ -15,15 +15,14 @@ type Localizer interface {
 	//   - code:   稳定 i18n key，必须在 codes.Register 已登记。
 	//   - lang:   客户端协商出的 BCP-47 标签（"zh-CN" / "en-US"）。
 	//             空字符串表示直接走 fallback chain。
-	//   - params: 翻译模板插值数据（仅 string-safe key/value，敏感字段由
-	//             调用方过滤；见 pkg/i18n/params.go——后续 step 实现）。
+	//   - params: 翻译模板插值数据（仅用于 message，不进入响应 details）。
 	//
 	// fallback chain（D22 六级，简化为四级实测有效路径）：
 	//   1. bundle: requested lang → fallback lang → source lang（go-i18n 自动）
 	//   2. extreme fallback: codes.Code.DefaultMessages[lang]
 	//   3. codes.Code.DefaultMessage（source 原文）
 	//   4. code ID 本身（未注册 code，调用方应记 i18n_unknown_code_total）
-	Translate(code, lang string, params map[string]any) string
+	Translate(code, lang string, params Params) string
 }
 
 // NewLocalizer 构造默认 Localizer。fallbackLang 通常对应 DM_DEFAULT_LANGUAGE
@@ -42,12 +41,13 @@ type defaultLocalizer struct {
 	fallbackLang string
 }
 
-func (l *defaultLocalizer) Translate(code, lang string, params map[string]any) string {
+func (l *defaultLocalizer) Translate(code, lang string, params Params) string {
+	templateData, paramsErr := params.TemplateData()
 	b, err := Bundle()
 	if err != nil || b == nil {
 		// Bundle 加载失败：完全脱离 go-i18n，走 codes registry 兜底。
 		// 此分支理论上只在 embed FS 损坏或 init() 顺序错乱时触发。
-		return fallbackMessage(code, lang, l.fallbackLang)
+		return fallbackMessageWithParams(code, lang, l.fallbackLang, params)
 	}
 
 	tags := buildLangTags(lang, l.fallbackLang)
@@ -55,12 +55,12 @@ func (l *defaultLocalizer) Translate(code, lang string, params map[string]any) s
 
 	msg, lerr := loc.Localize(&i18n.LocalizeConfig{
 		MessageID:    code,
-		TemplateData: params,
+		TemplateData: templateData,
 	})
-	if lerr != nil || msg == "" {
+	if paramsErr != nil || lerr != nil || msg == "" {
 		// go-i18n 找不到对应 message（code 未注册 / TOML 未含）→ 走兜底链。
 		// 不向上抛错：客户端宁可看到 source 文案，也不应看到 500。
-		return fallbackMessage(code, lang, l.fallbackLang)
+		return fallbackMessageWithParams(code, lang, l.fallbackLang, params)
 	}
 	return msg
 }
@@ -91,6 +91,18 @@ func fallbackMessage(code, lang, fallback string) string {
 		}
 	}
 	return c.DefaultMessage
+}
+
+func fallbackMessageWithParams(code, lang, fallback string, params Params) string {
+	msg := fallbackMessage(code, lang, fallback)
+	if params == nil {
+		return msg
+	}
+	rendered, err := params.Render(msg)
+	if err != nil {
+		return msg
+	}
+	return rendered
 }
 
 // buildLangTags 组装 go-i18n Localizer 的语言优先级链：
