@@ -37,10 +37,73 @@ func TestUserAPINoLegacyResponseError(t *testing.T) {
 		clean.WriteByte('\n')
 	}
 	cleaned := clean.String()
-	for _, banned := range []string{".ResponseError(", ".ResponseErrorf("} {
+	for _, banned := range []string{".ResponseError(", ".ResponseErrorf(", "c.Response(\""} {
 		if strings.Contains(cleaned, banned) {
 			t.Fatalf("modules/user/api.go must use httperr.ResponseErrorL via respondUser* helpers instead of legacy %s", banned)
 		}
+	}
+}
+
+// TestManagerAPINoLegacyResponseError pins the post-Phase-2.1 contract that
+// modules/user/api_manager.go does not regress to legacy octo-lib error
+// responses (the management console migration). Mirrors the api.go guard
+// above; also forbids the `c.Response("<string>")` shape that two handlers
+// used to (mis)use as an error path — those returned HTTP 200 with a bare
+// string body and are now proper httperr.ResponseErrorL envelopes.
+func TestManagerAPINoLegacyResponseError(t *testing.T) {
+	data, err := os.ReadFile("api_manager.go")
+	if err != nil {
+		t.Fatalf("read api_manager.go: %v", err)
+	}
+	var clean strings.Builder
+	for _, line := range strings.Split(string(data), "\n") {
+		if idx := strings.Index(line, "//"); idx >= 0 {
+			line = line[:idx]
+		}
+		clean.WriteString(line)
+		clean.WriteByte('\n')
+	}
+	cleaned := clean.String()
+	for _, banned := range []string{".ResponseError(", ".ResponseErrorf(", "c.Response(\""} {
+		if strings.Contains(cleaned, banned) {
+			t.Fatalf("modules/user/api_manager.go must use httperr.ResponseErrorL via respond* helpers instead of legacy %s", banned)
+		}
+	}
+}
+
+// TestMigratedUserFilesNoLegacyResponseError pins the Phase 2.1 contract that
+// the remaining migrated modules/user handlers do not regress to legacy
+// octo-lib error responses. Comments are stripped first so commented-out
+// breadcrumbs do not trip the guard. New handler files that still rely on
+// c.ResponseError / c.ResponseErrorf must NOT be added to this list — migrate
+// them instead.
+func TestMigratedUserFilesNoLegacyResponseError(t *testing.T) {
+	files := []string{
+		"api_friend.go", "api_online.go", "api_setting.go", "api_maillist.go",
+		"api_device.go", "api_destroy.go", "api_pinned.go", "api_gitee.go",
+		"api_github.go", "api_emaillogin.go", "api_usernamelogin.go",
+	}
+	for _, f := range files {
+		t.Run(f, func(t *testing.T) {
+			data, err := os.ReadFile(f)
+			if err != nil {
+				t.Fatalf("read %s: %v", f, err)
+			}
+			var clean strings.Builder
+			for _, line := range strings.Split(string(data), "\n") {
+				if idx := strings.Index(line, "//"); idx >= 0 {
+					line = line[:idx]
+				}
+				clean.WriteString(line)
+				clean.WriteByte('\n')
+			}
+			cleaned := clean.String()
+			for _, banned := range []string{".ResponseError(", ".ResponseErrorf(", "c.Response(\""} {
+				if strings.Contains(cleaned, banned) {
+					t.Fatalf("modules/user/%s must use httperr.ResponseErrorL via respond* helpers instead of legacy %s", f, banned)
+				}
+			}
+		})
 	}
 }
 
@@ -224,6 +287,163 @@ func TestRespondUserHelpers(t *testing.T) {
 			wantTransStatus: http.StatusBadRequest,
 			wantContains:    "服务器内部错误",
 			wantNotContains: "WeChat",
+		},
+
+		// ---- Phase 2.1 api_manager.go migration helpers / codes ----
+		{
+			name:            "respondManagerForbidden routes to shared.auth.forbidden",
+			probe:           func(c *wkhttp.Context) { respondManagerForbidden(c) },
+			wantCodeID:      "err.shared.auth.forbidden",
+			wantSemStatus:   http.StatusForbidden,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "无权执行此操作",
+		},
+		{
+			name: "respondUserListFilterConflict carries both filter names",
+			probe: func(c *wkhttp.Context) {
+				respondUserListFilterConflict(c, "bot_only", "exclude_bot")
+			},
+			wantCodeID:      "err.server.user.list_filter_conflict",
+			wantSemStatus:   http.StatusBadRequest,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "互斥",
+			wantDetails:     map[string]any{"filter": "bot_only", "conflicts_with": "exclude_bot"},
+		},
+		{
+			name:            "ErrUserManagerPermissionRequired surfaces zh-CN copy",
+			probe:           func(c *wkhttp.Context) { respondUserError(c, errcode.ErrUserManagerPermissionRequired) },
+			wantCodeID:      "err.server.user.manager_permission_required",
+			wantSemStatus:   http.StatusForbidden,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "未开通管理权限",
+		},
+		{
+			name:            "ErrUserPasswordTooShort surfaces zh-CN copy",
+			probe:           func(c *wkhttp.Context) { respondUserError(c, errcode.ErrUserPasswordTooShort) },
+			wantCodeID:      "err.server.user.password_too_short",
+			wantSemStatus:   http.StatusBadRequest,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "密码长度必须大于",
+		},
+		{
+			name:            "ErrUserOldPasswordIncorrect surfaces zh-CN copy",
+			probe:           func(c *wkhttp.Context) { respondUserError(c, errcode.ErrUserOldPasswordIncorrect) },
+			wantCodeID:      "err.server.user.old_password_incorrect",
+			wantSemStatus:   http.StatusBadRequest,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "原密码错误",
+		},
+		{
+			name:            "ErrUserCannotDeleteSuperAdmin surfaces zh-CN copy",
+			probe:           func(c *wkhttp.Context) { respondUserError(c, errcode.ErrUserCannotDeleteSuperAdmin) },
+			wantCodeID:      "err.server.user.cannot_delete_super_admin",
+			wantSemStatus:   http.StatusForbidden,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "超级管理员账号不能删除",
+		},
+		{
+			name:            "ErrUserTokenCacheFailed (Internal=true) collapses to shared internal copy",
+			probe:           func(c *wkhttp.Context) { respondUserError(c, errcode.ErrUserTokenCacheFailed) },
+			wantCodeID:      "err.server.user.token_cache_failed",
+			wantSemStatus:   http.StatusInternalServerError,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "服务器内部错误",
+			wantNotContains: "session token",
+		},
+		{
+			name:            "ErrUserShortNoGenFailed (Internal=true) collapses to shared internal copy",
+			probe:           func(c *wkhttp.Context) { respondUserError(c, errcode.ErrUserShortNoGenFailed) },
+			wantCodeID:      "err.server.user.short_no_gen_failed",
+			wantSemStatus:   http.StatusInternalServerError,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "服务器内部错误",
+			wantNotContains: "short ID",
+		},
+
+		// ---- Phase 2.1 pinned / oauth / web3 / email codes ----
+		{
+			name: "respondUserPinnedLimitExceeded carries the max detail",
+			probe: func(c *wkhttp.Context) {
+				respondUserPinnedLimitExceeded(c, 7)
+			},
+			wantCodeID:      "err.server.user.pinned_limit_exceeded",
+			wantSemStatus:   http.StatusBadRequest,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "置顶频道数量已达上限",
+			wantDetails:     map[string]any{"max": float64(7)},
+		},
+		{
+			name:            "ErrUserChannelAccessDenied surfaces 403 zh-CN copy",
+			probe:           func(c *wkhttp.Context) { respondUserError(c, errcode.ErrUserChannelAccessDenied) },
+			wantCodeID:      "err.server.user.channel_access_denied",
+			wantSemStatus:   http.StatusForbidden,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "无权访问该频道",
+		},
+		{
+			name:            "ErrUserOAuthStateExpired surfaces zh-CN copy",
+			probe:           func(c *wkhttp.Context) { respondUserError(c, errcode.ErrUserOAuthStateExpired) },
+			wantCodeID:      "err.server.user.oauth_state_expired",
+			wantSemStatus:   http.StatusBadRequest,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "登录状态已过期",
+		},
+		{
+			name:            "ErrUserOAuthExchangeFailed (Internal=true, 502) collapses to shared internal copy",
+			probe:           func(c *wkhttp.Context) { respondUserError(c, errcode.ErrUserOAuthExchangeFailed) },
+			wantCodeID:      "err.server.user.oauth_exchange_failed",
+			wantSemStatus:   http.StatusBadGateway,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "服务器内部错误",
+			wantNotContains: "OAuth",
+		},
+		{
+			name:            "ErrUserUsernameFormatInvalid surfaces zh-CN copy",
+			probe:           func(c *wkhttp.Context) { respondUserError(c, errcode.ErrUserUsernameFormatInvalid) },
+			wantCodeID:      "err.server.user.username_format_invalid",
+			wantSemStatus:   http.StatusBadRequest,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "用户名必须为",
+		},
+		{
+			name:            "ErrUserPublicKeyNotFound surfaces zh-CN copy",
+			probe:           func(c *wkhttp.Context) { respondUserError(c, errcode.ErrUserPublicKeyNotFound) },
+			wantCodeID:      "err.server.user.public_key_not_found",
+			wantSemStatus:   http.StatusBadRequest,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "未上传公钥",
+		},
+		{
+			name:            "ErrUserSignatureInvalid surfaces zh-CN copy",
+			probe:           func(c *wkhttp.Context) { respondUserError(c, errcode.ErrUserSignatureInvalid) },
+			wantCodeID:      "err.server.user.signature_invalid",
+			wantSemStatus:   http.StatusBadRequest,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "签名校验失败",
+		},
+		{
+			name:            "ErrUserEmailInvalid surfaces zh-CN copy",
+			probe:           func(c *wkhttp.Context) { respondUserError(c, errcode.ErrUserEmailInvalid) },
+			wantCodeID:      "err.server.user.email_invalid",
+			wantSemStatus:   http.StatusBadRequest,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "邮箱格式不正确",
+		},
+		{
+			name:            "ErrUserAccountUnavailable surfaces 403 zh-CN copy",
+			probe:           func(c *wkhttp.Context) { respondUserError(c, errcode.ErrUserAccountUnavailable) },
+			wantCodeID:      "err.server.user.account_unavailable",
+			wantSemStatus:   http.StatusForbidden,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "已注销或被禁用",
+		},
+		{
+			name:            "ErrUserEmailRateLimited surfaces 429 client-actionable copy (not Internal)",
+			probe:           func(c *wkhttp.Context) { respondUserError(c, errcode.ErrUserEmailRateLimited) },
+			wantCodeID:      "err.server.user.email_rate_limited",
+			wantSemStatus:   http.StatusTooManyRequests,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "发送过于频繁",
 		},
 	}
 

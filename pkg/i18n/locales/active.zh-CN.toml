@@ -223,3 +223,138 @@ other = "注册失败。"
 
 ["err.server.user.language_set_failed"]
 other = "设置语言偏好失败。"
+
+# ---- err.server.user.* (Phase 2.1 modules/user/api_manager.go migration) ----
+
+["err.server.user.manager_permission_required"]
+other = "该账号未开通管理权限。"
+
+["err.server.user.password_too_short"]
+other = "密码长度必须大于 6 位。"
+
+["err.server.user.password_mismatch"]
+other = "两次输入的密码不一致。"
+
+["err.server.user.old_password_incorrect"]
+other = "原密码错误。"
+
+["err.server.user.new_password_same_as_old"]
+other = "新密码不能与原密码相同。"
+
+["err.server.user.not_admin_account"]
+other = "该用户不是管理员账号，无法删除。"
+
+["err.server.user.cannot_delete_super_admin"]
+other = "超级管理员账号不能删除。"
+
+["err.server.user.list_filter_conflict"]
+other = "用户列表筛选条件互斥。"
+
+["err.server.user.token_cache_failed"]
+other = "更新登录令牌缓存失败。"
+
+["err.server.user.short_no_gen_failed"]
+other = "生成短编号失败。"
+
+# ---- err.server.user.* (Phase 2.1 modules/user/api_friend.go migration) ----
+
+["err.server.user.cannot_add_self"]
+other = "不能添加自己为好友。"
+
+["err.server.user.already_friend"]
+other = "已经是好友，无需重复申请。"
+
+["err.server.user.bot_not_in_space"]
+other = "该机器人不在当前空间中，无法添加。"
+
+["err.server.user.friend_apply_not_found"]
+other = "好友申请记录不存在。"
+
+["err.server.user.friend_not_found"]
+other = "好友信息不存在。"
+
+["err.server.user.friend_apply_invalid"]
+other = "好友申请无效或已过期。"
+
+# ---- err.server.user.* (Phase 2.1 modules/user/api_device.go etc.) ----
+
+["err.server.user.device_not_found"]
+other = "未查询到该设备。"
+
+# ---- err.server.user.* (Phase 2.1 destroy / pinned / oauth migration) ----
+
+["err.server.user.password_not_set"]
+other = "当前账号未设置密码，无法验证身份。"
+
+["err.server.user.password_incorrect"]
+other = "密码错误。"
+
+["err.server.user.account_state_changed"]
+other = "账号状态已变化，请刷新后重试。"
+
+["err.server.user.not_destroying"]
+other = "账号未在注销中。"
+
+["err.server.user.pinned_already_exists"]
+other = "该频道已置顶。"
+
+["err.server.user.pinned_limit_exceeded"]
+other = "置顶频道数量已达上限。"
+
+["err.server.user.channel_access_denied"]
+other = "你无权访问该频道。"
+
+["err.server.user.pinned_sort_invalid"]
+other = "置顶排序参数无效。"
+
+["err.server.user.oauth_state_expired"]
+other = "登录状态已过期，请重试。"
+
+["err.server.user.oauth_exchange_failed"]
+other = "获取第三方授权令牌失败。"
+
+["err.server.user.oauth_profile_failed"]
+other = "获取第三方用户信息失败。"
+
+# ---- err.server.user.* (Phase 2.1 modules/user/api_emaillogin.go migration) ----
+
+["err.server.user.email_invalid"]
+other = "邮箱格式不正确。"
+
+["err.server.user.email_register_disabled"]
+other = "暂不支持邮箱注册。"
+
+["err.server.user.email_login_disabled"]
+other = "暂不支持邮箱登录。"
+
+["err.server.user.account_unavailable"]
+other = "该账号已注销或被禁用。"
+
+["err.server.user.email_send_failed"]
+other = "发送邮箱验证码失败。"
+
+["err.server.user.email_rate_limited"]
+other = "验证码发送过于频繁，请 1 分钟后再试。"
+
+# ---- err.server.user.* (Phase 2.1 modules/user/api_usernamelogin.go migration) ----
+
+["err.server.user.username_register_disabled"]
+other = "暂不支持用户名注册。"
+
+["err.server.user.username_format_invalid"]
+other = "用户名必须为 8-22 位。"
+
+["err.server.user.public_key_not_found"]
+other = "该用户未上传公钥。"
+
+["err.server.user.public_key_already_exists"]
+other = "该用户已上传过公钥信息。"
+
+["err.server.user.signature_not_found"]
+other = "签名校验信息不存在或已过期。"
+
+["err.server.user.signature_invalid"]
+other = "签名校验失败。"
+
+["err.server.user.verify_type_invalid"]
+other = "验证类型不匹配。"
