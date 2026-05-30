@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -16,6 +17,13 @@ import (
 type ServiceOSS struct {
 	log.Log
 	ctx *config.Context
+
+	// aclOnce ensures the bucket ACL is applied at most once per process
+	// lifetime. The OSS backend uses a single configured bucket for all
+	// file types, so one sync.Once suffices (unlike MinIO which uses
+	// per-type buckets and needs per-bucket locking).
+	aclOnce sync.Once
+	aclErr  error
 }
 
 // NewServiceOSS NewServiceOSS
@@ -36,6 +44,52 @@ func (s *ServiceOSS) newClient() (*oss.Client, error) {
 	return oss.New(ossCfg.Endpoint, ossCfg.AccessKeyID, ossCfg.AccessKeySecret)
 }
 
+// ensureBucketACL guarantees that the configured OSS bucket exists and has
+// the ACLPublicRead policy applied. It runs at most once per process
+// lifetime — subsequent calls are no-ops. This self-heals buckets that were
+// pre-provisioned by external tooling (Terraform, console, ossutil) without
+// the public-read ACL: without the heal step, anonymous browser GETs against
+// the asset URL return 403. (GH#86)
+//
+// The function creates the bucket when it does not exist (first-upload
+// bootstrap), then unconditionally calls SetBucketACL. The unconditional
+// call is cheap (single HTTP HEAD + PUT on the bucket's ?acl sub-resource)
+// and idempotent, so running it once at startup imposes negligible overhead
+// while closing the ACL gap for pre-provisioned buckets.
+func (s *ServiceOSS) ensureBucketACL(client *oss.Client, bucketName string) error {
+	s.aclOnce.Do(func() {
+		// Check existence — Bucket() in the Aliyun SDK always returns a
+		// non-nil handle regardless of whether the bucket exists on the
+		// server, so we probe with IsBucketExist instead.
+		exists, err := client.IsBucketExist(bucketName)
+		if err != nil {
+			s.Error("OSS bucket existence check failed", zap.String("bucket", bucketName), zap.Error(err))
+			s.aclErr = err
+			return
+		}
+		if !exists {
+			if err := client.CreateBucket(bucketName, oss.ACL(oss.ACLPublicRead)); err != nil {
+				s.Error("OSS bucket creation failed", zap.String("bucket", bucketName), zap.Error(err))
+				s.aclErr = err
+				return
+			}
+			s.Info("OSS bucket created with ACLPublicRead", zap.String("bucket", bucketName))
+			// CreateBucket already set the ACL; skip the redundant SetBucketACL.
+			return
+		}
+		// Bucket pre-exists — unconditionally apply ACLPublicRead to self-heal
+		// deployments where the bucket was created out-of-band without the
+		// correct ACL. (GH#86)
+		if err := client.SetBucketACL(bucketName, oss.ACLPublicRead); err != nil {
+			s.Error("OSS SetBucketACL failed", zap.String("bucket", bucketName), zap.Error(err))
+			s.aclErr = err
+			return
+		}
+		s.Info("OSS bucket ACL self-healed to PublicRead", zap.String("bucket", bucketName))
+	})
+	return s.aclErr
+}
+
 // UploadFile 上传文件
 func (s *ServiceOSS) UploadFile(filePath string, contentType string, contentDisposition string, copyFileWriter func(io.Writer) error) (map[string]interface{}, error) {
 	client, err := s.newClient()
@@ -44,19 +98,14 @@ func (s *ServiceOSS) UploadFile(filePath string, contentType string, contentDisp
 	}
 	bucketName := s.ctx.GetConfig().OSS.BucketName
 
+	// GH#86 — ensure bucket exists with correct ACL before uploading.
+	if err := s.ensureBucketACL(client, bucketName); err != nil {
+		return nil, err
+	}
+
 	bucket, err := client.Bucket(bucketName)
 	if err != nil {
 		return nil, err
-	}
-	if bucket == nil {
-		err = client.CreateBucket(bucketName, oss.ACL(oss.ACLPublicRead))
-		if err != nil {
-			return nil, err
-		}
-		bucket, err = client.Bucket(bucketName)
-		if err != nil {
-			return nil, err
-		}
 	}
 	buff := bytes.NewBuffer(make([]byte, 0))
 	err = copyFileWriter(buff)
@@ -181,6 +230,12 @@ func (s *ServiceOSS) PresignedPutURL(objectPath string, contentType string, cont
 		return "", "", err
 	}
 	ossCfg := s.ctx.GetConfig().OSS
+
+	// GH#86 — ensure bucket exists with correct ACL before signing.
+	if err := s.ensureBucketACL(client, ossCfg.BucketName); err != nil {
+		return "", "", err
+	}
+
 	bucket, err := client.Bucket(ossCfg.BucketName)
 	if err != nil {
 		return "", "", err
