@@ -50,6 +50,7 @@ import (
 	// before app_bot（历史顺序，非 load-bearing —— Go init() 顺序由依赖图决定）.
 	_ "github.com/Mininglamp-OSS/octo-server/modules/bot_api"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/app_bot"
+	_ "github.com/Mininglamp-OSS/octo-server/modules/auth_jwt"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/voice"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/webhook"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/workplace"
