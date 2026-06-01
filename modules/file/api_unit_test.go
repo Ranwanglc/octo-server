@@ -308,7 +308,6 @@ func TestGetUploadCredentials_ObjectKeyWithFilename(t *testing.T) {
 		wantStatus         int
 		wantKeyContains    string
 		wantKeyNotContains string
-		wantContentDisp    bool
 	}{
 		{
 			name:               "filename provided generates UUID-based key with extension",
@@ -316,7 +315,6 @@ func TestGetUploadCredentials_ObjectKeyWithFilename(t *testing.T) {
 			wantStatus:         http.StatusOK,
 			wantKeyContains:    ".jpg",
 			wantKeyNotContains: "photo.jpg",
-			wantContentDisp:    true,
 		},
 		{
 			name:               "chinese filename not in key, extension preserved",
@@ -324,7 +322,6 @@ func TestGetUploadCredentials_ObjectKeyWithFilename(t *testing.T) {
 			wantStatus:         http.StatusOK,
 			wantKeyContains:    ".jpg",
 			wantKeyNotContains: "照片",
-			wantContentDisp:    true,
 		},
 		{
 			name:               "path provided uses path-based key",
@@ -332,20 +329,17 @@ func TestGetUploadCredentials_ObjectKeyWithFilename(t *testing.T) {
 			wantStatus:         http.StatusOK,
 			wantKeyContains:    "chat",
 			wantKeyNotContains: "",
-			wantContentDisp:    false,
 		},
 		{
-			name:            "sticker type with filename",
-			queryParams:     "type=sticker&filename=sticker.gif&fileSize=512",
-			wantStatus:      http.StatusOK,
-			wantContentDisp: true,
+			name:        "sticker type with filename",
+			queryParams: "type=sticker&filename=sticker.gif&fileSize=512",
+			wantStatus:  http.StatusOK,
 		},
 		{
-			name:            "path and filename both provided uses path for key and filename for disposition",
+			name:            "path and filename both provided uses path for key",
 			queryParams:     "type=chat&path=/custom/abc123.jpg&filename=photo.jpg&fileSize=4096",
 			wantStatus:      http.StatusOK,
 			wantKeyContains: "chat",
-			wantContentDisp: true,
 		},
 	}
 
@@ -381,12 +375,12 @@ func TestGetUploadCredentials_ObjectKeyWithFilename(t *testing.T) {
 					assert.NotContains(t, key, tt.wantKeyNotContains)
 				}
 
-				if tt.wantContentDisp {
-					cd, ok := resp["contentDisposition"].(string)
-					assert.True(t, ok, "response should contain 'contentDisposition'")
-					assert.Contains(t, cd, "inline")
-					assert.Equal(t, cd, mockSvc.lastContentDisp, "contentDisposition passed to service should match response")
-				}
+				// Content-Disposition is no longer signed into the presigned
+				// PUT (issue #218): it must not appear in the response and an
+				// empty value must be passed to the service.
+				_, hasCD := resp["contentDisposition"]
+				assert.False(t, hasCD, "response should NOT contain 'contentDisposition'")
+				assert.Equal(t, "", mockSvc.lastContentDisp, "empty contentDisposition should be passed to service")
 			}
 		})
 	}

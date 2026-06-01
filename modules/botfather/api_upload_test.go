@@ -134,11 +134,10 @@ func TestBotUploadPresigned_ContentDisposition(t *testing.T) {
 	tests := []struct {
 		name     string
 		filename string
-		wantCD   bool
 	}{
-		{"ascii filename", "report.pdf", true},
-		{"chinese filename", "报告.pdf", true},
-		{"mixed filename", "report-报告.pdf", true},
+		{"ascii filename", "report.pdf"},
+		{"chinese filename", "报告.pdf"},
+		{"mixed filename", "report-报告.pdf"},
 	}
 
 	for _, tt := range tests {
@@ -158,12 +157,10 @@ func TestBotUploadPresigned_ContentDisposition(t *testing.T) {
 
 			assert.Equal(t, http.StatusOK, w.Code)
 
-			if tt.wantCD {
-				assert.Contains(t, mockFS.lastContentDisp, "inline",
-					"contentDisposition should contain 'inline'")
-				assert.Contains(t, mockFS.lastContentDisp, "filename*=UTF-8''",
-					"contentDisposition should contain RFC 5987 encoded filename")
-			}
+			// Content-Disposition is no longer signed into the presigned PUT
+			// (issue #218); an empty value must be passed to PresignedPutURL.
+			assert.Equal(t, "", mockFS.lastContentDisp,
+				"contentDisposition must NOT be signed into the presigned PUT")
 		})
 	}
 }
@@ -254,14 +251,13 @@ func TestBotUploadFile_UUIDPath_MIME_ContentDisposition(t *testing.T) {
 }
 
 // TestBotUploadPresigned_ContentDispositionInResponse asserts the
-// /v1/bot/upload/presigned (BotFather) endpoint returns the
-// contentDisposition value that was signed into PresignedPutURL — the
-// same parity contract as the main file endpoint at modules/file/api.go.
+// /v1/bot/upload/presigned (BotFather) endpoint does NOT return a
+// contentDisposition field and does NOT sign one into the presigned PUT —
+// the same parity contract as the main file endpoint at modules/file/api.go.
 //
-// Critical: without this echo, browsers cannot construct a PUT that
-// passes SigV4. Independently flagged in PR#50 R7 by Jerry-Xin and
-// lml2468; the bot-side fix mirrors the conditional return already in
-// place at file/api.go presignedUpload.
+// Signing Content-Disposition into the PUT coupled upload success to a
+// byte-exact header echo and broke filenames containing spaces (issue #218);
+// the friendly download name is applied at GET time instead.
 func TestBotUploadPresigned_ContentDispositionInResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -296,13 +292,10 @@ func TestBotUploadPresigned_ContentDispositionInResponse(t *testing.T) {
 			err := json.Unmarshal(w.Body.Bytes(), &payload)
 			assert.NoError(t, err, "response body must be JSON: %s", w.Body.String())
 
-			cd, ok := payload["contentDisposition"].(string)
-			assert.True(t, ok, "response MUST include contentDisposition field; body: %s", w.Body.String())
-			assert.NotEmpty(t, cd, "contentDisposition MUST be non-empty so browser can echo signed value")
-			assert.Equal(t, mockFS.lastContentDisp, cd,
-				"response contentDisposition MUST match value passed to PresignedPutURL")
-			assert.Contains(t, cd, "inline",
-				"contentDisposition should contain 'inline' disposition")
+			_, hasCD := payload["contentDisposition"]
+			assert.False(t, hasCD, "response must NOT include contentDisposition field; body: %s", w.Body.String())
+			assert.Equal(t, "", mockFS.lastContentDisp,
+				"empty contentDisposition must be passed to PresignedPutURL")
 		})
 	}
 }

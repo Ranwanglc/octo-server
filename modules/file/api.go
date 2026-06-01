@@ -521,11 +521,14 @@ func (f *File) getUploadCredentials(c *wkhttp.Context) {
 		objectKey = fmt.Sprintf("%s/%s%s", fileType, util.GenerUUID(), ext)
 	}
 
-	// 构造 Content-Disposition
-	contentDisposition := BuildContentDisposition(filename)
-
+	// Do NOT sign Content-Disposition into the presigned PUT. On SigV4
+	// backends it lands in X-Amz-SignedHeaders, forcing the browser to echo
+	// a byte-exact value; for filenames with spaces the header-value
+	// canonicalization differs across browser/proxy/gateway and the PUT is
+	// rejected (issue #218). The friendly download name is applied at GET
+	// time via response-content-disposition (PresignedGetURL/DownloadURL).
 	expiry := 30 * time.Minute
-	uploadURL, downloadURL, err := f.service.PresignedPutURL(objectKey, contentType, contentDisposition, fileSize, expiry)
+	uploadURL, downloadURL, err := f.service.PresignedPutURL(objectKey, contentType, "", fileSize, expiry)
 	if err != nil {
 		f.Error("生成预签名URL失败", zap.Error(err))
 		c.ResponseError(errors.New("生成预签名上传 URL 失败"))
@@ -541,9 +544,6 @@ func (f *File) getUploadCredentials(c *wkhttp.Context) {
 		"expiresIn":   int(expiry.Seconds()),
 		"expiredTime": time.Now().Add(expiry).Unix(),
 		"maxFileSize": fileSize,
-	}
-	if contentDisposition != "" {
-		resp["contentDisposition"] = contentDisposition
 	}
 	c.Response(resp)
 }

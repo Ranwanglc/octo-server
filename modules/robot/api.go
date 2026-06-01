@@ -1621,9 +1621,14 @@ func (rb *Robot) botUploadPresigned(c *wkhttp.Context) {
 		contentType = "application/octet-stream"
 	}
 
-	contentDisposition := file.BuildContentDisposition(filename)
+	// Do NOT sign Content-Disposition into the presigned PUT. On SigV4
+	// backends it lands in X-Amz-SignedHeaders, forcing the browser to echo
+	// a byte-exact value; for filenames with spaces the header-value
+	// canonicalization differs across browser/proxy/gateway and the PUT is
+	// rejected (issue #218). The friendly download name is applied at GET
+	// time via response-content-disposition (PresignedGetURL/DownloadURL).
 	expiry := 30 * time.Minute
-	uploadURL, downloadURL, err := rb.fileService.PresignedPutURL(objectPath, contentType, contentDisposition, fileSize, expiry)
+	uploadURL, downloadURL, err := rb.fileService.PresignedPutURL(objectPath, contentType, "", fileSize, expiry)
 	if err != nil {
 		rb.Error("生成预签名上传URL失败", zap.Error(err))
 		c.ResponseError(errors.New("生成上传URL失败"))
@@ -1639,13 +1644,6 @@ func (rb *Robot) botUploadPresigned(c *wkhttp.Context) {
 		"expiresIn":   int(expiry.Seconds()),
 		"expiredTime": time.Now().Add(expiry).Unix(),
 		"maxFileSize": fileSize,
-	}
-	// Content-Disposition is signed into the canonical headers on
-	// SigV4 backends (MinIO/COS), so the browser MUST echo this exact
-	// value at PUT time or the gateway returns 403 SignatureDoesNotMatch.
-	// Mirror the main file endpoint at modules/file/api.go.
-	if contentDisposition != "" {
-		resp["contentDisposition"] = contentDisposition
 	}
 	c.Response(resp)
 }

@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"testing"
 	"time"
 
@@ -60,13 +59,13 @@ func (m *mockFileServiceForPresigned) PresignedPutURL(objectPath string, content
 }
 
 // TestBotAPIUploadPresigned_ContentDispositionInResponse asserts that the
-// /v1/bot/upload/presigned endpoint returns the contentDisposition value
-// the server signed (parity with the main file endpoint at
-// modules/file/api.go). Without it, browsers cannot construct a PUT that
-// passes SigV4 — every upload of a non-ASCII / spaced filename returns
-// 403 SignatureDoesNotMatch.
+// /v1/bot/upload/presigned endpoint does NOT return a contentDisposition
+// field and does NOT sign one into the presigned PUT (parity with the main
+// file endpoint at modules/file/api.go).
 //
-// Independently flagged as Critical by Jerry-Xin and lml2468 in PR#50 R7.
+// Signing Content-Disposition into the PUT coupled upload success to a
+// byte-exact header echo and broke filenames containing spaces (issue #218);
+// the friendly download name is applied at GET time instead.
 func TestBotAPIUploadPresigned_ContentDispositionInResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -104,13 +103,10 @@ func TestBotAPIUploadPresigned_ContentDispositionInResponse(t *testing.T) {
 			err := json.Unmarshal(w.Body.Bytes(), &payload)
 			assert.NoError(t, err, "response body must be JSON: %s", w.Body.String())
 
-			cd, ok := payload["contentDisposition"].(string)
-			assert.True(t, ok, "response MUST include contentDisposition field for non-ASCII / spaced filenames; body: %s", w.Body.String())
-			assert.NotEmpty(t, cd, "contentDisposition MUST be non-empty so browser can echo signed value")
-			assert.Equal(t, mockFS.lastContentDisp, cd,
-				"response contentDisposition MUST match what was signed into PresignedPutURL")
-			assert.True(t, strings.Contains(cd, "inline"),
-				"contentDisposition should include the 'inline' disposition")
+			_, hasCD := payload["contentDisposition"]
+			assert.False(t, hasCD, "response must NOT include contentDisposition field; body: %s", w.Body.String())
+			assert.Equal(t, "", mockFS.lastContentDisp,
+				"empty contentDisposition must be passed to PresignedPutURL")
 		})
 	}
 }
