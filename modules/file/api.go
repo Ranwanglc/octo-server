@@ -375,18 +375,24 @@ func (f *File) getFile(c *wkhttp.Context) {
 //
 // SigV4 / OSS signed-header contract — REQUIRED for the client:
 //
-// The returned `contentType`, `contentDisposition` (when present), and
-// `Content-Length` (mirroring the request `fileSize` parameter) are
-// included in the signed headers of the presigned PUT URL (see
-// service_minio.go `PresignedPutURL`, service_cos.go `PresignedPutURL`,
-// and service_oss.go `PresignedPutURL`). The browser / client MUST echo
-// each verbatim as PUT request headers:
+// The returned `contentType` and `Content-Length` (mirroring the request
+// `fileSize` parameter) are included in the signed headers of the presigned
+// PUT URL (see service_minio.go `PresignedPutURL`, service_cos.go
+// `PresignedPutURL`, and service_oss.go `PresignedPutURL`). The browser /
+// client MUST echo each verbatim as PUT request headers:
 //
 //	PUT <uploadUrl>
 //	Content-Type: <contentType from response>
 //	Content-Length: <fileSize from request, in bytes>
-//	Content-Disposition: <contentDisposition from response, when set>
 //	<exactly fileSize bytes>
+//
+// Content-Disposition is deliberately NOT signed into the PUT (issue #218):
+// signing it coupled upload success to a byte-exact header echo, and the
+// whitespace-bearing value for filenames containing spaces is not
+// canonicalized identically across browser/proxy/gateway, so the gateway
+// rejected the PUT (403 SignatureDoesNotMatch). The friendly download name
+// is applied at GET time via the `response-content-disposition` query
+// override (see PresignedGetURL / the /v1/file/download endpoint).
 //
 // Per-header behaviour by backend (the deviation matrix that operators
 // hit in production):
@@ -410,25 +416,15 @@ func (f *File) getFile(c *wkhttp.Context) {
 //     migrate to a SigV4 backend (MinIO/COS) where the signature itself
 //     covers Content-Length. (Roadmap: OSS V4 signing covers Content-Length
 //     canonically; tracked separately from this PR.)
-//   - Content-Disposition (MinIO + COS, S3 SigV4): signed across the
-//     canonical-headers section. Any deviation, including alternate
-//     casing or omission, produces 403 SignatureDoesNotMatch.
-//   - Content-Disposition (OSS V1 signing): the OSS V1 canonical-string
-//     algorithm does NOT include Content-Disposition, so a deviation here
-//     does NOT produce a signature failure. The gateway records whatever
-//     value the browser actually sent (or none, if omitted) as the
-//     object's stored disposition. Operators who need strict disposition
-//     enforcement on OSS should migrate to a SigV4-capable backend
-//     (MinIO/COS) or run a post-upload validator.
+//   - Content-Disposition: NOT signed and NOT returned (issue #218 — see
+//     the contract note above). The download filename is set at GET time
+//     instead, so it no longer constrains the PUT on any backend.
 //
 // Response shape:
 //   - method:             always "PUT"
 //   - uploadUrl:          presigned PUT URL (consume within expiresIn seconds)
 //   - downloadUrl:        anonymous GET URL for the resulting object
 //   - contentType:        REQUIRED echo as PUT `Content-Type` header
-//   - contentDisposition: REQUIRED echo as PUT `Content-Disposition`
-//     header when present (omitted when empty;
-//     advisory-only on OSS V1 — see matrix above)
 //   - key:                final S3/OSS object key
 //   - expiresIn:          PUT URL validity in seconds
 //   - expiredTime:        absolute expiry, unix seconds
