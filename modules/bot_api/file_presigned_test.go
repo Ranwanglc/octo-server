@@ -19,8 +19,8 @@ import (
 
 // mockFileServiceForPresigned is a minimal IService satisfying the
 // `fileService` field for botUploadPresigned. It captures what the
-// handler passed to PresignedPutURL so the test can assert the
-// browser-facing response echoes the same Content-Disposition.
+// handler passed to PresignedPutURL so the test can assert that no
+// Content-Disposition is signed into the PUT (issue #218).
 type mockFileServiceForPresigned struct {
 	lastObjectPath  string
 	lastContentDisp string

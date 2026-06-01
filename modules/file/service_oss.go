@@ -139,11 +139,14 @@ func (s *ServiceOSS) normalizeOSSObjectKey(objectPath string) string {
 }
 
 // PresignedPutURL signs an OSS PUT URL the browser can use directly.
-// Aliyun OSS does NOT accept a separate Content-Disposition signature on PUT
-// the way S3 does — disposition has to be embedded as object metadata at
-// upload time. We therefore include it in the signed headers so the client
-// echoes the same value, and the OSS gateway records it on the resulting
-// object.
+// As of issue #218 the presigned-upload endpoints pass an empty
+// contentDisposition, so nothing disposition-related is signed into the PUT
+// and upload success no longer depends on the browser echoing it. The
+// download filename is applied at GET time via response-content-disposition
+// instead. When a non-empty disposition IS supplied, Aliyun OSS does not
+// accept a separate Content-Disposition signature on PUT the way S3 does —
+// it has to be embedded as object metadata at upload time, so it is included
+// in the signed headers for the client to echo and the gateway to record.
 //
 // Caveat — Content-Length on OSS V1: the OSS V1 canonical-string algorithm
 // does NOT cover Content-Length. Although we pass `oss.ContentLength` into

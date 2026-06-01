@@ -55,12 +55,16 @@ wukongIM:
 # SigV4 / OSS signed-header contract — REQUIRED for the browser:
 #
 # `GET /v1/file/upload-credentials` (modules/file/api.go getUploadCredentials)
-# returns `contentType` and (when set) `contentDisposition`. The browser
-# MUST echo them as the matching PUT request headers — they are covered by
-# the canonical-headers section of the SigV4 signature (and the OSS
-# equivalent), so any deviation produces `403 SignatureDoesNotMatch` at
-# upload time. This is enforced at the storage layer; no server-side retry
-# can rescue a client that does not echo them.
+# returns `contentType`. The browser MUST echo it as the matching PUT request
+# header — it is covered by the canonical-headers section of the SigV4
+# signature (and the OSS equivalent), so any deviation produces
+# `403 SignatureDoesNotMatch` at upload time. This is enforced at the storage
+# layer; no server-side retry can rescue a client that does not echo it.
+#
+# Content-Disposition is deliberately NOT signed into the PUT and NOT returned
+# (issue #218): signing it coupled upload success to a byte-exact header echo
+# and broke filenames containing spaces. The download filename is applied at
+# GET time via the `response-content-disposition` override instead.
 #
 # Presigned-URL support matrix (current as of the file/presigned-URL implementation):
 #
@@ -94,12 +98,12 @@ wukongIM:
 #     BucketLookupPath and signs path-style URLs of the form
 #     `https://cdn.example.com/<bucket>/<key>`. Added in YUJ-846 hotfix.
 #
-# Aliyun OSS — V1 signing does NOT cover Content-Length or
-# Content-Disposition: deviating values at PUT time are silently
-# persisted instead of producing 403 SignatureDoesNotMatch. The
-# `maxFileSize` / `contentDisposition` fields in the presigned response
-# are advisory on OSS; enforce hard caps at the bucket / RAM-policy
-# layer, or use MinIO/COS for full SigV4 coverage.
+# Aliyun OSS — V1 signing does NOT cover Content-Length: a deviating
+# value at PUT time is silently accepted instead of producing 403
+# SignatureDoesNotMatch. The `maxFileSize` field in the presigned
+# response is advisory on OSS; enforce hard caps at the bucket /
+# RAM-policy layer, or use MinIO/COS for full SigV4 coverage.
+# (Content-Disposition is no longer signed on any backend — issue #218.)
 fileService: "minio"
 minio:
   # Server-internal base URL — what the Go process uses to reach MinIO.
@@ -236,10 +240,10 @@ minio:
 #
 #   The contract is identical to the COS / MinIO backends — see the
 #   `getUploadCredentials` block at modules/file/api.go for the
-#   per-header rules. The presigned PUT URL covers `Content-Type`,
-#   `Content-Length`, and (when present) `Content-Disposition` in
-#   `X-Amz-SignedHeaders`. The browser MUST echo each verbatim or AWS
-#   returns 403 SignatureDoesNotMatch and the upload aborts before any
+#   per-header rules. The presigned PUT URL covers `Content-Type` and
+#   `Content-Length` in `X-Amz-SignedHeaders` (Content-Disposition is no
+#   longer signed — issue #218). The browser MUST echo each verbatim or
+#   AWS returns 403 SignatureDoesNotMatch and the upload aborts before any
 #   bytes leave the browser. This is also the server-side enforcement
 #   of MaxFileSize on the presigned path.
 #fileService: "awsS3"

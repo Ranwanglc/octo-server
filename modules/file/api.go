@@ -494,9 +494,9 @@ func (f *File) getUploadCredentials(c *wkhttp.Context) {
 		contentType = "application/octet-stream"
 	}
 
-	// When both path and filename are provided, path determines the objectKey
-	// while filename is used for Content-Disposition (friendly download name).
-	// This allows custom storage paths with user-friendly download filenames.
+	// When both path and filename are provided, path determines the objectKey;
+	// filename only contributes the extension below (it is no longer signed
+	// into the PUT — see the Content-Disposition note above, issue #218).
 	var objectKey string
 	if uploadPath != "" {
 		sanitized, err := sanitizePath(uploadPath)
@@ -510,7 +510,8 @@ func (f *File) getUploadCredentials(c *wkhttp.Context) {
 		objectKey = fileType + sanitized
 	} else if filename != "" {
 		// Use UUID-based key (pure ASCII) to avoid double-encoding by HTTP clients.
-		// The original filename is preserved in Content-Disposition header.
+		// The original filename is surfaced to downloads at GET time via the
+		// response-content-disposition override, not stored on the object.
 		fnExt := filepath.Ext(filename)
 		objectKey = fmt.Sprintf("%s/%d/%s/%s%s", fileType, time.Now().Unix(), util.GenerUUID(), util.GenerUUID(), fnExt)
 	} else {
