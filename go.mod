@@ -4,8 +4,9 @@ go 1.25
 
 require (
 	firebase.google.com/go/v4 v4.13.0
+	github.com/BurntSushi/toml v1.6.0
 	github.com/DATA-DOG/go-sqlmock v1.5.0
-	github.com/Mininglamp-OSS/octo-lib v0.0.0-20260515014003-2cdafe082b88
+	github.com/Mininglamp-OSS/octo-lib v0.0.0-20260527083114-263f221a1bfe
 	github.com/alibabacloud-go/darabonba-openapi v0.2.1
 	github.com/alibabacloud-go/sms-intl-20180501 v1.0.1
 	github.com/alibabacloud-go/tea v1.2.1
@@ -27,6 +28,7 @@ require (
 	github.com/judwhite/go-svc v1.2.1
 	github.com/mattn/go-sqlite3 v1.14.17
 	github.com/minio/minio-go/v7 v7.0.61
+	github.com/nicksnyder/go-i18n/v2 v2.6.1
 	github.com/olivere/elastic v6.2.37+incompatible
 	github.com/opentracing/opentracing-go v1.2.1-0.20220228012449-10b1cf09e00b
 	github.com/pkg/errors v0.9.1
@@ -47,14 +49,13 @@ require (
 	golang.org/x/crypto v0.19.0
 	golang.org/x/image v0.5.0
 	golang.org/x/oauth2 v0.13.0
-	golang.org/x/sync v0.3.0
-	golang.org/x/text v0.14.0
+	golang.org/x/sync v0.19.0
+	golang.org/x/text v0.32.0
 	google.golang.org/api v0.122.0
 	google.golang.org/grpc v1.57.0
 	google.golang.org/protobuf v1.31.0
 	gopkg.in/go-playground/assert.v1 v1.2.1
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
-	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -174,4 +175,5 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20230525234030-28d5490b6b19 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

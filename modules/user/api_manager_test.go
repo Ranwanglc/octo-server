@@ -505,6 +505,11 @@ func TestUserListBotAndSystemFlags(t *testing.T) {
 
 	// 互斥校验：bot_only 与 exclude_bot、system_only 与 exclude_system 同时为 1
 	// 是逻辑矛盾，返回 400 比静默返回空更利于前端发现 bug。
+	//
+	// Phase 2.1 迁移后该 400 走 i18n 错误信封（err.server.user.list_filter_conflict）。
+	// 这里只校验 HTTP 状态码不变（回归保护）——此 testutil 服务未装 i18n
+	// ErrorRenderer，故仅输出 legacy {msg,status}；error.code / details 的 v2
+	// 信封与 zh-CN 文案由 TestRespondUserHelpers（helperHarness 装了 renderer）覆盖。
 	conflictCases := []struct {
 		name  string
 		query string
@@ -528,7 +533,7 @@ func TestUserListBotAndSystemFlags(t *testing.T) {
 // 两列出现 NULL，进而让 /v1/manager/user/list 等所有 SELECT phone/zone 到
 // string 字段的接口因 "converting NULL to string is unsupported" 报 400。
 //
-// 修复迁移 20260516000001_user_legacy01.sql 把列改回 NOT NULL DEFAULT ''。
+// 修复迁移 20260516000001_user_legacy01.sql 把列改回 NOT NULL DEFAULT ”。
 // 本测试通过 INFORMATION_SCHEMA 校验 schema、并直接走 raw SQL 尝试 NULL
 // 写入来验证约束是否真生效（修复前是 NULL 通过、读取报错；修复后是写入直接被
 // 拒，读取永远安全）。
@@ -539,15 +544,15 @@ func TestUserTablePhoneZoneNotNullable(t *testing.T) {
 
 	// 1. INFORMATION_SCHEMA 直接校验 schema。
 	type colMeta struct {
-		ColumnName    string `db:"COLUMN_NAME"`
-		IsNullable    string `db:"IS_NULLABLE"`
+		ColumnName    string         `db:"COLUMN_NAME"`
+		IsNullable    string         `db:"IS_NULLABLE"`
 		ColumnDefault sql.NullString `db:"COLUMN_DEFAULT"`
 	}
 	var cols []*colMeta
 	_, err = ctx.DB().SelectBySql(
-		"SELECT COLUMN_NAME, IS_NULLABLE, COLUMN_DEFAULT "+
-			"FROM INFORMATION_SCHEMA.COLUMNS "+
-			"WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME='user' "+
+		"SELECT COLUMN_NAME, IS_NULLABLE, COLUMN_DEFAULT " +
+			"FROM INFORMATION_SCHEMA.COLUMNS " +
+			"WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME='user' " +
 			"AND COLUMN_NAME IN ('phone','zone') ORDER BY COLUMN_NAME",
 	).Load(&cols)
 	assert.NoError(t, err)

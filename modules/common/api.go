@@ -29,9 +29,10 @@ import (
 type Common struct {
 	ctx *config.Context
 	log.Log
-	db          *db
-	appConfigDB *appConfigDB
-	threadOn    int // 缓存 DM_THREAD_ON 环境变量
+	db             *db
+	appConfigDB    *appConfigDB
+	systemSettings *SystemSettings
+	threadOn       int // 缓存 DM_THREAD_ON 环境变量
 }
 
 // New New
@@ -41,12 +42,20 @@ func New(ctx *config.Context) *Common {
 		threadOn = 1
 	}
 	return &Common{
-		ctx:         ctx,
-		db:          newDB(ctx.DB()),
-		appConfigDB: newAppConfigDB(ctx),
-		Log:         log.NewTLog("common"),
-		threadOn:    threadOn,
+		ctx:            ctx,
+		db:             newDB(ctx.DB()),
+		appConfigDB:    newAppConfigDB(ctx),
+		systemSettings: EnsureSystemSettings(ctx),
+		Log:            log.NewTLog("common"),
+		threadOn:       threadOn,
 	}
+}
+
+// SystemSettings exposes the shared admin-tunable settings reader for
+// callers that already hold a *Common. New consumers in other packages
+// should prefer common.EnsureSystemSettings(ctx) directly.
+func (cn *Common) SystemSettings() *SystemSettings {
+	return cn.systemSettings
 }
 
 // Route 路由配置
@@ -119,6 +128,13 @@ func (cn *Common) Route(r *wkhttp.WKHttp) {
 	}
 	cn.ctx.GetConfig().AppRSAPrivateKey = privateKey
 	cn.ctx.GetConfig().AppRSAPubKey = appConfigM.RSAPublicKey
+
+	// 启动期校验:DB 已写入 login.local_off=1 但部署没有任何第三方登录
+	// 提供方,LocalLoginOff() 会自动回退为 false 避免锁死。把这个状态作为
+	// error 日志显式打出,让运维一眼能看到"开关写了但当前不生效"。
+	// 此处直接读 snapshot 是安全的:Load 刚刚完成,值就是 DB 当前值。
+	cn.systemSettings.LogLocalLoginOffSafetyOverrideIfActive(
+		cn.systemSettings.RawLocalLoginOffFromSnapshot())
 }
 
 // 获取后台运行引导视频
@@ -349,6 +365,17 @@ func (cn *Common) insertAppConfigIfNeed() (*appConfigModel, error) {
 	return appConfigM, err
 }
 
+// boolToFlag normalises a bool getter result to the 0/1 int flag used by
+// existing appconfig JSON fields (phone_search_off, shortno_edit_off, ...).
+// Keeps the wire shape int across the response so frontend doesn't need a
+// special "boolean-or-int" decode path for one field.
+func boolToFlag(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
 func (cn *Common) appConfig(c *wkhttp.Context) {
 	versionStr := c.Query("version")
 	appConfigM, err := cn.appConfigDB.query()
@@ -368,8 +395,10 @@ func (cn *Common) appConfig(c *wkhttp.Context) {
 	}
 	if versionI64 != 0 && int(versionI64) >= appConfigM.Version {
 		c.JSON(http.StatusOK, &appConfigResp{
-			Version:       appConfigM.Version,
-			SystemBotUIDs: spacepkg.SystemBotList(),
+			Version:                appConfigM.Version,
+			SystemBotUIDs:          spacepkg.SystemBotList(),
+			LocalLoginOff:          boolToFlag(cn.systemSettings.LocalLoginOff()),
+			DisableUserCreateSpace: boolToFlag(cn.systemSettings.SpaceDisableUserCreate()),
 		})
 		return
 	}
@@ -405,7 +434,9 @@ func (cn *Common) appConfig(c *wkhttp.Context) {
 		OIDCResetPasswordURL:           oidcResetPasswordURL(),
 		OIDCProviders:                  oidcProviders(),
 		// YUJ-219-A / GH#1283：单一真源下发系统 Bot UID 列表，替代三端硬编码。
-		SystemBotUIDs:                  spacepkg.SystemBotList(),
+		SystemBotUIDs:          spacepkg.SystemBotList(),
+		LocalLoginOff:          boolToFlag(cn.systemSettings.LocalLoginOff()),
+		DisableUserCreateSpace: boolToFlag(cn.systemSettings.SpaceDisableUserCreate()),
 	})
 }
 
@@ -473,9 +504,20 @@ func oidcResetPasswordURL() string {
 	return os.Getenv("DM_OIDC_RESET_PASSWORD_URL")
 }
 
+// oidcEnabled reports whether OIDC is intended to be on. Parsing must match
+// modules/oidc/config.go:getBool (strconv.ParseBool) byte-for-byte and stay
+// in lockstep with isOIDCFullyConfigured in system_settings.go — diverging
+// here causes a front-end lockout where local_login_off=1 hides the local
+// card while oidc_providers / oidc_account_url are silently omitted because
+// this function rejects spellings like "T" or "True" that the OIDC module
+// itself accepts. See PR #104 P0 (Jerry-Xin).
 func oidcEnabled() bool {
-	v := strings.ToLower(os.Getenv("DM_OIDC_ENABLED"))
-	return v == "true" || v == "1"
+	v := os.Getenv("DM_OIDC_ENABLED")
+	if v == "" {
+		return false
+	}
+	enabled, err := strconv.ParseBool(v)
+	return err == nil && enabled
 }
 
 // 兼容历史 app_config 行（NOT NULL DEFAULT 7 在迁移前的行为）：值 ≤ 0 时回退为 7。
@@ -687,6 +729,24 @@ type appConfigResp struct {
 	// 消费此字段并替换硬编码常量，保持与后端 SystemBotList() 完全一致。
 	// 未来系统 Bot 列表调整（加新 Bot / 改名）只需改后端，无需同步三端。
 	SystemBotUIDs []string `json:"system_bot_uids"`
+
+	// LocalLoginOff 控制前端是否隐藏"本地账号登录"卡片（用户名 / 手机号 / 邮箱
+	// 三种本地登录方式的统一开关）。值来源于 system_setting login.local_off，
+	// 默认 0；为 1 时前端只渲染 SSO/第三方登录入口。
+	//
+	// 与 app_config.version 解耦：即使客户端命中 version 短路分支，也必须能拿到
+	// 最新值，否则 admin 切换开关后老客户端会被本地缓存住。和 SystemBotUIDs 同理。
+	LocalLoginOff int `json:"local_login_off"`
+
+	// DisableUserCreateSpace 控制客户端是否隐藏「创建空间」入口。
+	// 来源 system_setting space.disable_user_create,回退到 env
+	// DM_SPACE_DISABLE_USER_CREATE,默认 0(允许创建)。
+	//
+	// 与 app_config.version 解耦的原因同 LocalLoginOff：admin 在管理台 toggle
+	// 后老客户端命中 version 短路分支仍必须看到最新值，否则被本地缓存住失去
+	// 实时性。后端 POST /v1/space/create 也走同一个 getter 校验,客户端隐藏
+	// 与服务端拒绝由单一真源驱动,不存在前后端漂移。
+	DisableUserCreateSpace int `json:"disable_user_create_space"`
 }
 
 type oidcProviderResp struct {

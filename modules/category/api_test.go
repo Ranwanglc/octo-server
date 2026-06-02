@@ -9,12 +9,37 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-lib/testutil"
 	convext "github.com/Mininglamp-OSS/octo-server/modules/conversation_ext"
+	redis "github.com/go-redis/redis"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// resetUIDRateLimit clears the per-uid token-bucket keys
+// (ratelimit:uid:{uid}) so subsequent HTTP calls in this test start from a
+// full bucket.  Without this, tests that came earlier in the same go test
+// binary will have consumed tokens, and a later high-burst test (e.g.
+// TestCategory_CreateLimit, which makes 20+ category POSTs back-to-back)
+// fails with HTTP 429 even though the per-test logic is correct.  See
+// pkg/wkhttp/ratelimit_helper.go SharedUIDRateLimiter for the bucket key
+// scheme.  Pattern mirrors modules/space/api_email_invite_public_test.go's
+// resetSpaceInviteRateLimit.
+func resetUIDRateLimit(t *testing.T, ctx *config.Context) {
+	t.Helper()
+	rdsClient := redis.NewClient(&redis.Options{
+		Addr:     ctx.GetConfig().DB.RedisAddr,
+		Password: ctx.GetConfig().DB.RedisPass,
+	})
+	defer rdsClient.Close()
+	keys, err := rdsClient.Keys("ratelimit:uid:*").Result()
+	if err == nil && len(keys) > 0 {
+		_ = rdsClient.Del(keys...).Err()
+	}
+}
 
 // ---------- helpers ----------
 
@@ -90,7 +115,7 @@ func createCategory(t *testing.T, route *wkhttp.WKHttp, spaceID, name string) *h
 
 func TestCategory_Create(t *testing.T) {
 	t.Skip("OCTO migration TODO: see https://github.com/Mininglamp-OSS/octo-server/issues/17")
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -110,7 +135,7 @@ func TestCategory_Create(t *testing.T) {
 }
 
 func TestCategory_List(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -164,7 +189,7 @@ func TestCategory_List(t *testing.T) {
 }
 
 func TestCategory_Update(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -191,7 +216,7 @@ func TestCategory_Update(t *testing.T) {
 }
 
 func TestCategory_Delete(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -248,7 +273,7 @@ func TestCategory_Delete(t *testing.T) {
 // 群（含 thread 级联）与 DM —— 前端提示「分组下的所有会话将取消关注」对应
 // 的服务端行为。
 func TestCategory_DeleteUnfollowsContents(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -333,7 +358,7 @@ func TestCategory_DeleteUnfollowsContents(t *testing.T) {
 
 func TestCategory_Sort(t *testing.T) {
 	t.Skip("OCTO migration TODO: see https://github.com/Mininglamp-OSS/octo-server/issues/17")
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -381,7 +406,7 @@ func TestCategory_Sort(t *testing.T) {
 }
 
 func TestCategory_MoveGroupToCategory(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -427,10 +452,267 @@ func TestCategory_MoveGroupToCategory(t *testing.T) {
 	assert.Nil(t, setting2.CategoryID)
 }
 
+// TestCategory_MoveGroupOutOfCategory_ClearsAutoFollowThreads is the
+// regression test for issue #151 review #3 (yujiawei).  When a user moves a
+// group out of any category, the auto_follow_threads flag on the
+// user_conversation_ext row (which the new sidebar materialization may have
+// set to 1) must be cleared in the same transaction.  Without this cleanup,
+// selectEligibleForFanoutTx would keep this user eligible for OnThreadCreated
+// fan-out — the read side (buildFollowItems) drops the group because
+// CategoryID is now nil, but the write side only checks auto_follow_threads.
+//
+// Repro before fix:
+//  1. group g placed in category c, no ext row yet (default-followed).
+//  2. /v1/sidebar/sync follow tab materializes (uid, space, g) with
+//     auto_follow_threads=1, group_unfollowed=0.
+//  3. User moves g out of category via PUT /v1/groups/g/category {"":""}.
+//  4. ext row still has auto_follow_threads=1 — fan-out continues.
+//
+// After fix the move-out branch in api.go calls ClearAutoFollowThreadsTx
+// in the same tx, restoring the read/write contract.
+func TestCategory_MoveGroupOutOfCategory_ClearsAutoFollowThreads(t *testing.T) {
+	s, ctx := newCategoryTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+	resetUIDRateLimit(t, ctx)
+
+	spaceID := "space-move-clr-001"
+	seedSpaceAndMember(t, f, spaceID, 0)
+	route := s.GetRoute()
+
+	// 1. Set up: category + group + group-in-category.
+	wc := createCategory(t, route, spaceID, "工作")
+	require.Equal(t, http.StatusOK, wc.Code)
+	cat := parseJSON(t, wc)
+	catID := cat["category_id"].(string)
+
+	groupNo := "group-move-clr-001"
+	seedGroup(t, f, groupNo, spaceID)
+
+	wm := doRequest(t, route, "PUT", "/v1/groups/"+groupNo+"/category", map[string]string{
+		"category_id": catID,
+	})
+	require.Equal(t, http.StatusOK, wm.Code)
+
+	// 2. Simulate the sidebar materialization step (would normally fire on
+	//    /v1/sidebar/sync).  Insert ext row with auto_follow_threads=1,
+	//    matching what MaterializeDefaultFollowedGroups writes.
+	_, err = f.db.session.InsertBySql(
+		"INSERT INTO user_conversation_ext (uid, space_id, target_type, target_id, group_unfollowed, auto_follow_threads) "+
+			"VALUES (?, ?, 2, ?, 0, 1)",
+		testutil.UID, spaceID, groupNo,
+	).Exec()
+	require.NoError(t, err, "seed materialized ext row")
+
+	// Precondition sanity check.
+	var preAutoFollow int
+	_, err = f.db.session.SelectBySql(
+		"SELECT auto_follow_threads FROM user_conversation_ext"+
+			" WHERE uid=? AND space_id=? AND target_type=2 AND target_id=?",
+		testutil.UID, spaceID, groupNo,
+	).Load(&preAutoFollow)
+	require.NoError(t, err)
+	require.Equal(t, 1, preAutoFollow, "precondition: row is materialized auto_follow_threads=1")
+
+	// 3. Move group OUT of category.
+	wm2 := doRequest(t, route, "PUT", "/v1/groups/"+groupNo+"/category", map[string]string{
+		"category_id": "",
+	})
+	require.Equal(t, http.StatusOK, wm2.Code)
+
+	// 4. Assert auto_follow_threads is now 0 — the actual regression fix.
+	var postAutoFollow int
+	_, err = f.db.session.SelectBySql(
+		"SELECT auto_follow_threads FROM user_conversation_ext"+
+			" WHERE uid=? AND space_id=? AND target_type=2 AND target_id=?",
+		testutil.UID, spaceID, groupNo,
+	).Load(&postAutoFollow)
+	require.NoError(t, err)
+	assert.Equal(t, 0, postAutoFollow,
+		"auto_follow_threads must be cleared after move-out (issue #151 review #3); "+
+			"otherwise selectEligibleForFanoutTx would still target this user")
+
+	// 5. Other flags MUST be preserved — uncategorize is NOT a full unfollow.
+	var groupUnfollowed int
+	_, err = f.db.session.SelectBySql(
+		"SELECT group_unfollowed FROM user_conversation_ext"+
+			" WHERE uid=? AND space_id=? AND target_type=2 AND target_id=?",
+		testutil.UID, spaceID, groupNo,
+	).Load(&groupUnfollowed)
+	require.NoError(t, err)
+	assert.Equal(t, 0, groupUnfollowed,
+		"group_unfollowed must NOT be set — uncategorize ≠ explicit unfollow; "+
+			"the cleanup only revokes auto-subscribe to NEW threads, not all subscriptions")
+}
+
+// TestCategory_MoveGroupBetweenCategories_PreservesAutoFollowThreads pins the
+// non-regression: moving a group from category A to category B preserves the
+// implicit follow, so auto_follow_threads stays 1.  Without this guard, a
+// future change might over-eagerly clear in every move and break the
+// "default-followed across category-to-category move" contract.
+func TestCategory_MoveGroupBetweenCategories_PreservesAutoFollowThreads(t *testing.T) {
+	s, ctx := newCategoryTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+	resetUIDRateLimit(t, ctx)
+
+	spaceID := "space-move-keep-001"
+	seedSpaceAndMember(t, f, spaceID, 0)
+	route := s.GetRoute()
+
+	// Two categories, one group, materialized ext row.
+	wcA := createCategory(t, route, spaceID, "工作A")
+	require.Equal(t, http.StatusOK, wcA.Code)
+	catA := parseJSON(t, wcA)["category_id"].(string)
+	wcB := createCategory(t, route, spaceID, "工作B")
+	require.Equal(t, http.StatusOK, wcB.Code)
+	catB := parseJSON(t, wcB)["category_id"].(string)
+
+	groupNo := "group-move-keep-001"
+	seedGroup(t, f, groupNo, spaceID)
+	require.Equal(t, http.StatusOK, doRequest(t, route, "PUT", "/v1/groups/"+groupNo+"/category", map[string]string{"category_id": catA}).Code)
+	_, err = f.db.session.InsertBySql(
+		"INSERT INTO user_conversation_ext (uid, space_id, target_type, target_id, group_unfollowed, auto_follow_threads) "+
+			"VALUES (?, ?, 2, ?, 0, 1)",
+		testutil.UID, spaceID, groupNo,
+	).Exec()
+	require.NoError(t, err)
+
+	// Move A → B.
+	w := doRequest(t, route, "PUT", "/v1/groups/"+groupNo+"/category", map[string]string{"category_id": catB})
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var autoFollow int
+	_, err = f.db.session.SelectBySql(
+		"SELECT auto_follow_threads FROM user_conversation_ext"+
+			" WHERE uid=? AND space_id=? AND target_type=2 AND target_id=?",
+		testutil.UID, spaceID, groupNo,
+	).Load(&autoFollow)
+	require.NoError(t, err)
+	assert.Equal(t, 1, autoFollow,
+		"category A→B move must NOT clear auto_follow_threads — the group is "+
+			"still in the follow tab, just under a different category")
+}
+
+// TestCategory_MoveGroupBackIntoCategory_RestoresAutoFollowThreads pins
+// issue #151 review #4 (an9xyz) symptom #1: a default-followed group that
+// has been materialized and then moved out must have auto_follow_threads
+// restored to 1 when it is moved back into any category.  Otherwise the
+// sidebar materialization branch skips the existing groupExts entry,
+// the group reappears in the follow tab via buildFollowItems, but
+// selectEligibleForFanoutTx still excludes the user (=0) — phantom missing
+// fan-out.
+func TestCategory_MoveGroupBackIntoCategory_RestoresAutoFollowThreads(t *testing.T) {
+	s, ctx := newCategoryTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+	resetUIDRateLimit(t, ctx)
+
+	spaceID := "space-move-back-001"
+	seedSpaceAndMember(t, f, spaceID, 0)
+	route := s.GetRoute()
+
+	wc := createCategory(t, route, spaceID, "工作")
+	require.Equal(t, http.StatusOK, wc.Code)
+	catID := parseJSON(t, wc)["category_id"].(string)
+
+	groupNo := "group-move-back-001"
+	seedGroup(t, f, groupNo, spaceID)
+
+	// Cycle: move into category → simulate sidebar materialization → move
+	// out (clears auto_follow_threads) → move back into the SAME category.
+	require.Equal(t, http.StatusOK, doRequest(t, route, "PUT", "/v1/groups/"+groupNo+"/category", map[string]string{"category_id": catID}).Code)
+	_, err = f.db.session.InsertBySql(
+		"INSERT INTO user_conversation_ext (uid, space_id, target_type, target_id, group_unfollowed, auto_follow_threads) "+
+			"VALUES (?, ?, 2, ?, 0, 1)",
+		testutil.UID, spaceID, groupNo,
+	).Exec()
+	require.NoError(t, err, "simulate sidebar materialization")
+	require.Equal(t, http.StatusOK, doRequest(t, route, "PUT", "/v1/groups/"+groupNo+"/category", map[string]string{"category_id": ""}).Code,
+		"move out — must clear auto_follow_threads")
+
+	var afterOut int
+	_, err = f.db.session.SelectBySql(
+		"SELECT auto_follow_threads FROM user_conversation_ext"+
+			" WHERE uid=? AND space_id=? AND target_type=2 AND target_id=?",
+		testutil.UID, spaceID, groupNo,
+	).Load(&afterOut)
+	require.NoError(t, err)
+	require.Equal(t, 0, afterOut, "precondition: move-out cleared auto_follow_threads")
+
+	// Move BACK into the same category.  Sidebar materialization would skip
+	// this row (groupExts hit), so the move-in path itself must restore =1.
+	require.Equal(t, http.StatusOK, doRequest(t, route, "PUT", "/v1/groups/"+groupNo+"/category", map[string]string{"category_id": catID}).Code)
+
+	var afterIn int
+	_, err = f.db.session.SelectBySql(
+		"SELECT auto_follow_threads FROM user_conversation_ext"+
+			" WHERE uid=? AND space_id=? AND target_type=2 AND target_id=?",
+		testutil.UID, spaceID, groupNo,
+	).Load(&afterIn)
+	require.NoError(t, err)
+	assert.Equal(t, 1, afterIn,
+		"move-in must restore auto_follow_threads=1 on an existing ext row "+
+			"(issue #151 review #4 symptom #1); sidebar materialization would "+
+			"otherwise skip the existing row, leaving OnThreadCreated fan-out "+
+			"disabled even though the group is back in the follow tab")
+}
+
+// TestCategory_MoveFirstTimeIntoCategory_NoOpRestore ensures the move-in
+// restore call is a safe no-op when no ext row has been materialized yet —
+// sidebar materialization at the next /v1/sidebar/sync creates the row with
+// auto_follow_threads=1 anyway, and the move-in handler must not
+// short-circuit any subsequent paths or write inappropriate rows.
+func TestCategory_MoveFirstTimeIntoCategory_NoOpRestore(t *testing.T) {
+	s, ctx := newCategoryTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+	resetUIDRateLimit(t, ctx)
+
+	spaceID := "space-move-first-001"
+	seedSpaceAndMember(t, f, spaceID, 0)
+	route := s.GetRoute()
+
+	wc := createCategory(t, route, spaceID, "工作")
+	require.Equal(t, http.StatusOK, wc.Code)
+	catID := parseJSON(t, wc)["category_id"].(string)
+
+	groupNo := "group-move-first-001"
+	seedGroup(t, f, groupNo, spaceID)
+
+	// Move into category for the first time — no ext row exists yet.
+	require.Equal(t, http.StatusOK, doRequest(t, route, "PUT", "/v1/groups/"+groupNo+"/category", map[string]string{"category_id": catID}).Code)
+
+	// No row should have been written by the move-in path — sidebar's
+	// MaterializeDefaultFollowedGroups is the canonical materialization site
+	// and stays solely responsible for creating ext rows.  Letting the
+	// move-in path INSERT here would race with the unique key and silently
+	// pick whichever flag set ends up committing first.
+	var count int
+	_, err = f.db.session.SelectBySql(
+		"SELECT COUNT(*) FROM user_conversation_ext"+
+			" WHERE uid=? AND space_id=? AND target_type=2 AND target_id=?",
+		testutil.UID, spaceID, groupNo,
+	).Load(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count,
+		"first-time move-in must NOT create an ext row — sidebar materialization "+
+			"is the single materialization site; RestoreAutoFollowThreadsTx is "+
+			"strictly UPDATE")
+}
+
 // ---------- Validation / Error Tests ----------
 
 func TestCategory_CreateLimit(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -449,11 +731,11 @@ func TestCategory_CreateLimit(t *testing.T) {
 	// 21st should fail
 	w := createCategory(t, route, spaceID, "Cat-20")
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "最多创建20个分类")
+	assertCategoryErrorCode(t, w, "err.server.category.limit_exceeded")
 }
 
 func TestCategory_CreateEmptyName(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	_ = New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -465,11 +747,11 @@ func TestCategory_CreateEmptyName(t *testing.T) {
 
 	w := createCategory(t, s.GetRoute(), spaceID, "")
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "类别名称不能为空")
+	assertCategoryErrorCode(t, w, "err.server.category.request_invalid")
 }
 
 func TestCategory_UpdateNotOwner(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -493,11 +775,11 @@ func TestCategory_UpdateNotOwner(t *testing.T) {
 	// try to update it
 	w := doRequest(t, s.GetRoute(), "PUT", "/v1/spaces/"+spaceID+"/categories/"+otherCatID, map[string]string{"name": "我要改"})
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "无权限修改此分类")
+	assertCategoryErrorCode(t, w, "err.server.category.permission_denied")
 }
 
 func TestCategory_DeleteNotOwner(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -521,11 +803,11 @@ func TestCategory_DeleteNotOwner(t *testing.T) {
 	// try to delete it
 	w := doRequest(t, s.GetRoute(), "DELETE", "/v1/spaces/"+spaceID+"/categories/"+otherCatID, nil)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "无权限删除此分类")
+	assertCategoryErrorCode(t, w, "err.server.category.permission_denied")
 }
 
 func TestCategory_MoveGroupNotMember(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -552,11 +834,11 @@ func TestCategory_MoveGroupNotMember(t *testing.T) {
 		"category_id": catID,
 	})
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "你不是该群成员")
+	assertCategoryErrorCode(t, w, "err.server.category.group_member_required")
 }
 
 func TestCategory_NonSpaceMember(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	_ = New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -574,16 +856,16 @@ func TestCategory_NonSpaceMember(t *testing.T) {
 	// try to create a category
 	w := createCategory(t, route, spaceID, "工作")
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "你不是该空间成员")
+	assertCategoryErrorCode(t, w, "err.server.category.space_member_required")
 
 	// try to list categories
 	wl := doRequest(t, route, "GET", "/v1/spaces/"+spaceID+"/categories", nil)
 	assert.Equal(t, http.StatusBadRequest, wl.Code)
-	assert.Contains(t, wl.Body.String(), "你不是该空间成员")
+	assertCategoryErrorCode(t, wl, "err.server.category.space_member_required")
 }
 
 func TestCategory_UpdateNotFound(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -595,11 +877,11 @@ func TestCategory_UpdateNotFound(t *testing.T) {
 	// try to update a non-existent category
 	w := doRequest(t, s.GetRoute(), "PUT", "/v1/spaces/"+spaceID+"/categories/nonexistent-cat", map[string]string{"name": "不存在"})
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "分类不存在")
+	assertCategoryErrorCode(t, w, "err.server.category.not_found")
 }
 
 func TestCategory_DeleteNotFound(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -611,11 +893,11 @@ func TestCategory_DeleteNotFound(t *testing.T) {
 	// try to delete a non-existent category
 	w := doRequest(t, s.GetRoute(), "DELETE", "/v1/spaces/"+spaceID+"/categories/nonexistent-cat", nil)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "分类不存在")
+	assertCategoryErrorCode(t, w, "err.server.category.not_found")
 }
 
 func TestCategory_UpdateEmptyName(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -634,11 +916,11 @@ func TestCategory_UpdateEmptyName(t *testing.T) {
 	// try to update with empty name
 	wu := doRequest(t, route, "PUT", "/v1/spaces/"+spaceID+"/categories/"+catID, map[string]string{"name": ""})
 	assert.Equal(t, http.StatusBadRequest, wu.Code)
-	assert.Contains(t, wu.Body.String(), "类别名称不能为空")
+	assertCategoryErrorCode(t, wu, "err.server.category.request_invalid")
 }
 
 func TestCategory_SortEmptyList(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -652,11 +934,11 @@ func TestCategory_SortEmptyList(t *testing.T) {
 		"category_ids": []string{},
 	})
 	assert.Equal(t, http.StatusBadRequest, ws.Code)
-	assert.Contains(t, ws.Body.String(), "分类列表不能为空")
+	assertCategoryErrorCode(t, ws, "err.server.category.request_invalid")
 }
 
 func TestCategory_SortUnknownCategory(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -675,11 +957,11 @@ func TestCategory_SortUnknownCategory(t *testing.T) {
 		"category_ids": []string{"fake-id-001"},
 	})
 	assert.Equal(t, http.StatusBadRequest, ws.Code)
-	assert.Contains(t, ws.Body.String(), "分类不存在或无权限")
+	assertCategoryErrorCode(t, ws, "err.server.category.not_found")
 }
 
 func TestCategory_SortNonSpaceMember(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	_ = New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -696,11 +978,11 @@ func TestCategory_SortNonSpaceMember(t *testing.T) {
 		"category_ids": []string{"some-id"},
 	})
 	assert.Equal(t, http.StatusBadRequest, ws.Code)
-	assert.Contains(t, ws.Body.String(), "你不是该空间成员")
+	assertCategoryErrorCode(t, ws, "err.server.category.space_member_required")
 }
 
 func TestCategory_MoveGroupCategoryNotFound(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -717,11 +999,11 @@ func TestCategory_MoveGroupCategoryNotFound(t *testing.T) {
 		"category_id": "nonexistent-cat-id",
 	})
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "分类不存在")
+	assertCategoryErrorCode(t, w, "err.server.category.not_found")
 }
 
 func TestCategory_MoveGroupCategoryNotOwner(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -750,11 +1032,11 @@ func TestCategory_MoveGroupCategoryNotOwner(t *testing.T) {
 		"category_id": otherCatID,
 	})
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "无权限使用此分类")
+	assertCategoryErrorCode(t, w, "err.server.category.permission_denied")
 }
 
 func TestCategory_MoveGroupCrossSpace(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -782,12 +1064,205 @@ func TestCategory_MoveGroupCrossSpace(t *testing.T) {
 		"category_id": catID,
 	})
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "群组和分类不在同一空间")
+	assertCategoryErrorCode(t, w, "err.server.category.space_mismatch")
+}
+
+// TestCategory_MoveExternalGroupToCurrentSpaceCategory is the regression test
+// for issue #191. A user who is an external member of a group (the group lives
+// in another Space) follows/categorizes it into a category under the user's own
+// current Space. The space-consistency check must use the user's source Space
+// (group_member.source_space_id), not the group's owning Space, otherwise the
+// request is wrongly rejected with "群组和分类不在同一空间".
+//
+// It also asserts the follow_version is bumped under the user's source Space
+// (not the group's owning Space) so the group surfaces in the follow tab the
+// sidebar queries for the user's current Space.
+func TestCategory_MoveExternalGroupToCurrentSpaceCategory(t *testing.T) {
+	s, ctx := newCategoryTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	require.NoError(t, err)
+	resetUIDRateLimit(t, ctx)
+
+	// userSpace = where the current user lives and owns categories.
+	// groupSpace = the external group's owning Space (a different Space).
+	userSpace := "space-ext191-user"
+	groupSpace := "space-ext191-group"
+	seedSpaceAndMember(t, f, userSpace, 0)
+	route := s.GetRoute()
+
+	// category lives under the user's current Space.
+	wc := createCategory(t, route, userSpace, "外部群关注")
+	require.Equal(t, http.StatusOK, wc.Code)
+	catID := parseJSON(t, wc)["category_id"].(string)
+
+	// group lives in groupSpace; the current user joined as an external member
+	// whose source_space_id points back to their own (user) Space.
+	groupNo := "group-ext191-001"
+	_, err = f.db.session.InsertBySql("INSERT INTO `group` (group_no, name, creator, status, space_id) VALUES (?, ?, ?, ?, ?)",
+		groupNo, "外部群", "owner-uid", 1, groupSpace).Exec()
+	require.NoError(t, err)
+	_, err = f.db.session.InsertInto("group_member").
+		Columns("group_no", "uid", "role", "is_deleted", "status", "is_external", "source_space_id").
+		Values(groupNo, testutil.UID, 0, 0, 1, 1, userSpace).Exec()
+	require.NoError(t, err)
+
+	// categorizing the external group into the user-Space category must succeed.
+	wm := doRequest(t, route, "PUT", "/v1/groups/"+groupNo+"/category", map[string]string{
+		"category_id": catID,
+	})
+	require.Equal(t, http.StatusOK, wm.Code)
+
+	setting, err := f.db.queryGroupSettingForCategory(groupNo, testutil.UID)
+	assert.NoError(t, err)
+	assert.NotNil(t, setting)
+	assert.NotNil(t, setting.CategoryID)
+	assert.Equal(t, catID, *setting.CategoryID)
+
+	// follow_version must be bumped under the user's source Space, not groupSpace.
+	var userSpaceVer int
+	_, err = f.db.session.Select("IFNULL(MAX(version),0)").From("user_follow_version").
+		Where("uid=? and space_id=?", testutil.UID, userSpace).Load(&userSpaceVer)
+	assert.NoError(t, err)
+	assert.Greater(t, userSpaceVer, 0)
+
+	var groupSpaceVer int
+	_, err = f.db.session.Select("IFNULL(MAX(version),0)").From("user_follow_version").
+		Where("uid=? and space_id=?", testutil.UID, groupSpace).Load(&groupSpaceVer)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, groupSpaceVer)
+}
+
+// TestCategory_MoveExternalGroupEmptySourceSpaceFallsBackToDefaultSpace covers
+// the legacy external-member path flagged in PR #192 review: an external member
+// row with is_external=1 but empty source_space_id is a legitimate state (e.g.
+// users/bots not bound to a Space). The rest of the codebase
+// (space_filter.decideConvKeepInSpace, api_sidebar.sidebarMySourceSpaceID)
+// resolves that state to the user's default Space, so categorize must do the
+// same — otherwise these groups stay un-categorizable and follow_version /
+// auto_follow_threads writes land in the group's owning Space.
+func TestCategory_MoveExternalGroupEmptySourceSpaceFallsBackToDefaultSpace(t *testing.T) {
+	s, ctx := newCategoryTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	require.NoError(t, err)
+	resetUIDRateLimit(t, ctx)
+
+	// The user's only Space membership → resolves as their default Space.
+	defaultSpace := "space-ext191-default"
+	groupSpace := "space-ext191-group2"
+	seedSpaceAndMember(t, f, defaultSpace, 0)
+	route := s.GetRoute()
+
+	wc := createCategory(t, route, defaultSpace, "外部群关注-legacy")
+	require.Equal(t, http.StatusOK, wc.Code)
+	catID := parseJSON(t, wc)["category_id"].(string)
+
+	// External member with EMPTY source_space_id (legacy row).
+	groupNo := "group-ext191-legacy-001"
+	_, err = f.db.session.InsertBySql("INSERT INTO `group` (group_no, name, creator, status, space_id) VALUES (?, ?, ?, ?, ?)",
+		groupNo, "外部群legacy", "owner-uid", 1, groupSpace).Exec()
+	require.NoError(t, err)
+	_, err = f.db.session.InsertInto("group_member").
+		Columns("group_no", "uid", "role", "is_deleted", "status", "is_external", "source_space_id").
+		Values(groupNo, testutil.UID, 0, 0, 1, 1, "").Exec()
+	require.NoError(t, err)
+
+	// Must succeed by falling back to the user's default Space.
+	wm := doRequest(t, route, "PUT", "/v1/groups/"+groupNo+"/category", map[string]string{
+		"category_id": catID,
+	})
+	require.Equal(t, http.StatusOK, wm.Code)
+
+	setting, err := f.db.queryGroupSettingForCategory(groupNo, testutil.UID)
+	assert.NoError(t, err)
+	assert.NotNil(t, setting)
+	assert.NotNil(t, setting.CategoryID)
+	assert.Equal(t, catID, *setting.CategoryID)
+
+	// follow_version bumped under the default Space, not the group's owning Space.
+	var defVer int
+	_, err = f.db.session.Select("IFNULL(MAX(version),0)").From("user_follow_version").
+		Where("uid=? and space_id=?", testutil.UID, defaultSpace).Load(&defVer)
+	assert.NoError(t, err)
+	assert.Greater(t, defVer, 0)
+
+	var groupVer int
+	_, err = f.db.session.Select("IFNULL(MAX(version),0)").From("user_follow_version").
+		Where("uid=? and space_id=?", testutil.UID, groupSpace).Load(&groupVer)
+	assert.NoError(t, err)
+	assert.Equal(t, 0, groupVer)
+}
+
+// TestCategory_MoveExternalGroupOutClearsAutoFollowThreadsInSourceSpace pins the
+// move-out (categoryIDPtr == nil) branch for an external group: the
+// ClearAutoFollowThreadsTx write must target the user's source Space, where the
+// sidebar materialized the ext row — not the group's owning Space. Without the
+// effectiveSpaceID fix this clear would miss the row entirely.
+func TestCategory_MoveExternalGroupOutClearsAutoFollowThreadsInSourceSpace(t *testing.T) {
+	s, ctx := newCategoryTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+	resetUIDRateLimit(t, ctx)
+
+	userSpace := "space-ext191-mo-user"
+	groupSpace := "space-ext191-mo-group"
+	seedSpaceAndMember(t, f, userSpace, 0)
+	route := s.GetRoute()
+
+	wc := createCategory(t, route, userSpace, "外部群关注-moveout")
+	require.Equal(t, http.StatusOK, wc.Code)
+	catID := parseJSON(t, wc)["category_id"].(string)
+
+	groupNo := "group-ext191-mo-001"
+	_, err = f.db.session.InsertBySql("INSERT INTO `group` (group_no, name, creator, status, space_id) VALUES (?, ?, ?, ?, ?)",
+		groupNo, "外部群moveout", "owner-uid", 1, groupSpace).Exec()
+	require.NoError(t, err)
+	_, err = f.db.session.InsertInto("group_member").
+		Columns("group_no", "uid", "role", "is_deleted", "status", "is_external", "source_space_id").
+		Values(groupNo, testutil.UID, 0, 0, 1, 1, userSpace).Exec()
+	require.NoError(t, err)
+
+	// Move IN.
+	wm := doRequest(t, route, "PUT", "/v1/groups/"+groupNo+"/category", map[string]string{
+		"category_id": catID,
+	})
+	require.Equal(t, http.StatusOK, wm.Code)
+
+	// Simulate sidebar materialization in the SOURCE space (where the follow tab
+	// is). target_type=2 → group.
+	_, err = f.db.session.InsertBySql(
+		"INSERT INTO user_conversation_ext (uid, space_id, target_type, target_id, group_unfollowed, auto_follow_threads) "+
+			"VALUES (?, ?, 2, ?, 0, 1)",
+		testutil.UID, userSpace, groupNo,
+	).Exec()
+	require.NoError(t, err, "seed materialized ext row in source space")
+
+	// Move OUT.
+	wm2 := doRequest(t, route, "PUT", "/v1/groups/"+groupNo+"/category", map[string]string{
+		"category_id": "",
+	})
+	require.Equal(t, http.StatusOK, wm2.Code)
+
+	// auto_follow_threads must be cleared on the row in the SOURCE space.
+	var postAutoFollow int
+	_, err = f.db.session.SelectBySql(
+		"SELECT auto_follow_threads FROM user_conversation_ext"+
+			" WHERE uid=? AND space_id=? AND target_type=2 AND target_id=?",
+		testutil.UID, userSpace, groupNo,
+	).Load(&postAutoFollow)
+	require.NoError(t, err)
+	assert.Equal(t, 0, postAutoFollow,
+		"move-out must clear auto_follow_threads on the ext row under the source Space")
 }
 
 func TestCategory_ListEmpty(t *testing.T) {
 	t.Skip("OCTO migration TODO: see https://github.com/Mininglamp-OSS/octo-server/issues/17")
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -808,7 +1283,7 @@ func TestCategory_ListEmpty(t *testing.T) {
 // ---------- Default Category (is_default=1) Tests ----------
 
 func TestCategory_ListAutoCreatesDefault(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -848,7 +1323,7 @@ func TestCategory_ListAutoCreatesDefault(t *testing.T) {
 }
 
 func TestCategory_ListDefaultIdempotent(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -874,7 +1349,7 @@ func TestCategory_ListDefaultIdempotent(t *testing.T) {
 }
 
 func TestCategory_ListWithCategoriesAndDefault(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -922,7 +1397,7 @@ func TestCategory_ListWithCategoriesAndDefault(t *testing.T) {
 }
 
 func TestCategory_DeleteDefaultRejected(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -942,11 +1417,11 @@ func TestCategory_DeleteDefaultRejected(t *testing.T) {
 	// try to delete — should be rejected
 	wd := doRequest(t, route, "DELETE", "/v1/spaces/"+spaceID+"/categories/"+defaultCatID, nil)
 	assert.Equal(t, http.StatusBadRequest, wd.Code)
-	assert.Contains(t, wd.Body.String(), "默认分类不可删除")
+	assertCategoryErrorCode(t, wd, "err.server.category.default_undeletable")
 }
 
 func TestCategory_UpdateDefaultRejected(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -966,12 +1441,12 @@ func TestCategory_UpdateDefaultRejected(t *testing.T) {
 	// try to update — should be rejected
 	wu := doRequest(t, route, "PUT", "/v1/spaces/"+spaceID+"/categories/"+defaultCatID, map[string]string{"name": "改名"})
 	assert.Equal(t, http.StatusBadRequest, wu.Code)
-	assert.Contains(t, wu.Body.String(), "默认分类不可修改")
+	assertCategoryErrorCode(t, wu, "err.server.category.default_immutable")
 }
 
 func TestCategory_SortWithDefault(t *testing.T) {
 	t.Skip("OCTO migration TODO: see https://github.com/Mininglamp-OSS/octo-server/issues/17")
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -1025,7 +1500,7 @@ func TestCategory_SortWithDefault(t *testing.T) {
 }
 
 func TestCategory_DefaultNameFromEnv(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -1049,7 +1524,7 @@ func TestCategory_DefaultNameFromEnv(t *testing.T) {
 
 func TestCategory_DefaultNotCountedInLimit(t *testing.T) {
 	t.Skip("OCTO migration TODO: see https://github.com/Mininglamp-OSS/octo-server/issues/17")
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -1077,7 +1552,7 @@ func TestCategory_DefaultNotCountedInLimit(t *testing.T) {
 
 func TestCategory_ListNoGroupsNoDefault(t *testing.T) {
 	t.Skip("OCTO migration TODO: see https://github.com/Mininglamp-OSS/octo-server/issues/17")
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -1101,7 +1576,7 @@ func TestCategory_ListNoGroupsNoDefault(t *testing.T) {
 
 func TestCategory_MoveGroupToDefaultCategory(t *testing.T) {
 	t.Skip("OCTO migration TODO: see https://github.com/Mininglamp-OSS/octo-server/issues/17")
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -1239,7 +1714,7 @@ func TestCategory_UniqueIndexPreventsDefaultDuplicate(t *testing.T) {
 }
 
 func TestCategory_SortCountMismatch(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -1263,11 +1738,44 @@ func TestCategory_SortCountMismatch(t *testing.T) {
 		"category_ids": []string{cat1["category_id"].(string)},
 	})
 	assert.Equal(t, http.StatusBadRequest, ws.Code)
-	assert.Contains(t, ws.Body.String(), "分类列表数量不匹配")
+	assertCategoryErrorCode(t, ws, "err.server.category.sort_list_mismatch")
+}
+
+// TestCategory_SortDuplicateIDs covers the repeated-ID branch in sort: a
+// same-length category_ids list that contains a duplicate must be rejected as
+// sort_list_duplicate (not sort_list_mismatch). The duplicate guard runs before
+// the catMap membership check, so the repeat is caught even though every ID is a
+// real category. (PR #214 reviewer-requested endpoint coverage.)
+func TestCategory_SortDuplicateIDs(t *testing.T) {
+	s, ctx := newCategoryTestServer()
+	f := New(ctx)
+
+	err := testutil.CleanAllTables(ctx)
+	assert.NoError(t, err)
+	resetUIDRateLimit(t, ctx)
+
+	spaceID := "space-sortdup-001"
+	seedSpaceAndMember(t, f, spaceID, 0)
+	route := s.GetRoute()
+
+	// create 2 categories so the list length matches but contains a repeat
+	wc1 := createCategory(t, route, spaceID, "A")
+	require.Equal(t, http.StatusOK, wc1.Code)
+	cat1 := parseJSON(t, wc1)
+	wc2 := createCategory(t, route, spaceID, "B")
+	require.Equal(t, http.StatusOK, wc2.Code)
+
+	catID1 := cat1["category_id"].(string)
+	// same length (2) as the user's categories, but catID1 is repeated
+	ws := doRequest(t, route, "PUT", "/v1/spaces/"+spaceID+"/categories/sort", map[string]interface{}{
+		"category_ids": []string{catID1, catID1},
+	})
+	assert.Equal(t, http.StatusBadRequest, ws.Code)
+	assertCategoryErrorCode(t, ws, "err.server.category.sort_list_duplicate")
 }
 
 func TestCategory_MoveGroupNoSpace(t *testing.T) {
-	s, ctx := testutil.NewTestServer()
+	s, ctx := newCategoryTestServer()
 	f := New(ctx)
 
 	err := testutil.CleanAllTables(ctx)
@@ -1289,5 +1797,5 @@ func TestCategory_MoveGroupNoSpace(t *testing.T) {
 		"category_id": "some-fake-cat",
 	})
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "该群组不属于任何空间")
+	assertCategoryErrorCode(t, w, "err.server.category.group_space_missing")
 }

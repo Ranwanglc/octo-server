@@ -21,8 +21,11 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/channel"
 	chservice "github.com/Mininglamp-OSS/octo-server/modules/channel/service"
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
+	"github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/thread"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
+	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/gin-gonic/gin"
@@ -93,7 +96,7 @@ func (co *Conversation) Route(r *wkhttp.WKHttp) {
 	}
 	// UID 限流：Web 端轮询叠加易触发全局 per-IP 桶（见 wukongim#92 / octo-server#1086 P2），
 	// 共享 keyspace "ratelimit:uid:{uid}"，配额跨所有挂载端点统一
-	uidLimit := appwkhttp.SharedUIDRateLimiter(co.ctx)
+	uidLimit := appwkhttp.SharedUIDRateLimiter(r, co.ctx)
 
 	coversations := r.Group("/v1/coversations", co.ctx.AuthMiddleware(r), uidLimit, deprecatedLog)
 	{
@@ -151,7 +154,7 @@ func (co *Conversation) conversationExtraSync(c *wkhttp.Context) {
 	}
 	if err := c.BindJSON(&req); err != nil {
 		co.Error("数据格式有误！", zap.Error(err))
-		c.ResponseError(errors.New("数据格式有误！"))
+		respondMessageRequestInvalid(c, "")
 		return
 	}
 	loginUID := c.GetLoginUID()
@@ -159,7 +162,7 @@ func (co *Conversation) conversationExtraSync(c *wkhttp.Context) {
 	conversationExtraModels, err := co.conversationExtraDB.sync(loginUID, req.Version)
 	if err != nil {
 		co.Error("同步消息扩展失败！", zap.Error(err))
-		c.ResponseError(errors.New("同步消息扩展失败！"))
+		httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 		return
 	}
 	resps := make([]*conversationExtraResp, 0, len(conversationExtraModels))
@@ -179,7 +182,7 @@ func (co *Conversation) conversationExtraUpdate(c *wkhttp.Context) {
 	}
 	if err := c.BindJSON(&req); err != nil {
 		co.Error("数据格式有误！", zap.Error(err))
-		c.ResponseError(errors.New("数据格式有误！"))
+		respondMessageRequestInvalid(c, "")
 		return
 	}
 	channelID := c.Param("channel_id")
@@ -190,7 +193,8 @@ func (co *Conversation) conversationExtraUpdate(c *wkhttp.Context) {
 
 	version, err := co.ctx.GenSeq(common.SyncConversationExtraKey)
 	if err != nil {
-		c.ResponseError(err)
+		co.Error("生成会话扩展序列号失败", zap.Error(err))
+		httperr.ResponseErrorL(c, errcode.ErrMessageStoreFailed, nil, nil)
 		return
 	}
 
@@ -206,7 +210,7 @@ func (co *Conversation) conversationExtraUpdate(c *wkhttp.Context) {
 	})
 	if err != nil {
 		co.Error("添加或更新最近会话扩展失败！", zap.Error(err))
-		c.ResponseError(errors.New("添加或更新最近会话扩展失败！"))
+		httperr.ResponseErrorL(c, errcode.ErrMessageStoreFailed, nil, nil)
 		return
 	}
 	err = co.ctx.SendCMD(config.MsgCMDReq{
@@ -217,7 +221,7 @@ func (co *Conversation) conversationExtraUpdate(c *wkhttp.Context) {
 	})
 	if err != nil {
 		co.Error("发送同步扩展会话cmd失败！", zap.Error(err))
-		c.ResponseError(errors.New("发送同步扩展会话cmd失败！"))
+		httperr.ResponseErrorL(c, errcode.ErrMessageNotifyFailed, nil, nil)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -231,11 +235,11 @@ func (co *Conversation) deleteConversation(c *wkhttp.Context) {
 	channelID := c.Param("channel_id")
 	channelType, err := strconv.ParseInt(c.Param("channel_type"), 10, 64)
 	if err != nil {
-		c.ResponseError(errors.New("频道类型格式错误"))
+		respondMessageRequestInvalid(c, "channel_type")
 		return
 	}
 	if strings.TrimSpace(channelID) == "" {
-		c.ResponseError(errors.New("频道ID不能为空"))
+		respondMessageRequestInvalid(c, "channel_id")
 		return
 	}
 
@@ -245,27 +249,27 @@ func (co *Conversation) deleteConversation(c *wkhttp.Context) {
 		isMember, err := co.groupService.ExistMember(channelID, loginUID)
 		if err != nil {
 			co.Error("查询群成员失败", zap.Error(err))
-			c.ResponseError(errors.New("操作失败"))
+			httperr.ResponseErrorL(c, errcode.ErrMessageStoreFailed, nil, nil)
 			return
 		}
 		if !isMember {
-			c.ResponseError(errors.New("无权删除此会话"))
+			httperr.ResponseErrorL(c, errcode.ErrMessageConversationForbidden, nil, nil)
 			return
 		}
 	} else if uint8(channelType) == common.ChannelTypePerson.Uint8() {
 		// For person channels, verify channelID is a valid user
 		if channelID == loginUID {
-			c.ResponseError(errors.New("无法删除与自己的会话"))
+			httperr.ResponseErrorL(c, errcode.ErrMessageCannotDeleteSelfConversation, nil, nil)
 			return
 		}
 		userInfo, err := co.userService.GetUser(channelID)
 		if err != nil {
 			co.Error("查询用户信息失败", zap.Error(err))
-			c.ResponseError(errors.New("操作失败"))
+			httperr.ResponseErrorL(c, errcode.ErrMessageStoreFailed, nil, nil)
 			return
 		}
 		if userInfo == nil {
-			c.ResponseError(errors.New("会话不存在或无权删除"))
+			httperr.ResponseErrorL(c, errcode.ErrMessageConversationForbidden, nil, nil)
 			return
 		}
 	}
@@ -273,7 +277,7 @@ func (co *Conversation) deleteConversation(c *wkhttp.Context) {
 	err = co.service.DeleteConversation(loginUID, channelID, uint8(channelType))
 	if err != nil {
 		co.Error("删除最近会话失败！", zap.Error(err))
-		c.ResponseError(errors.New("删除最近会话失败！"))
+		httperr.ResponseErrorL(c, errcode.ErrMessageStoreFailed, nil, nil)
 		return
 	}
 	c.ResponseOK()
@@ -289,7 +293,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	}
 	if err := c.BindJSON(&req); err != nil {
 		co.Error("数据格式有误！", zap.Error(err))
-		c.ResponseError(errors.New("数据格式有误！"))
+		respondMessageRequestInvalid(c, "")
 		return
 	}
 
@@ -310,21 +314,21 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 		cacheVersion, err := co.getDeviceConversationMaxVersion(loginUID, req.DeviceUUID)
 		if err != nil {
 			co.Error("获取缓存的最近会话版本号失败！", zap.Error(err), zap.String("loginUID", loginUID), zap.String("deviceUUID", req.DeviceUUID))
-			c.ResponseError(errors.New("获取缓存的最近会话版本号失败！"))
+			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 			return
 		}
 		if cacheVersion == 0 {
 			userMaxVersion, err := co.getUserConversationMaxVersion(loginUID)
 			if err != nil {
 				co.Error("获取用户最近会很最大版本失败！", zap.Error(err))
-				c.ResponseError(errors.New("获取用户最近会很最大版本失败！"))
+				httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 				return
 			}
 			if userMaxVersion > 0 {
 				err = co.setDeviceConversationMaxVersion(loginUID, req.DeviceUUID, userMaxVersion)
 				if err != nil {
 					co.Error("设置设备最近会话最大版本号失败！", zap.Error(err))
-					c.ResponseError(errors.New("设置设备最近会话最大版本号失败！"))
+					httperr.ResponseErrorL(c, errcode.ErrMessageStoreFailed, nil, nil)
 					return
 				}
 			}
@@ -343,7 +347,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 			deviceOffsetModels, err := co.deviceOffsetDB.queryWithUIDAndDeviceUUID(loginUID, req.DeviceUUID)
 			if err != nil {
 				co.Error("查询用户设备偏移量失败！", zap.Error(err))
-				c.ResponseError(errors.New("查询用户设备偏移量失败！"))
+				httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 				return
 			}
 			if len(deviceOffsetModels) > 0 {
@@ -355,7 +359,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 				userLastOffsetModels, err := co.userLastOffsetDB.queryWithUID(loginUID)
 				if err != nil {
 					co.Error("查询用户偏移量失败！", zap.Error(err))
-					c.ResponseError(errors.New("查询用户偏移量失败！"))
+					httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 					return
 				}
 				if len(userLastOffsetModels) > 0 {
@@ -372,7 +376,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 					}
 					err := co.insertDeviceOffsets(deviceOffsetList)
 					if err != nil {
-						c.ResponseError(errors.New("插入设备偏移数据失败！"))
+						httperr.ResponseErrorL(c, errcode.ErrMessageStoreFailed, nil, nil)
 						return
 					}
 				}
@@ -387,7 +391,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	largeGroupInfos, err := co.groupService.GetUserSupers(loginUID)
 	if err != nil {
 		co.Error("获取用户超大群失败！", zap.Error(err))
-		c.ResponseError(errors.New("获取用户超大群失败！"))
+		httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 		return
 	}
 	largeChannels := make([]*config.Channel, 0)
@@ -402,13 +406,29 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	conversations, err := co.ctx.IMSyncUserConversation(loginUID, version, req.MsgCount, lastMsgSeqs, largeChannels)
 	if err != nil {
 		co.Error("同步离线后的最近会话失败！", zap.Error(err), zap.String("loginUID", loginUID))
-		c.ResponseError(errors.New("同步离线后的最近会话失败！"))
+		httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 		return
 	}
 	groupNos := make([]string, 0, len(conversations))
 	uids := make([]string, 0, len(conversations))
 	channelIDs := make([]string, 0, len(conversations))
 	threadChannelShortIDMap := make(map[string]string)
+	// groupNoSeen 用于 groupNos 的去重：COMMUNITY_TOPIC 频道除了把自身
+	// channel_id（"{groupNo}____{shortID}"）加入 groupNos 外，还要把解析出
+	// 的 parent groupNo 也加进去，否则当父群本批不在 IM 返回里时，
+	// fillConversationSpaceIDs 拿不到父群的 SpaceID，导致 thread 频道的
+	// SpaceID 被回填为空（GH octo-server#153 Round-2 Critical 1）。
+	groupNoSeen := make(map[string]struct{}, len(conversations))
+	addGroupNo := func(no string) {
+		if no == "" {
+			return
+		}
+		if _, ok := groupNoSeen[no]; ok {
+			return
+		}
+		groupNoSeen[no] = struct{}{}
+		groupNos = append(groupNos, no)
+	}
 	if len(conversations) > 0 {
 		for _, conversation := range conversations {
 			if len(conversation.Recents) == 0 {
@@ -417,12 +437,16 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 			if conversation.ChannelType == common.ChannelTypePerson.Uint8() {
 				uids = append(uids, conversation.ChannelID)
 			} else {
-				groupNos = append(groupNos, conversation.ChannelID)
+				addGroupNo(conversation.ChannelID)
 			}
 			channelIDs = append(channelIDs, conversation.ChannelID)
 			if conversation.ChannelType == common.ChannelTypeCommunityTopic.Uint8() {
-				if _, shortID, err := thread.ParseChannelID(conversation.ChannelID); err == nil {
+				if parentNo, shortID, err := thread.ParseChannelID(conversation.ChannelID); err == nil {
 					threadChannelShortIDMap[conversation.ChannelID] = shortID
+					// 父群可能未出现在 IM 批次里（最近无消息），但 fillConversationSpaceIDs
+					// 需要从 groupMap[parentNo] 取 SpaceID。这里显式合入预取集合，
+					// GetGroupDetails 才会覆盖父群。
+					addGroupNo(parentNo)
 				}
 			}
 		}
@@ -439,7 +463,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 		groupVailds, err = co.groupService.ExistMembers(groupNos, loginUID)
 		if err != nil {
 			co.Error("查询有效群失败！", zap.Error(err))
-			c.ResponseError(errors.New("查询有效群失败！"))
+			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 			return
 		}
 
@@ -473,7 +497,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	conversationExtras, err := co.conversationExtraDB.queryWithChannelIDs(loginUID, channelIDs)
 	if err != nil {
 		co.Error("查询最近会话扩展失败！", zap.Error(err))
-		c.ResponseError(errors.New("查询最近会话扩展失败！"))
+		httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 		return
 	}
 	if len(conversationExtras) > 0 {
@@ -488,7 +512,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 		users, err = co.userService.GetUserDetails(uids, c.GetLoginUID())
 		if err != nil {
 			co.Error("查询用户信息失败！", zap.Error(err))
-			c.ResponseError(errors.New("查询用户信息失败！"))
+			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 			return
 		}
 		if len(users) > 0 {
@@ -520,7 +544,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 		groups, err = co.groupService.GetGroupDetails(groupNos, c.GetLoginUID())
 		if err != nil {
 			co.Error("查询群设置信息失败！", zap.Error(err))
-			c.ResponseError(errors.New("查询群设置信息失败！"))
+			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 			return
 		}
 		if groups == nil {
@@ -529,6 +553,34 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 		if len(groups) > 0 {
 			for _, group := range groups {
 				groupMap[group.GroupNo] = group
+			}
+		}
+	}
+
+	// ---------- 群原始 space_id（不经 SetEffectiveSpaceID 改写） ----------
+	// Round-3 修复 (GH octo-server#154 Round-2 Finding 1)：
+	// GetGroupDetails 内部走 SetEffectiveSpaceIDFromMap，会把外部成员视角下的
+	// GroupResp.SpaceID 从群表权威值改写成成员的 source Space。
+	// fillConversationSpaceIDs 直接用 groupMap[groupNo].SpaceID 时拿到的就是被
+	// 改写后的 effective 值 → SyncUserConversationResp.SpaceID 与
+	// MySourceSpaceID 同值。响应契约要求 SpaceID 是群表的权威归属 Space，
+	// 必须另起一次 GetGroups(groupNos) 取原始 SpaceID 构建 rawGroupSpaceMap。
+	// GetGroups 返回的 InfoResp.SpaceID 直接来自群表行，不做 effective rewrite。
+	rawGroupSpaceMap := make(map[string]string, len(groupNos))
+	if len(groupNos) > 0 {
+		rawGroups, rawErr := co.groupService.GetGroups(groupNos)
+		if rawErr != nil {
+			// 非致命：缺失 SpaceID 回填会让客户端走"未知 Space"分支，
+			// 与历史 v1 fail-open 行为一致。FilterConversationsBySpace 走它自己
+			// 的 GetGroupSpaceMap 路径，互不影响。
+			co.Warn("查询群原始 SpaceID 失败，跳过 conversation-level SpaceID 回填",
+				zap.Error(rawErr))
+		} else {
+			for _, g := range rawGroups {
+				if g == nil {
+					continue
+				}
+				rawGroupSpaceMap[g.GroupNo] = g.SpaceID
 			}
 		}
 	}
@@ -553,7 +605,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 		channelOffsetModels, err := co.channelOffsetDB.queryWithUIDAndChannelIDs(loginUID, channelIDs)
 		if err != nil {
 			co.Error("查询用户频道偏移量失败！", zap.Error(err))
-			c.ResponseError(errors.New("查询用户频道偏移量失败！"))
+			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 			return
 		}
 		if len(channelOffsetModels) > 0 {
@@ -567,7 +619,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	channelSettings, err := co.channelService.GetChannelSettings(channelIDs)
 	if err != nil {
 		co.Error("查询频道设置失败！", zap.Error(err))
-		c.ResponseError(errors.New("查询频道设置失败！"))
+		httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 		return
 	}
 	channelSettingMessageOffsetMap := make(map[string]uint32)
@@ -682,12 +734,55 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	// 避免前端 fromHomeSpaceId / fromIsExternal getter 在增量同步路径读到空值。
 	co.enrichConversationExternalMarkers(syncUserConversationResps)
 
+	// GH#153: 把 resolved space_id 回填到 SyncUserConversationResp，
+	// 同时为外部群成员填充 my_source_space_id。
+	// 群聊的 channel_id 是裸 group_no，newSyncUserConversationResp 走
+	// ParseChannelID 拿不到 SpaceID；客户端 WebSocket 收到群消息时若
+	// 没有 conversation-level 的 SpaceID 兜底，就会 fail-open 把消息
+	// 渲染到错误 Space tab。这里用 handler 早已批量查好的 rawGroupSpaceMap +
+	// externalGroupMap 一次性补齐，避免客户端再发请求。
+	//
+	// Round-3 修复 (GH octo-server#154 Round-2)：
+	//   - SpaceID 走 rawGroupSpaceMap（GetGroups 原始值），不用 groupMap
+	//     （GetGroupDetails 已被 SetEffectiveSpaceID 改写）→ Finding 1。
+	//   - 把 defaultSpaceID 传入用于 MySourceSpaceID 空值兜底（旧外部成员行
+	//     source_space_id=""），与 decideConvKeepInSpace 同口径 → Finding 2。
+	externalGroupMap, externalErr := co.groupDB.QueryExternalGroupNosForUser(loginUID)
+	if externalErr != nil {
+		// Fail-closed (PR #159 review by Jerry-Xin)：
+		// space_memberships 是 authoritative 契约（客户端按 wipe-replace 处理），
+		// 这个 map 也是 buildSpaceMemberships 的输入。如果 fail-open 退化成空 map，
+		// 外部群条目会被序列化进 space_memberships 但缺失 my_source_space_id，
+		// 客户端无法察觉、重建 my-row 缓存时丢失外部群 source Space 链路 →
+		// SpaceFilter 对外部群再次 fail-open，与本 PR 要关闭的泄漏类同根。
+		// 与同 handler 下 GetGroupsWithMemberUID 失败的处理对称（一次 DB 抖动 →
+		// 500 → 客户端重试），保证 200 响应里的 space_memberships 行级完整。
+		co.Error("查询外部群失败！", zap.Error(externalErr))
+		httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
+		return
+	}
+	// defaultSpaceID 是外部群 source_space_id="" 的空值兜底（legacy 外部成员行）。
+	// 走 error-returning 变体并 fail-closed：与 QueryExternalGroupNosForUser /
+	// GetGroupsWithMemberUID 的失败处理对称，保证 200 响应里 space_memberships
+	// 的每个外部群行都带可靠的 my_source_space_id。
+	// 旧版 GetUserDefaultSpaceID 吞掉 DB error 返回 ""，会让 resolveMySourceSpaceID
+	// 在 legacy 外部行上回退到 ""，触发 omitempty 丢字段，客户端 wipe-replace 后
+	// 重建的 my-row 缺少 source Space 链路 → SpaceFilter 对外部群再次 fail-open
+	// （PR #159 review by Jerry-Xin / yujiawei P1）。
+	defaultSpaceID, defaultSpaceErr := space.GetUserDefaultSpaceIDE(co.ctx, loginUID)
+	if defaultSpaceErr != nil {
+		co.Error("查询用户默认 Space 失败！", zap.Error(defaultSpaceErr))
+		httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
+		return
+	}
+	fillConversationSpaceIDs(syncUserConversationResps, rawGroupSpaceMap, externalGroupMap, defaultSpaceID)
+
 	// 查询通话中的频道
 	// 加入的群聊
 	joinedGroups, err := co.groupService.GetGroupsWithMemberUID(loginUID)
 	if err != nil {
 		co.Error("查询加入的群聊错误", zap.Error(err))
-		c.ResponseError(errors.New("查询加入的群聊错误"))
+		httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 		return
 	}
 	callChannelIDs := make([]string, 0)
@@ -696,11 +791,12 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 			callChannelIDs = append(callChannelIDs, g.GroupNo)
 		}
 	}
+	spaceMemberships := buildSpaceMemberships(joinedGroups, externalGroupMap, defaultSpaceID)
 	// 好友
 	friends, err := co.userService.GetFriends(loginUID)
 	if err != nil {
 		co.Error("查询好友错误", zap.Error(err))
-		c.ResponseError(errors.New("查询好友错误"))
+		httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 		return
 	}
 	if len(friends) > 0 {
@@ -745,11 +841,12 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	}
 
 	c.Response(SyncUserConversationRespWrap{
-		Conversations: syncUserConversationResps,
-		UID:           loginUID,
-		Users:         users,
-		Groups:        groups,
-		ChannelStates: channelStates,
+		Conversations:    syncUserConversationResps,
+		UID:              loginUID,
+		Users:            users,
+		Groups:           groups,
+		ChannelStates:    channelStates,
+		SpaceMemberships: spaceMemberships,
 	})
 }
 
@@ -776,7 +873,7 @@ func (co *Conversation) syncUserConversationAck(c *wkhttp.Context) {
 	}
 	if err := c.BindJSON(&req); err != nil {
 		co.Error("数据格式有误！", zap.Error(err))
-		c.ResponseError(errors.New("数据格式有误！"))
+		respondMessageRequestInvalid(c, "")
 		return
 	}
 	if co.ctx.GetConfig().MessageSaveAcrossDevice {
@@ -819,7 +916,7 @@ func (co *Conversation) syncUserConversationAck(c *wkhttp.Context) {
 	if len(userLastOffsetModels) > 0 {
 		err := co.insertUserLastOffsets(userLastOffsetModels)
 		if err != nil {
-			c.ResponseError(errors.New("插入设备偏移数据失败！"))
+			httperr.ResponseErrorL(c, errcode.ErrMessageStoreFailed, nil, nil)
 			return
 		}
 	}
@@ -831,7 +928,7 @@ func (co *Conversation) syncUserConversationAck(c *wkhttp.Context) {
 		err := co.setUserConversationMaxVersion(loginUID, version)
 		if err != nil {
 			co.Error("设置设备最近会话最大版本号失败！", zap.Error(err))
-			c.ResponseError(errors.New("设置设备最近会话最大版本号失败！"))
+			httperr.ResponseErrorL(c, errcode.ErrMessageStoreFailed, nil, nil)
 			return
 		}
 	}
@@ -928,7 +1025,7 @@ func (co *Conversation) getConversations(c *wkhttp.Context) {
 	resps, err := co.ctx.IMGetConversations(loginUID)
 	if err != nil {
 		co.Error("获取最近会话失败！", zap.Error(err))
-		c.ResponseError(errors.New("获取最近会话失败！"))
+		httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 		return
 	}
 	conversationResps := make([]conversationResp, 0, len(resps))
@@ -950,7 +1047,7 @@ func (co *Conversation) getConversations(c *wkhttp.Context) {
 		channelSettings, err := co.channelService.GetChannelSettings(channelIds)
 		if err != nil {
 			co.Error("查询频道设置错误！", zap.Error(err))
-			c.ResponseError(errors.New("查询频道设置错误！"))
+			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 			return
 		}
 		channelSettingMessageOffsetMap := make(map[string]uint32)
@@ -978,14 +1075,14 @@ func (co *Conversation) getConversations(c *wkhttp.Context) {
 		}
 		userDetails, err := co.userDB.QueryDetailByUIDs(userUIDs, loginUID)
 		if err != nil {
-			co.Error("查询用户详情失败！")
-			c.ResponseError(errors.New("查询用户详情失败！"))
+			co.Error("查询用户详情失败！", zap.Error(err))
+			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 			return
 		}
 		groupDetails, err := co.groupDB.QueryDetailWithGroupNos(groupNos, loginUID)
 		if err != nil {
-			co.Error("查询用户详情失败！")
-			c.ResponseError(errors.New("查询用户详情失败！"))
+			co.Error("查询用户详情失败！", zap.Error(err))
+			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 			return
 		}
 
@@ -1019,7 +1116,7 @@ func (co *Conversation) clearConversationUnread(c *wkhttp.Context) {
 	var req clearConversationUnreadReq
 	if err := c.BindJSON(&req); err != nil {
 		co.Error("数据格式有误！", zap.Error(err))
-		c.ResponseError(common.ErrData)
+		respondMessageRequestInvalid(c, "")
 		return
 	}
 	// if co.ctx.GetConfig().IsVisitorChannel(req.ChannelID) {
@@ -1032,7 +1129,7 @@ func (co *Conversation) clearConversationUnread(c *wkhttp.Context) {
 		groupInfo, err := co.groupService.GetGroupWithGroupNo(req.ChannelID)
 		if err != nil {
 			co.Error("查询群聊信息失败！", zap.Error(err))
-			c.ResponseError(errors.New("查询群聊信息失败！"))
+			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 			return
 		}
 		if groupInfo != nil && groupInfo.GroupType == group.GroupTypeSuper {
@@ -1048,7 +1145,8 @@ func (co *Conversation) clearConversationUnread(c *wkhttp.Context) {
 		MessageSeq:  messageSeq,
 	})
 	if err != nil {
-		c.ResponseError(err)
+		co.Error("清空会话红点失败", zap.Error(err))
+		httperr.ResponseErrorL(c, errcode.ErrMessageNotifyFailed, nil, nil)
 		return
 	}
 	// 发送清空红点的命令
@@ -1065,7 +1163,7 @@ func (co *Conversation) clearConversationUnread(c *wkhttp.Context) {
 	})
 	if err != nil {
 		co.Error("命令发送失败！", zap.String("cmd", common.CMDConversationUnreadClear))
-		c.ResponseError(errors.New("命令发送失败！"))
+		httperr.ResponseErrorL(c, errcode.ErrMessageNotifyFailed, nil, nil)
 		return
 	}
 	c.ResponseOK()
@@ -1075,11 +1173,22 @@ func (co *Conversation) clearConversationUnread(c *wkhttp.Context) {
 
 // SyncUserConversationRespWrap SyncUserConversationRespWrap
 type SyncUserConversationRespWrap struct {
-	UID           string                      `json:"uid"` // 请求者uid
-	Conversations []*SyncUserConversationResp `json:"conversations"`
-	Users         []*user.UserDetailResp      `json:"users"`          // 用户详情
-	Groups        []*group.GroupResp          `json:"groups"`         // 群
-	ChannelStates []*ChannelState             `json:"channel_status"` // 频道状态
+	UID              string                      `json:"uid"` // 请求者uid
+	Conversations    []*SyncUserConversationResp `json:"conversations"`
+	Users            []*user.UserDetailResp      `json:"users"`             // 用户详情
+	Groups           []*group.GroupResp          `json:"groups"`            // 群
+	ChannelStates    []*ChannelState             `json:"channel_status"`    // 频道状态
+	SpaceMemberships []SpaceMembership           `json:"space_memberships"` // 用户加入的全部群的 Space 归属
+}
+
+// SpaceMembership 是 /v1/conversation/sync 的 Space sideband 数据。
+// conversations[] 仍按增量返回；该字段每次返回用户已加入的全部群，
+// 供客户端刷新 group/my-row 缓存，避免增量批次缺少某个群时 SpaceFilter
+// 因缓存 miss 走 fail-open。
+type SpaceMembership struct {
+	ChannelID       string `json:"channel_id"`                   // 群 channel_id / group_no
+	SpaceID         string `json:"space_id"`                     // 群表权威 Space ID
+	MySourceSpaceID string `json:"my_source_space_id,omitempty"` // 外部群成员的 source Space ID
 }
 
 type clearConversationUnreadReq struct {
@@ -1247,9 +1356,16 @@ func (u userResp) from(user *user.Detail, avatarPath string) userResp {
 
 // SyncUserConversationResp 最近会话离线返回
 type SyncUserConversationResp struct {
-	ChannelID        string                 `json:"channel_id"`                   // 频道ID
-	ChannelType      uint8                  `json:"channel_type"`                 // 频道类型
-	SpaceID          string                 `json:"space_id,omitempty"`           // Space ID
+	ChannelID   string `json:"channel_id"`         // 频道ID
+	ChannelType uint8  `json:"channel_type"`       // 频道类型
+	SpaceID     string `json:"space_id,omitempty"` // Space ID
+	// MySourceSpaceID 仅在 GROUP / COMMUNITY_TOPIC 频道且当前用户以外部成员
+	// 身份加入时非空。值取自 group_member.source_space_id，对应"我从哪个
+	// Space 加入了这个外部群"。客户端 WebSocket 收到该群实时消息时，可据此
+	// 把消息归属到当前 user 的 source Space —— 与服务端
+	// FilterConversationsBySpace 对外部群的可见性判定保持同口径，避免
+	// 三端 fail-open 把跨 Space 消息渲染到错误的 Space tab (GH#153)。
+	MySourceSpaceID  string                 `json:"my_source_space_id,omitempty"` // 外部群成员的 source Space ID
 	Thread           *threadMetaResp        `json:"thread,omitempty"`             // 子区元数据（仅 thread 频道）
 	CategoryID       *string                `json:"category_id,omitempty"`        // 用户自定义分类ID（仅群组）
 	CategorySort     int                    `json:"category_sort,omitempty"`      // 分类内排序（仅群组）
@@ -1364,6 +1480,115 @@ func newSyncUserConversationResp(resp *config.SyncUserConversationResp, extra *c
 type threadMetaResp struct {
 	SourceMessageID *int64 `json:"source_message_id,omitempty"` // 源消息ID
 	MessageCount    int64  `json:"message_count"`               // 消息数
+}
+
+// fillConversationSpaceIDs 把 resolved SpaceID + MySourceSpaceID 回填到 group /
+// thread 频道的 SyncUserConversationResp。
+//
+// 背景 (GH octo-server#153)：
+//   - newSyncUserConversationResp 通过 spacepkg.ParseChannelID(channelID) 推导
+//     SpaceID。但群聊和子区的 channel_id 是裸 group_no（或 "{groupNo}____{shortID}"），
+//     ParseChannelID 返回空串，导致客户端在 conversation/sync 响应里拿不到
+//     conversation-level 的 Space 归属。
+//   - 三端客户端收到 WebSocket 实时消息时，会 fallback 到 conversation-level
+//     SpaceID 决定渲染到哪个 Space tab。空字符串触发 fail-open，跨 Space 消息
+//     被错误渲染到当前 tab，构成 P1 信息泄漏（issue #153）。
+//
+// 回填规则：
+//   - GROUP: SpaceID = rawGroupSpaceMap[channelID]（group 表权威值，未经
+//     SetEffectiveSpaceID 改写）。用户作为外部成员加入时，再读 externalGroupMap
+//     给 MySourceSpaceID 赋值。
+//   - COMMUNITY_TOPIC: SpaceID = parent group 的 SpaceID（与 FilterRawConversationsBySpace
+//     thread 分支的 fail-closed 同口径）。MySourceSpaceID 同样从 parent groupNo 取。
+//   - PERSON: 不动 —— 私聊的 Space 归属在消息级 payload.space_id 上，
+//     conversation 级别保持空，避免误把 DM 锁定到某个 Space。
+//
+// Round-3 修复 (GH octo-server#154 Round-2 Finding 1)：
+//   - 之前传 groupMap (来自 GetGroupDetails) 的版本会被 SetEffectiveSpaceIDFromMap
+//     污染：外部成员视角下 group.SpaceID 已被改写成 source Space，导致
+//     SyncUserConversationResp.SpaceID 与 MySourceSpaceID 同值。响应契约要求
+//     SpaceID 是群表权威值，handler 必须额外用 GetGroups 拿原始 space_id 构建
+//     rawGroupSpaceMap 传入。
+//
+// Round-3 修复 (GH octo-server#154 Round-2 Finding 2)：
+//   - externalGroupMap[groupNo] 可能存在但值为空串（旧外部成员行
+//     source_space_id=""）。空串 + omitempty 会让客户端拿不到 my_source_space_id，
+//     无法判断外部群在哪个 Space 下可见。空值兜底到 defaultSpaceID，与
+//     decideConvKeepInSpace 同口径。
+//
+// rawGroupSpaceMap / externalGroupMap 都是 handler 已经查过的现成数据，本函数
+// 纯内存操作，不发任何 DB 请求。map 缺失（如 thread 父群本批未活跃）时跳过该条
+// —— 客户端拿到空 SpaceID 会自己降级，比写错的值更安全。
+func fillConversationSpaceIDs(
+	resps []*SyncUserConversationResp,
+	rawGroupSpaceMap map[string]string,
+	externalGroupMap map[string]string,
+	defaultSpaceID string,
+) {
+	for _, r := range resps {
+		if r == nil {
+			continue
+		}
+		switch r.ChannelType {
+		case common.ChannelTypeGroup.Uint8():
+			if sid, ok := rawGroupSpaceMap[r.ChannelID]; ok {
+				if r.SpaceID == "" {
+					r.SpaceID = sid
+				}
+			}
+			if src, ok := externalGroupMap[r.ChannelID]; ok {
+				r.MySourceSpaceID = resolveMySourceSpaceID(src, defaultSpaceID)
+			}
+		case common.ChannelTypeCommunityTopic.Uint8():
+			parentNo, _, perr := thread.ParseChannelID(r.ChannelID)
+			if perr != nil {
+				continue
+			}
+			if sid, ok := rawGroupSpaceMap[parentNo]; ok {
+				if r.SpaceID == "" {
+					r.SpaceID = sid
+				}
+			}
+			if src, ok := externalGroupMap[parentNo]; ok {
+				r.MySourceSpaceID = resolveMySourceSpaceID(src, defaultSpaceID)
+			}
+		}
+	}
+}
+
+func buildSpaceMemberships(
+	joinedGroups []*group.InfoResp,
+	externalGroupMap map[string]string,
+	defaultSpaceID string,
+) []SpaceMembership {
+	memberships := make([]SpaceMembership, 0, len(joinedGroups))
+	for _, g := range joinedGroups {
+		if g == nil || g.GroupNo == "" {
+			continue
+		}
+		m := SpaceMembership{
+			ChannelID: g.GroupNo,
+			SpaceID:   g.SpaceID,
+		}
+		if src, ok := externalGroupMap[g.GroupNo]; ok {
+			m.MySourceSpaceID = resolveMySourceSpaceID(src, defaultSpaceID)
+		}
+		memberships = append(memberships, m)
+	}
+	return memberships
+}
+
+// resolveMySourceSpaceID 把 externalGroupMap 的 source_space_id 解析为客户端实际
+// 可见的 Space：
+//   - 非空：直接返回。
+//   - 空串（旧外部成员行 source_space_id=""）：兜底到 defaultSpaceID
+//     （decideConvKeepInSpace 同口径，space_filter.go:171/234）。defaultSpaceID
+//     也是空时回退到空串——保持 omitempty 行为，与历史一致。
+func resolveMySourceSpaceID(sourceSpaceID, defaultSpaceID string) string {
+	if sourceSpaceID != "" {
+		return sourceSpaceID
+	}
+	return defaultSpaceID
 }
 
 // fillThreadMeta 批量填充子区会话的元数据

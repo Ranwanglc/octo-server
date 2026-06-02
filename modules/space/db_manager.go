@@ -28,6 +28,25 @@ func buildLikePattern(keyword string) string {
 	return "%" + escapeLike(keyword) + "%"
 }
 
+// memberSearchColumns 管理端成员模糊搜索覆盖的列。
+// email/username 对 SSO / 邮箱登录用户尤为关键：这类用户 username 可能为空，
+// 只能靠 email 定位（与 user 模块 queryUserListWithPageAndKeyword 的取向一致）。
+// u.* 来自 LEFT JOIN 的 user 表，sm.uid 来自 space_member 自身。
+var memberSearchColumns = []string{"u.name", "u.username", "u.email", "u.phone", "sm.uid"}
+
+// memberSearchWhere 按 keyword 组装跨列 OR LIKE 条件及其占位参数。
+// list / count 两处共用，避免搜索范围漂移导致"列表与总数样本不一致"的分页错位。
+func memberSearchWhere(keyword string) (string, []interface{}) {
+	like := buildLikePattern(keyword)
+	clauses := make([]string, len(memberSearchColumns))
+	args := make([]interface{}, len(memberSearchColumns))
+	for i, col := range memberSearchColumns {
+		clauses[i] = col + " LIKE ?" + likeEscapeClause
+		args[i] = like
+	}
+	return strings.Join(clauses, " OR "), args
+}
+
 // placeholders 生成 "?, ?, ?" 形式 placeholder 字符串，n 必须大于 0。
 func placeholders(n int) string {
 	return strings.TrimRight(strings.Repeat("?,", n), ",")
@@ -173,8 +192,8 @@ func (d *managerDB) queryMembersAdmin(spaceId, keyword string, pageSize, pageInd
 		LeftJoin(dbr.I("user").As("u"), "u.uid=sm.uid").
 		Where("sm.space_id=?", spaceId)
 	if keyword != "" {
-		like := buildLikePattern(keyword)
-		builder = builder.Where("u.name LIKE ?"+likeEscapeClause+" OR sm.uid LIKE ?"+likeEscapeClause, like, like)
+		clause, args := memberSearchWhere(keyword)
+		builder = builder.Where(clause, args...)
 	}
 	var list []*managerMemberModel
 	_, err := builder.
@@ -192,8 +211,8 @@ func (d *managerDB) countMembersAdmin(spaceId, keyword string) (int64, error) {
 		LeftJoin(dbr.I("user").As("u"), "u.uid=sm.uid").
 		Where("sm.space_id=?", spaceId)
 	if keyword != "" {
-		like := buildLikePattern(keyword)
-		builder = builder.Where("u.name LIKE ?"+likeEscapeClause+" OR sm.uid LIKE ?"+likeEscapeClause, like, like)
+		clause, args := memberSearchWhere(keyword)
+		builder = builder.Where(clause, args...)
 	}
 	var count int64
 	_, err := builder.Load(&count)
@@ -207,6 +226,122 @@ func (d *managerDB) updateSpaceStatus(spaceId string, status int) error {
 		Set("updated_at", time.Now()).
 		Where("space_id=?", spaceId).Exec()
 	return err
+}
+
+// ErrSpaceNotFound 空间不存在（事务内 SELECT FOR UPDATE 未命中）
+var ErrSpaceNotFound = errors.New("space not found")
+
+// ErrSpaceDisbandedForUpdate 事务内发现空间已解散，禁止更新基础信息
+var ErrSpaceDisbandedForUpdate = errors.New("space already disbanded")
+
+// ErrSpaceBannedForUpdate 事务内发现空间已封禁，且调用方未授权对封禁空间执行更新。
+// 用户端 PUT 应映射为 4xx；管理端调用 updateSpaceProfile 时 allowBanned=true，
+// 该 sentinel 不会被触发。
+var ErrSpaceBannedForUpdate = errors.New("space is banned and caller disallowed banned updates")
+
+// updateSpaceProfile 管理端部分更新空间基础字段。
+//
+// 用 SELECT ... FOR UPDATE 在事务内锁定 space 行并原子校验存在性 + 非 Disbanded 状态，
+// 关闭 handler 层 guard 与 UPDATE 之间的 TOCTOU 窗口：
+// 即便 forceDisbandSpace 在 handler 通过 guard 后并发执行，它会阻塞到本事务结束，
+// 或本事务的 SELECT 看到 status=Disbanded 并直接返回 ErrSpaceDisbandedForUpdate。
+//
+// 存在性 / 已解散用 sentinel error 表达，**不依赖 RowsAffected**：
+// MySQL 默认 affected_rows 是「真正变更的行数」，对于"新值与旧值完全相同"的幂等请求
+// 会返回 0，与"行不存在"无法区分。强制走事务 + 显式校验消除歧义。
+//
+// 返回 tx 内锁定时刻读到的 pre-update 快照，供调用方做"旧值→新值"的审计日志；
+// 由于读取与 UPDATE 在同一事务内串行化，并发更新场景下的 from 值不会 stale。
+//
+// nil 参数不变更；调用方需保证至少有一个非 nil（否则 no-op，但仍返回快照）。
+//
+// presetGroupIds 与其他字段一致用 *string 表达"是否变更"，传入字符串作为整体写入
+// preset_group_ids 列（运行期解析见 api.go 的 joinPresetGroups）；
+// 该参数仅由用户侧 PUT /v1/space/:space_id 使用，管理端目前传 nil。
+//
+// 状态守卫契约（事务内强制，关闭 handler 层 guard 与 UPDATE 之间的 TOCTOU 窗口）：
+//   - SpaceStatusDisbanded 永远拒绝（ErrSpaceDisbandedForUpdate）
+//   - SpaceStatusBanned 由 allowBanned 控制：
+//       allowBanned=true（管理端）  → 放行，允许对封禁空间执行修复性更新
+//       allowBanned=false（用户端）→ 拒绝（ErrSpaceBannedForUpdate）
+//
+// 用户端 handler 必须传 allowBanned=false：仅在入口用 checkSpaceActive 挡 banned 不够，
+// 入口检查与事务之间存在 race 窗口（manager 并发 ban），事务侧必须再挡一次才闭环。
+func (d *managerDB) updateSpaceProfile(
+	spaceId string,
+	name *string,
+	description *string,
+	logo *string,
+	joinMode *int,
+	maxUsers *int,
+	presetGroupIds *string,
+	allowBanned bool,
+) (*SpaceModel, error) {
+	tx, err := d.session.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.RollbackUnlessCommitted()
+
+	// SELECT ... FOR UPDATE 锁定整行并取得稳定快照（供审计 from 字段使用）。
+	var before SpaceModel
+	found, err := tx.SelectBySql(
+		"SELECT * FROM space WHERE space_id=? FOR UPDATE",
+		spaceId,
+	).Load(&before)
+	if err != nil {
+		return nil, fmt.Errorf("lock space row: %w", err)
+	}
+	if found == 0 {
+		return nil, ErrSpaceNotFound
+	}
+	if before.Status == SpaceStatusDisbanded {
+		return nil, ErrSpaceDisbandedForUpdate
+	}
+	if !allowBanned && before.Status == SpaceStatusBanned {
+		return nil, ErrSpaceBannedForUpdate
+	}
+
+	builder := tx.Update("space")
+	changed := false
+	if name != nil {
+		builder = builder.Set("name", *name)
+		changed = true
+	}
+	if description != nil {
+		builder = builder.Set("description", *description)
+		changed = true
+	}
+	if logo != nil {
+		builder = builder.Set("logo", *logo)
+		changed = true
+	}
+	if joinMode != nil {
+		builder = builder.Set("join_mode", *joinMode)
+		changed = true
+	}
+	if maxUsers != nil {
+		builder = builder.Set("max_users", *maxUsers)
+		changed = true
+	}
+	if presetGroupIds != nil {
+		builder = builder.Set("preset_group_ids", *presetGroupIds)
+		changed = true
+	}
+	if !changed {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return &before, nil
+	}
+	builder = builder.Set("updated_at", time.Now())
+	if _, err := builder.Where("space_id=?", spaceId).Exec(); err != nil {
+		return nil, fmt.Errorf("update space profile: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &before, nil
 }
 
 // upsertMembers 批量添加/重新激活成员（单一事务，部分失败则全部回滚）

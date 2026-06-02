@@ -2,15 +2,19 @@ package bot_api
 
 import (
 	"fmt"
+	"os"
+	"strconv"
+	"time"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/file"
-	"github.com/Mininglamp-OSS/octo-server/modules/group"
-	"github.com/Mininglamp-OSS/octo-server/modules/thread"
-	"github.com/Mininglamp-OSS/octo-server/modules/user"
-	"github.com/Mininglamp-OSS/octo-server/modules/voice"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/modules/file"
+	"github.com/Mininglamp-OSS/octo-server/modules/group"
+	"github.com/Mininglamp-OSS/octo-server/modules/robot"
+	"github.com/Mininglamp-OSS/octo-server/modules/thread"
+	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	"github.com/Mininglamp-OSS/octo-server/modules/voice_adapter"
 )
 
 const (
@@ -25,16 +29,28 @@ const (
 // BotAPI is the public Bot API gateway module.
 // It handles all bot-facing endpoints (/v1/bot/*) with unified auth.
 type BotAPI struct {
-	ctx           *config.Context
-	db            *botAPIDB
-	userService   user.IService
-	fileService   file.IService
-	groupService  group.IService
-	userDB        *user.DB
-	threadService thread.IService
-	voiceDB       *voice.VoiceDB
-	voiceSvc      *voice.VoiceService
-	voiceCfg      *voice.VoiceConfig
+	ctx                   *config.Context
+	db                    *botAPIDB
+	userService           user.IService
+	fileService           file.IService
+	groupService          group.IService
+	userDB                *user.DB
+	threadService         thread.IService
+	// robotService gives the OBO fan-out path a way to enqueue synthetic
+	// events directly into a grantee bot's /v1/bot/events queue. The
+	// webhook layer drops NoPersist=1 messages before NotifyMessagesListeners
+	// (modules/webhook/api.go handleMessageNotify), and the OBO fan-out
+	// copy intentionally sets NoPersist=1 to keep the copy out of chat
+	// history. Without a direct enqueue, the fan-out copy reaches
+	// WuKongIM but never reaches the bot — see YUJ-1424 / PR#82
+	// Jerry-Xin review blocker. fanoutForMessage calls robotService
+	// AFTER dispatchFanout succeeds so we only enqueue events that
+	// WuKongIM actually accepted.
+	robotService          robot.IService
+	speechClient          *voice_adapter.SpeechClient
+	maxVoiceContextLength int
+	maxBodySize           int64
+	maxFileSize           int64
 	// spaceQuerier overrides ba.db for resolveBotActiveSpaceID (test injection).
 	// nil in production; tests set it to stub the DB call deterministically.
 	spaceQuerier botSpaceQuerier
@@ -42,6 +58,76 @@ type BotAPI struct {
 	// final MsgSendReq (including server-authoritative payload.space_id).
 	// nil in production; the real path goes through ba.ctx.SendMessageWithResult.
 	dispatchOverride func(*config.MsgSendReq) (*config.MsgSendResp, error)
+	// oboStoreOverride lets unit tests inject an in-memory oboStore so
+	// checkOBO / REST handlers / fan-out can run without standing up MySQL.
+	// nil in production; the real path uses ba.db (which satisfies oboStore).
+	// See modules/bot_api/obo_db.go for the interface contract.
+	oboStoreOverride oboStore
+	// oboFanoutDispatch lets unit tests intercept the per-grantee copy that
+	// the fan-out listener would otherwise hand to ba.ctx.SendMessage. The
+	// production path delegates to ba.dispatchMsgSendReq so the existing
+	// dispatchOverride hook keeps capturing sends in handler tests.
+	// nil in production.
+	oboFanoutDispatch func(*config.MsgSendReq) error
+	// oboFanoutBotEnqueue lets unit tests intercept the bot-event-queue
+	// enqueue that fanoutForMessage performs after a successful dispatch.
+	// Without this seam, fan-out tests would need a live Redis to assert
+	// the synthetic event reaches /v1/bot/events. The production path
+	// goes through ba.robotService.EnqueueBotEvent (see YUJ-1424 / PR#82
+	// Jerry-Xin blocker for why direct enqueue is necessary at all).
+	// nil in production → robotService path runs.
+	oboFanoutBotEnqueue func(robotID string, message *config.MessageResp) error
+	// oboChannelAccessOverride lets unit tests stub the grantor channel-
+	// access check used by oboCreateScope (PR#82 review P0 — channel-wiretap
+	// fix). Production path runs grantorCanReadChannel, which queries
+	// group_member + userService.IsFriend; tests that build BotAPI without
+	// a live DB session set this hook to deterministically accept or reject
+	// (uid, channel_id, channel_type) without touching MySQL.
+	// nil in production → the real DB-backed check runs.
+	oboChannelAccessOverride func(uid, channelID string, channelType uint8) (bool, error)
+	// oboGroupMemberOverride — PR#121 R8 (YUJ-1673). Test seam for
+	// `userIsGroupMember`, the (uid, group_no) → bool lookup used by
+	// Gate 4 (bot already in group) and by `grantorCanReadChannel`
+	// for ChannelTypeGroup / ChannelTypeCommunityTopic. Production
+	// path runs the `group_member` SELECT against MySQL; unit tests
+	// that build BotAPI without a live DB session set this hook to
+	// deterministically answer membership questions for the explicit-
+	// scope fan-out paths that previously could not be exercised in
+	// pure-Go tests (only the implicit-scope SQL-feeder filter was
+	// reachable). nil in production → the real DB-backed check runs.
+	oboGroupMemberOverride func(uid, groupNo string) (bool, error)
+	// oboDisplayNameLookup — YUJ-1465 / Mininglamp-OSS/octo-server#108
+	// (OBO v2). Test seam for resolving a uid → display name when the
+	// fan-out path builds the synthetic `obo_system_hint` string. Returns
+	// "" for unknown uids so the hint falls back to the bare uid. Empty
+	// override → the production path queries the `user` table.
+	oboDisplayNameLookup func(uid string) string
+	// oboGroupNameLookup — YUJ-1465 / Mininglamp-OSS/octo-server#108
+	// (OBO v2). Test seam for resolving a (group_no | thread channel id)
+	// to a human group name. The fan-out path only consults this for
+	// group / community-topic origin channels; DMs use the peer name
+	// instead. Returns "" for unknown channels so the hint falls back
+	// to the bare channel id. Empty override → the production path
+	// queries the `group` table (with parent-group resolution for
+	// community topics).
+	oboGroupNameLookup func(channelID string, channelType uint8) string
+	// typingCMDDispatch — YUJ-1465 / Mininglamp-OSS/octo-server#108.
+	// Test seam for the typing handler's ctx.SendCMD call. Lets unit
+	// tests capture the dispatched CMD (including the resolved
+	// `from_uid`) without standing up a live WuKongIM. Production
+	// path (nil override) goes through ba.ctx.SendCMD verbatim, so
+	// behaviour outside of tests is unchanged.
+	typingCMDDispatch func(req config.MsgCMDReq) error
+	// friendCheckOverride lets unit tests stub userService.IsFriend for the
+	// friend-gate decision in checkSendPermission / syncMessages, and for
+	// the OBO friend-gate bypass (see obo_friend_gate.go). Production path
+	// uses ba.userService.IsFriend; tests that build BotAPI without a live
+	// user service set this hook to deterministically accept or reject
+	// (uid, toUID) without touching MySQL. PR#82 R6 P0 — managed-persona
+	// OBO friend-gate bypass needs to be testable end-to-end without the
+	// full user-service stack.
+	// nil in production → the real userService.IsFriend runs.
+	friendCheckOverride func(uid, toUID string) (bool, error)
 	log.Log
 }
 
@@ -56,20 +142,60 @@ func (ba *BotAPI) dispatchMsgSendReq(req *config.MsgSendReq) (*config.MsgSendRes
 
 // NewBotAPI creates the Bot API gateway module.
 func NewBotAPI(ctx *config.Context) *BotAPI {
-	voiceCfg := voice.NewVoiceConfigFromEnv()
-	return &BotAPI{
-		ctx:           ctx,
-		db:            newBotAPIDB(ctx),
-		userService:   user.NewService(ctx),
-		fileService:   file.NewService(ctx),
-		groupService:  group.NewService(ctx),
-		userDB:        user.NewDB(ctx),
-		threadService: thread.NewService(ctx),
-		voiceDB:       voice.NewVoiceDB(ctx),
-		voiceSvc:      voice.NewVoiceService(voiceCfg),
-		voiceCfg:      voiceCfg,
-		Log:           log.NewTLog("BotAPI"),
+	speechURL := os.Getenv(voice_adapter.EnvSpeechServiceURL)
+	speechKey := os.Getenv(voice_adapter.EnvSpeechAPIKey)
+	timeoutSec := voice_adapter.DefaultTimeoutSec
+	if v := os.Getenv(voice_adapter.EnvSpeechTimeout); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			timeoutSec = n
+		}
 	}
+	maxCtxLen := 10000
+	if v := os.Getenv("SPEECH_MAX_CONTEXT_LENGTH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxCtxLen = n
+		}
+	} else if v := os.Getenv("VOICE_MAX_VOICE_CONTEXT_LENGTH"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxCtxLen = n
+		}
+	}
+	maxBodySize := int64(5 << 20)
+	if v := os.Getenv(voice_adapter.EnvSpeechMaxBodySize); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			maxBodySize = n
+		}
+	}
+	maxFileSize := int64(3 << 20)
+	if v := os.Getenv("SPEECH_MAX_FILE_SIZE"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			maxFileSize = n
+		}
+	}
+
+	ba := &BotAPI{
+		ctx:                   ctx,
+		db:                    newBotAPIDB(ctx),
+		userService:           user.NewService(ctx),
+		fileService:           file.NewService(ctx),
+		groupService:          group.NewService(ctx),
+		userDB:                user.NewDB(ctx),
+		threadService:         thread.NewService(ctx),
+		robotService:          robot.NewService(ctx),
+		speechClient:          voice_adapter.NewSpeechClient(speechURL, speechKey, time.Duration(timeoutSec)*time.Second),
+		maxVoiceContextLength: maxCtxLen,
+		maxBodySize:           maxBodySize,
+		maxFileSize:           maxFileSize,
+		Log:                   log.NewTLog("BotAPI"),
+	}
+	// YUJ-1166 / Mininglamp-OSS/octo-server#81 — Persona Clone fan-out.
+	// Subscribed AFTER the dependency wiring above so oboMessagesListen
+	// can safely consult ba.db (oboStore). Idempotent: the listener
+	// short-circuits when no grants exist for the message's channel.
+	if ctx != nil {
+		ctx.AddMessagesListener(ba.oboMessagesListen)
+	}
+	return ba
 }
 
 // Route registers all Bot API routes.
@@ -121,6 +247,14 @@ func (ba *BotAPI) Route(r *wkhttp.WKHttp) {
 		botAPI.GET("/voice/context", ba.botGetVoiceContext)
 		botAPI.DELETE("/voice/context", ba.botDeleteVoiceContext)
 		botAPI.POST("/voice/transcribe", ba.botTranscribe)
+		// OBO bot-token read (Mininglamp-OSS/octo-server#135 / YUJ-1762).
+		// Adapter-facing endpoint that returns the active grant whose
+		// grantee is the calling bot, including `persona_prompt`. Kept
+		// inside the bot-token group (not /v1/obo/*) because the auth
+		// posture is "the bot is asking about itself" — fundamentally
+		// different from the user-token /v1/obo/* CRUD which mutates
+		// grants on behalf of a logged-in grantor.
+		botAPI.GET("/obo-grant", ba.oboBotGetGrant)
 	}
 
 	// Bot File API (separate group for wildcard conflict avoidance)
@@ -129,6 +263,11 @@ func (ba *BotAPI) Route(r *wkhttp.WKHttp) {
 		botFileAPI.GET("/*path", ba.botProxyFile)
 		botFileAPI.POST("/upload", ba.botUploadFile)
 	}
+
+	// YUJ-1166 / Mininglamp-OSS/octo-server#81 — Persona Clone (OBO) REST.
+	// User-token endpoints under /v1/obo. Implementation in obo_api.go;
+	// the call is split out so this Route function doesn't grow further.
+	ba.registerOBORoutes(r)
 }
 
 // ==================== Helper Functions ====================
@@ -164,5 +303,3 @@ func (ba *BotAPI) clearTypingThrottle(robotID string, channelID string, channelT
 	ba.ctx.GetRedisConn().Del(typingStartKey)
 	ba.ctx.GetRedisConn().Del(typingCountKey)
 }
-
-

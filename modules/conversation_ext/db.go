@@ -33,11 +33,14 @@ type Model struct {
 	// DMCategoryID 是 group_category.category_id（VARCHAR(32) UUID），DM 与群
 	// 共用同一分类 namespace（PR #21 Round-6，原型 image-v1.png 印证）。
 	// NULL 表示未分类。
-	DMCategoryID    *string   `db:"dm_category_id"`
-	GroupUnfollowed int8      `db:"group_unfollowed"`
-	FollowSort      int       `db:"follow_sort"`
-	CreatedAt       time.Time `db:"created_at"`
-	UpdatedAt       time.Time `db:"updated_at"`
+	DMCategoryID    *string `db:"dm_category_id"`
+	GroupUnfollowed int8    `db:"group_unfollowed"`
+	FollowSort      int     `db:"follow_sort"`
+	// AutoFollowThreads = 1 表示关注 target_type=2 群后，新建子区时自动给该 (uid, space_id) 物化 thread ext 行。
+	// 仅在 target_type=2 行上有意义；其他 target_type 写 0 保持。
+	AutoFollowThreads int8      `db:"auto_follow_threads"`
+	CreatedAt         time.Time `db:"created_at"`
+	UpdatedAt         time.Time `db:"updated_at"`
 }
 
 // ConvExtFields 描述 Upsert 时可更新的字段集合。
@@ -51,6 +54,8 @@ type ConvExtFields struct {
 	ClearDMCategory bool
 	GroupUnfollowed *int8
 	FollowSort      *int
+	// AutoFollowThreads 仅在 target_type=2 行有意义，nil 表示不更新该字段。
+	AutoFollowThreads *int8
 }
 
 // SortItem 是传给 UpdateSort 的单条排序项。
@@ -149,6 +154,12 @@ func buildUpsertParts(f ConvExtFields) (extraCols []string, extraVals []interfac
 		extraVals = append(extraVals, *f.FollowSort)
 		setClauses = append(setClauses, "follow_sort = ?")
 		setArgs = append(setArgs, *f.FollowSort)
+	}
+	if f.AutoFollowThreads != nil {
+		extraCols = append(extraCols, "auto_follow_threads")
+		extraVals = append(extraVals, *f.AutoFollowThreads)
+		setClauses = append(setClauses, "auto_follow_threads = ?")
+		setArgs = append(setArgs, *f.AutoFollowThreads)
 	}
 	return extraCols, extraVals, setClauses, setArgs
 }
@@ -305,6 +316,14 @@ func (d *DB) UpdateSort(uid, spaceID string, items []SortItem, expectedVersion i
 	).Load(&locked); err != nil {
 		return fmt.Errorf("update sort: lock rows: %w", err)
 	}
+
+	// All items must already exist as ext rows.  Default-followed groups
+	// (target_type=2 with group_setting.category_id set but no ext row) must
+	// have been materialized upstream by Service.AuthorizeAndMaterializeDefaultFollowedGroups
+	// before this DB call.  Putting that materialization inside the same tx
+	// would require trusting client-supplied group IDs (issue #151 code review #1
+	// — unauthorized materialization risk), which the DB layer is not able to
+	// authorize without importing modules/group / modules/message.
 	if len(locked) != len(items) {
 		return ErrSortTargetNotFound
 	}
@@ -339,6 +358,192 @@ func (d *DB) UpdateSort(uid, spaceID string, items []SortItem, expectedVersion i
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("update sort: commit: %w", err)
+	}
+	return nil
+}
+
+// RestoreAutoFollowThreadsTx is the move-back counterpart of
+// ClearAutoFollowThreadsTx.  It sets auto_follow_threads=1 on the
+// (uid, space_id, target_type=2, group_no) ext rows in groupNos that exist,
+// silently skipping any that don't.  Idempotent; safe to call when no row
+// has been materialized (sidebar.Sync's later MaterializeDefaultFollowedGroups
+// call will create the row with auto_follow_threads=1 anyway).
+//
+// Why it exists (issue #151 review #4 by an9xyz): the lifecycle is symmetric:
+// materialize on first follow-tab read sets =1; move-out clears to 0;
+// move-back-into-a-category must restore =1, otherwise the sidebar
+// materialization branch sees the existing groupExts entry (with =0) and
+// skips its INSERT IGNORE.  The user re-categorizes the group, the group
+// re-appears in the follow tab via buildFollowItems, but OnThreadCreated's
+// fan-out filter (auto_follow_threads=1 AND group_unfollowed=0) still
+// excludes them — phantom missing fan-out.
+//
+// Like Clear, this helper does NOT touch group_unfollowed (the user's
+// explicit unfollow choice is preserved across category churn) and does NOT
+// bump user_follow_version (caller's surrounding category change already
+// bumps once).
+//
+// Callers in scope: modules/category moveGroupToCategory move-in branch
+// (req.CategoryID != ""), including first-time categorize (no row yet,
+// no-op here, sidebar materializes later) and A→B category move (row exists
+// with =1 already, no-op effectively).  The single common path simplifies
+// reasoning and removes the temptation to branch on subcases.
+func RestoreAutoFollowThreadsTx(tx *dbr.Tx, uid, spaceID string, groupNos []string) error {
+	if uid == "" || spaceID == "" || len(groupNos) == 0 {
+		return nil
+	}
+	_, err := tx.UpdateBySql(
+		"UPDATE "+table+" SET auto_follow_threads=1"+
+			" WHERE uid=? AND space_id=? AND target_type=? AND target_id IN ?",
+		uid, spaceID, targetTypeGroup, groupNos,
+	).Exec()
+	if err != nil {
+		return fmt.Errorf("restore auto_follow_threads: %w", err)
+	}
+	return nil
+}
+
+// ClearAutoFollowThreadsTx is the cleanup counterpart of
+// MaterializeDefaultFollowedGroups.  It sets auto_follow_threads=0 on the
+// (uid, space_id, target_type=2, group_no) ext rows in groupNos that exist,
+// silently skipping any that don't.  Idempotent; safe to call when no row
+// has been materialized.
+//
+// Why it exists (issue #151 review #3 by yujiawei): MaterializeDefault-
+// FollowedGroups creates ext rows with auto_follow_threads=1 for groups that
+// are followed *implicitly* via group_setting.category_id.  When that
+// implicit follow is revoked (user moves the group out of any category, or
+// the category is deleted), the row remains and selectEligibleForFanoutTx
+// keeps treating the user as eligible for new-thread fan-out — even though
+// buildFollowItems now drops the group from the follow tab because
+// CategoryID is nil.  Before this PR no row existed so the cleanup was
+// implicit ("no row = no fanout"); once we materialize, the cleanup must
+// be made explicit at every site that clears group_setting.category_id.
+//
+// What it does NOT do:
+//   - Does not delete the ext row (preserves group_unfollowed flag and any
+//     follow_sort the user explicitly chose).
+//   - Does not touch thread (target_type=5) ext rows — existing thread
+//     subscriptions remain valid; we only stop auto-following NEW threads.
+//   - Does not bump user_follow_version — the caller (category handler)
+//     already bumps once for the surrounding group_setting change; bumping
+//     again here would force two client reloads for one logical action.
+//
+// Callers in scope: modules/category moveGroupToCategory move-out branch
+// (req.CategoryID == "").  modules/category deleteCategory does NOT need
+// this helper — it already calls UnfollowGroupsTx which sets
+// group_unfollowed=1 AND auto_follow_threads=0 (stronger semantic: explicit
+// unfollow on category delete per PM contract).  Future code that mutates
+// group_setting.category_id from non-NULL to NULL without setting
+// group_unfollowed=1 MUST call this helper in the same transaction to keep
+// the read/write contracts in sync.
+func ClearAutoFollowThreadsTx(tx *dbr.Tx, uid, spaceID string, groupNos []string) error {
+	if uid == "" || spaceID == "" || len(groupNos) == 0 {
+		return nil
+	}
+	_, err := tx.UpdateBySql(
+		"UPDATE "+table+" SET auto_follow_threads=0"+
+			" WHERE uid=? AND space_id=? AND target_type=? AND target_id IN ?",
+		uid, spaceID, targetTypeGroup, groupNos,
+	).Exec()
+	if err != nil {
+		return fmt.Errorf("clear auto_follow_threads: %w", err)
+	}
+	return nil
+}
+
+// MaterializeDefaultFollowedGroups writes a fresh ext row (auto_follow_threads=1,
+// group_unfollowed=0) for each (uid, space_id, target_type=2, group_no) tuple
+// that does not yet have one.  It is the data-layer entry point used by:
+//
+//   - Sidebar.Sync: after buildFollowItems decides which groups belong in the
+//     follow tab (gated by group_setting.category_id IS NOT NULL), passes the
+//     missing ones here so OnThreadCreated fans out new threads going forward.
+//   - Service.AuthorizeAndMaterializeDefaultFollowedGroups: pre-flight step
+//     before UpdateSort, after DefaultFollowedGroupGuard has filtered the
+//     client-supplied payload down to groups the caller genuinely has in a
+//     category.
+//
+// SECURITY contract: this function does NOT authorize the (uid, group_no)
+// pair.  Callers MUST verify upstream that the user is allowed to follow
+// each group (member + visible, AND the group has category_id set, per
+// issue #151 code review #1).  Without that gate a malicious client can
+// piggy-back arbitrary group IDs and start receiving thread fan-outs for
+// groups they are not in — leaking thread metadata.
+//
+// Fail-open contract for sidebar callers: a failure here must not block the
+// sidebar response; the caller logs and continues.  Pre-flight callers
+// (UpdateSort path) propagate the error to the client.
+func (d *DB) MaterializeDefaultFollowedGroups(uid, spaceID string, groupNos []string) error {
+	if len(groupNos) == 0 {
+		return nil
+	}
+	items := make([]SortItem, len(groupNos))
+	for i, no := range groupNos {
+		items[i] = SortItem{TargetType: targetTypeGroup, TargetID: no}
+	}
+	tx, err := d.session.Begin()
+	if err != nil {
+		return fmt.Errorf("materialize default-followed groups: begin tx: %w", err)
+	}
+	defer tx.RollbackUnlessCommitted()
+	if err := materializeDefaultFollowedGroupsTx(tx, uid, spaceID, items); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("materialize default-followed groups: commit: %w", err)
+	}
+	return nil
+}
+
+// materializeDefaultFollowedGroupsTx INSERTs an ext row for each group the
+// caller listed that did not yet have one.  Default-followed groups (in a
+// category, never touched by the user) end up here on the first drag (via
+// UpdateSort) or on the first sidebar/sync (via MaterializeDefaultFollowedGroups
+// — issue #151 symptom #2 path).
+//
+// The newly-inserted row is intentionally configured so that downstream paths
+// already coded against ext-row presence start working immediately:
+//
+//   - group_unfollowed=0 — the group is followed.
+//   - auto_follow_threads=1 — selectEligibleForFanoutTx will include this user
+//     when OnThreadCreated fires for the group (closes symptom #2).
+//   - follow_sort=0 — UpdateSort's step 3 re-assigns the real sort position;
+//     the standalone read-path entry (MaterializeDefaultFollowedGroups) is fine
+//     leaving 0 because sidebar item ordering for default-followed groups
+//     already defaults to 0 in buildFollowItems.
+//
+// INSERT IGNORE rather than ON DUPLICATE KEY UPDATE: we want a strict no-op
+// when the row already exists — never overwrite a user's existing choices for
+// group_unfollowed or auto_follow_threads.  INSERT IGNORE also avoids burning
+// AUTO_INCREMENT id values on duplicate-key hits (innodb_autoinc_lock_mode=2
+// default on MySQL 8 would otherwise bump the counter even on the no-op
+// branch), matching the existing pattern in bulkInsertThreadExtForFanoutUsersTx.
+//
+// Concurrency: callers do NOT need to hold a SELECT ... FOR UPDATE on the
+// target (uid, space_id, target_type, target_id) tuple beforehand.  The unique
+// key uk(uid, space_id, target_type, target_id) plus INSERT IGNORE's
+// "skip duplicates" semantics make the operation safe under any interleaving
+// with FollowChannel / UnfollowChannel / OnThreadCreated fanout — whichever
+// committed first wins, the no-op preserves that row.
+func materializeDefaultFollowedGroupsTx(tx *dbr.Tx, uid, spaceID string, missing []SortItem) error {
+	if len(missing) == 0 {
+		return nil
+	}
+	tupleHolders := make([]string, len(missing))
+	args := make([]interface{}, 0, len(missing)*4)
+	for i, it := range missing {
+		tupleHolders[i] = "(?, ?, ?, ?, 0, 1)"
+		args = append(args, uid, spaceID, it.TargetType, it.TargetID)
+	}
+	_, err := tx.InsertBySql(
+		"INSERT IGNORE INTO "+table+
+			" (uid, space_id, target_type, target_id, group_unfollowed, auto_follow_threads) VALUES "+
+			strings.Join(tupleHolders, ", "),
+		args...,
+	).Exec()
+	if err != nil {
+		return fmt.Errorf("insert default-followed group rows: %w", err)
 	}
 	return nil
 }

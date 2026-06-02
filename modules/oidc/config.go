@@ -3,6 +3,7 @@ package oidc
 import (
 	"encoding/base64"
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -33,6 +34,9 @@ var providerIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 type Config struct {
 	Enabled  bool
 	Provider ProviderConfig
+	// Bind 自助绑定子配置(P0)。Bind.Enabled 独立于 Config.Enabled,允许
+	// "OIDC 主流程开但 bind 灰度未开" 的中间态(NFR-5)。
+	Bind BindConfig
 }
 
 // ProviderConfig 单个 OIDC Provider 配置
@@ -69,6 +73,24 @@ type ProviderConfig struct {
 	// (DM_OIDC_RETURN_TO_HOSTS,逗号分隔)。空列表表示禁用 return_to,
 	// 防开放重定向是 P1.2 必须做的硬约束。
 	ReturnToHosts []string
+
+	// ---- RP-Initiated Logout(可选,#215)----
+
+	// PostLogoutRedirectURI logout 成功后让 IdP 回跳的地址(写死的登录页)。
+	// 空时 logout 不生成 end_session_url,前端退回"仅清本地"。安全考量:此值由
+	// 运维写死、不接受前端传入,因此无需在服务端再做 redirect 白名单 —— 单值即白名单。
+	// 上线前需在 IdP 侧注册该回跳地址。
+	PostLogoutRedirectURI string
+
+	// EndSessionURL 覆盖/兜底 IdP 的 end_session 端点。优先级高于 Discovery 解析值,
+	// 仅在 Discovery 未暴露 end_session_endpoint 时才需要配置。
+	EndSessionURL string
+
+	// IDTokenTTL callback 成功后缓存 id_token(供 logout 当 id_token_hint)的 TTL。
+	// 默认对齐 RT 生命周期(7 天 = 168h),覆盖用户登录后较长时间才登出的场景。
+	// 注意 env 值用 time.ParseDuration 解析,只认 h/m/s —— 写 "7d" 会解析失败并静默
+	// 回落默认,要 7 天请填 "168h"。
+	IDTokenTTL time.Duration
 }
 
 // LoadConfig 从环境变量加载 OIDC 配置
@@ -89,6 +111,9 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("oidc: load provider: %w", err)
 	}
 	cfg.Provider = p
+	// Bind 子配置纯 env,无 required 校验;Enabled=false 时其他字段不参与
+	// 任何 runtime 决策(由 oidc/api.go 的 cfg.Bind.Enabled 分支兜底)。
+	cfg.Bind = loadBindConfig()
 	return cfg, nil
 }
 
@@ -128,10 +153,19 @@ func loadProvider() (ProviderConfig, error) {
 		SyncConcurrency: getIntWithAlias("DM_OIDC_PROVIDER_SYNC_CONCURRENCY", "DM_OIDC_AEGIS_SYNC_CONCURRENCY", 10),
 
 		ReturnToHosts: getStringSlice("DM_OIDC_RETURN_TO_HOSTS", nil),
+
+		// RP-Initiated Logout(可选):缺省即禁用 end_session 跳转,纯增量不影响存量部署。
+		PostLogoutRedirectURI: getString("OCTO_OIDC_POST_LOGOUT_REDIRECT_URI", ""),
+		EndSessionURL:         getString("OCTO_OIDC_PROVIDER_END_SESSION_URL", ""),
+		IDTokenTTL:            getDurationWithAlias("OCTO_OIDC_PROVIDER_ID_TOKEN_TTL", "", 7*24*time.Hour),
 	}
 
 	// 用 slice 保证检查顺序稳定,缺多个字段时报第一项固定,排查体验更好。
 	// 报错消息用新名,引导运维迁移到 PROVIDER_*。
+	//
+	// NOTE: 此 required 列表在 modules/common/system_settings.go 的
+	// isOIDCFullyConfigured() 有一份镜像副本(避免 common→oidc→user→common
+	// import 循环)。新增/删除必填项时,两处必须同步修改。
 	required := []struct {
 		name string
 		val  string
@@ -151,6 +185,22 @@ func loadProvider() (ProviderConfig, error) {
 		return p, fmt.Errorf("DM_OIDC_PROVIDER_ID %q invalid: must match %s", p.ID, providerIDRe)
 	}
 
+	// IDTokenTTL<=0 会让 Redis SET 的过期变成"永不过期"(go-redis 语义),id_token
+	// 密文将永久驻留。误配 0 / 负值时钳回默认 7d,杜绝该 footgun。
+	if p.IDTokenTTL <= 0 {
+		p.IDTokenTTL = 7 * 24 * time.Hour
+	}
+
+	// RP-Initiated Logout 的两个 URL 都会进浏览器顶层跳转(end_session 还携带 id_token),
+	// 启动期 fail-loud 校验为绝对 https,拦相对地址 / javascript: 等,杜绝误配把 token
+	// 发去任意域或在导航时执行脚本。与 validateBindRedirectBase 同模式。空值=功能未开,跳过。
+	if err := validateLogoutURL("OCTO_OIDC_POST_LOGOUT_REDIRECT_URI", p.PostLogoutRedirectURI); err != nil {
+		return p, err
+	}
+	if err := validateLogoutURL("OCTO_OIDC_PROVIDER_END_SESSION_URL", p.EndSessionURL); err != nil {
+		return p, err
+	}
+
 	keyB64 := getString("DM_OIDC_RT_ENC_KEY", "")
 	if keyB64 == "" {
 		return p, fmt.Errorf("required env DM_OIDC_RT_ENC_KEY is empty")
@@ -164,6 +214,33 @@ func loadProvider() (ProviderConfig, error) {
 	}
 	p.RefreshTokenEncryptionKey = key
 	return p, nil
+}
+
+// validateLogoutURL 启动期 fail-loud 校验 RP-Initiated Logout 相关 URL 为绝对 https。
+//
+// 空值视作"功能未开",直接放行(可选配置)。非空时必须是绝对地址且 https,拦
+// 相对地址 / javascript: / data: 等 —— 这两个值最终都会进浏览器顶层跳转,
+// EndSessionURL 还携带 id_token,误配会把 token 发去任意域或在导航时执行脚本。
+// 开发环境可用 OCTO_OIDC_LOGOUT_ALLOW_INSECURE=1 放宽到 http(与 bind 的同名机制对齐)。
+func validateLogoutURL(envName, raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("oidc: invalid %s %q: %w", envName, raw, err)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("oidc: %s %q must be absolute (scheme://host/path)", envName, raw)
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	if u.Scheme == "http" && getBool("OCTO_OIDC_LOGOUT_ALLOW_INSECURE", false) {
+		return nil
+	}
+	return fmt.Errorf("oidc: %s %q must use https scheme "+
+		"(set OCTO_OIDC_LOGOUT_ALLOW_INSECURE=1 to allow http for dev)", envName, raw)
 }
 
 func getString(key, def string) string {

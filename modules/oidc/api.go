@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -79,9 +80,17 @@ type OIDC struct {
 	audit      auditWriter
 	killer     sessionKiller
 	revoker    rtRevoker
-	worker     *SyncWorker
-	tickLock   *RedisTickLock
-	cbGuard    *CallbackGuard
+	// idTokens 缓存登录时验签过的 id_token,供 logout 当 RP-Initiated Logout 的
+	// id_token_hint。nil 时 logout 不生成 end_session_url(降级为仅清本地)。
+	idTokens idTokenStore
+	worker   *SyncWorker
+	tickLock *RedisTickLock
+	cbGuard  *CallbackGuard
+	bind     *BindService // 自助绑定(P0);Bind.Enabled=false 时为 nil,handler 不挂载
+	// bindStore 单独持引用便于 Close 时关连接池。bind.store 是 BindStore 接口,
+	// 接口本身没 Close,production impl(*redisBindStore)有独立 redis.Client,
+	// 不关会泄漏。
+	bindStore BindStore
 
 	// verification 由 Init() 注入(user.IService 的子集),OIDC callback 拿到 IdP
 	// identity_verification claims 后调用 UpsertVerificationFromOIDC 写 user_verification。
@@ -150,6 +159,26 @@ func New(ctx *config.Context) *OIDC {
 		return o
 	}
 	o.client = client
+	// id_token 缓存(RP-Initiated Logout)仅在功能"确实可用"时启用:既配了回跳地址
+	// (PostLogoutRedirectURI),又拿得到*合法 https* 的 end_session 端点(discovery 或
+	// override)。端点仅"非空"不够 —— 非法/非 https 端点下 logout 也出不了 URL
+	// (buildEndSessionURL 会拒),此时建池存 PII id_token 纯属浪费。放在 client 之后才能判
+	// 端点可用性。密钥已在 LoadConfig 校验为 32B,构造失败仅记日志降级,不影响登录主流程。
+	if cfg.Provider.PostLogoutRedirectURI != "" {
+		endpoint := o.endSessionEndpoint()
+		switch {
+		case endpoint == "" || validateLogoutURL("end_session_endpoint", endpoint) != nil:
+			// 配了回跳地址却拿不到可用端点:打 Info 让运维可见"为什么 RP-logout 没生效"。
+			o.Info("RP-Initiated Logout 已禁用:end_session 端点不可用(discovery 未提供且未配 override,或非 https)",
+				zap.String("endpoint", endpoint))
+		default:
+			if enc, eerr := NewEncryptor(cfg.Provider.RefreshTokenEncryptionKey); eerr != nil {
+				o.Error("构造 id_token Encryptor 失败,RP-Initiated Logout 禁用", zap.Error(eerr))
+			} else {
+				o.idTokens = newRedisIDTokenStore(ctx, enc)
+			}
+		}
+	}
 	return o
 }
 
@@ -177,6 +206,24 @@ func (o *OIDC) Init() error {
 	// 单测场景下 o.verification 可由 newTestOIDC 提前塞入 fake,跳过此赋值。
 	if o.verification == nil {
 		o.verification = userSvc
+	}
+
+	// 自助绑定(P0):Bind.Enabled=true 时构造 BindService + 注入 user.IService。
+	// Bind.Enabled=false 时 o.bind=nil,bindRoutes 不挂任何路由(零生产影响)。
+	if err := validateBindConfigAgainstProvider(o.cfg); err != nil {
+		return fmt.Errorf("oidc: Init: %w", err)
+	}
+	if o.cfg.Bind.Enabled {
+		o.bindStore = newRedisBindStore(o.ctx)
+		// userSvc 已经实现 BindAuthenticator(三个方法在 user.IService 内),
+		// Go 鸭子类型直接传即可。BindLocator 用 oidc.DB 适配:复用同一连接池。
+		locator := dbBindLocator{db: o.db}
+		o.bind = newBindService(o.cfg.Bind, o.bindStore, userSvc, locator)
+		// Confirm 路径需要 identity 写入 + IssueSession 签发,复用 *Service 已经
+		// 持有的 store(identityStore) 和 users(userLookup)。两者都在 newService
+		// 内完成构造,Init 顺序保证 o.service 此时非 nil。
+		o.bind.identity = o.store
+		o.bind.users = o.service.users
 	}
 
 	// SyncWorker:Aegis 侧账号状态变更(封号/改密/登出)→ DMWork 主动感知。
@@ -242,6 +289,9 @@ func (o *OIDC) routeAt(r *wkhttp.WKHttp, pathID string) {
 	pub.GET("/callback", o.callback)
 	authed := r.Group(base, o.ctx.AuthMiddleware(r))
 	authed.POST("/logout", o.logout)
+	// 自助绑定(P0):Bind.Enabled=false 时 bindRoutes 自身 no-op,生产路径完
+	// 全不挂这些 endpoint;true 时挂 4 个 bind/* 端点,callback 接管由 PR4 引入。
+	o.bindRoutes(pub)
 }
 
 func (o *OIDC) disabled(c *wkhttp.Context) {
@@ -522,6 +572,34 @@ func (o *OIDC) callback(c *wkhttp.Context) {
 
 	res, err := o.service.ResolveOrLink(c.Request.Context(), claims)
 	if err != nil {
+		// PR4 自助绑定接管:autolink 失败时,若 Bind.Enabled + issuer 在 allowlist
+		// 内 + 错误是可绑定类型(ErrUnknownUser/ErrConflictNeedManual),引导用户走
+		// 自助绑定流程。其它失败 / flag off / issuer 不在白名单都退回旧路径,确保
+		// NFR-6 一键回滚(关 flag + 重启)语义生效。
+		if o.bind.ShouldHandle(err, claims) {
+			// 把 ResolveOrLink 的 err 类型固化到 BindSession.IssueReason —— Create
+			// 路径用它拒绝 manual_conflict 来源的建号请求,Info 路径用它回填
+			// create_blocked。BindReasonManualConflict 仅在多账号冲突时落地;
+			// 其他可接管错误统一按 BindReasonUnknownUser(自助建号合法来源)签发。
+			reason := BindReasonUnknownUser
+			if errors.Is(err, ErrConflictNeedManual) {
+				reason = BindReasonManualConflict
+			}
+			jti, ierr := o.bind.IssueWithReason(c.Request.Context(), claims, sd, reason)
+			if ierr == nil {
+				result = "bind_pending" // 已在 callbackResultLabels 注册
+				// bind 接管时尚不知 uid,先按 jti 暂存 id_token,confirm/create 后迁移到 uid。
+				o.saveBindIDTokenHint(c.Request.Context(), jti, rawID)
+				o.writeAudit("bind:"+subHash(jti), EventBindIssued, sd, "")
+				o.redirectToBindPage(c, sd, jti)
+				return
+			}
+			// Issue 失败:不让"bind 引擎抖动"把整条 OIDC 登录拖死,继续退回旧路径。
+			// 失败原因记 warn,运维通过 oidc_bind_request_total 看不到这一脚 ——
+			// 是有意的,这种"bind 接管异常但回落"应该看 callback_total{result=resolve_fail}。
+			o.Warn("OIDC bind Issue failed, falling back to legacy fail path",
+				zap.String("trace_id", traceID), zap.Error(ierr))
+		}
 		result = "resolve_fail"
 		o.failWithAuthcode(c.Request.Context(), sd, claims, err)
 		o.redirectAfterCallback(c, sd, true)
@@ -545,6 +623,27 @@ func (o *OIDC) callback(c *wkhttp.Context) {
 		Zone:       zone,
 		DeviceFlag: sd.DeviceFlag,
 		PublicIP:   sd.IP,
+		// res.IsNew=true 进入 user.externalLoginCreate;TrustedSSOCreate=true
+		// 让 user 模块绕过 register.off 全局开关。
+		//
+		// callback 路径的信任锚(与 /bind/create 走 IssuerAllowlist 是**不同**的
+		// trust chain,不要混):
+		//   1. o.client.VerifyIDToken 用 cfg.Provider.Issuer discovery 出来的
+		//      IdP 公钥验签 → claims.Issuer 必然等于 cfg.Provider.Issuer
+		//      (不等则验签直接失败,根本走不到这里),等同于"size=1 的
+		//      隐式 issuer allowlist";
+		//   2. Service.ResolveOrLink 只在 cfg.Provider.AllowNewUser=true
+		//      时才返 IsNew=true,这是运维通过 DM_OIDC_PROVIDER_ALLOW_NEW_USER
+		//      显式开的 bool。
+		// 两条合在一起 = "运维显式信任的单一 Provider.Issuer 自动建号" —— 与
+		// 公开注册入口(email/phone signup / GitHub/Gitee OAuth)的不可控外部
+		// 输入语义不同,bypass register.off 的运维授权是显式的。
+		//
+		// 与 /bind/create 行为对称(都"OIDC 通道下让运维显式控制建号"),但
+		// 信任链的具体机制不同 —— /bind/create 用 IssuerAllowlist 兜底
+		// (多 issuer 配置 + bind_token 显式同意),callback 用单 Provider.Issuer
+		// 签名 + AllowNewUser flag。
+		TrustedSSOCreate: res.IsNew,
 	}
 	sessResp, err := o.service.IssueSession(c.Request.Context(), issueReq)
 	if err != nil {
@@ -671,6 +770,14 @@ func (o *OIDC) callback(c *wkhttp.Context) {
 	result = "ok"
 	// 成功路径清场:防止 IP 长尾累积导致历史失败 + 偶发 state 过期把用户误锁。
 	o.cbGuard.ResetLogged(clientIP)
+	// 缓存验签过的 id_token,供后续 logout 当 RP-Initiated Logout 的 id_token_hint。
+	// best-effort:存失败只告警,不影响登录(logout 时退回"仅清本地")。日志不打 token。
+	if o.idTokens != nil && sessResp.UID != "" {
+		if serr := o.idTokens.Save(c.Request.Context(), sessResp.UID, rawID, o.cfg.Provider.IDTokenTTL); serr != nil {
+			o.Warn("OIDC callback 缓存 id_token 失败(不影响登录,仅 RP-logout 降级)",
+				zap.String("trace_id", traceID), zap.Error(serr))
+		}
+	}
 	o.writeAudit(sessResp.UID, EventCallbackOK, sd, "")
 	o.redirectAfterCallback(c, sd, false)
 }
@@ -691,6 +798,23 @@ func (o *OIDC) Close() error {
 		}
 		o.tickLock = nil
 	}
+	// bindStore 独立 redis.Client(与 stateStore 同模式),Bind.Enabled=true
+	// 时由 Init 创建。优雅退出/Discovery 失败兜底清理都要关,否则 fd 泄漏。
+	if rbs, ok := o.bindStore.(*redisBindStore); ok {
+		if err := rbs.Close(); err != nil {
+			o.Error("关闭 OIDC bind store 失败", zap.Error(err))
+		}
+		o.bindStore = nil
+	}
+	// idTokens 独立 redis.Client(RP-Initiated Logout),New() 在 enabled 时创建。
+	// 与 bindStore 同样需在关闭路径释放,否则连接池 fd 泄漏。放在 stateStore nil
+	// 早返回之前,保证 stateStore 已被置 nil 的二次 Close 仍能关掉 idTokens。
+	if ridt, ok := o.idTokens.(*redisIDTokenStore); ok {
+		if err := ridt.Close(); err != nil {
+			o.Error("关闭 OIDC id_token store 失败", zap.Error(err))
+		}
+		o.idTokens = nil
+	}
 	if o.stateStore == nil {
 		return nil
 	}
@@ -707,8 +831,19 @@ func (o *OIDC) Close() error {
 // 理由:logout 客户端关心的是"我点了登出,本地已清空状态",对幂等性要求高于完美吊销。
 // 真正的兜底由 SyncWorker 的下次轮询补足(refresh 失败也会触发踢线)。
 //
-// IdP 端 RP-Initiated Logout(/end_session)由前端按需调用,后端不代理:
-// id_token_hint 在前端容易拿到,且跨域跳转更适合浏览器层面发起。
+// IdP 端 RP-Initiated Logout(/end_session)的跳转地址由后端拼好后随 200 响应返回
+// (end_session_url 字段),前端做顶层跳转。后端收口的原因:本架构 code→token 在
+// 服务端完成,前端无法自行*构造* id_token_hint(它不经手 token 交换),也不应散落
+// end_session 端点 / 参数 / 回跳白名单这些 IdP 细节 —— 由后端给出单次性 URL 最稳妥。
+// 真正终止 IdP 会话仍依赖浏览器顶层跳转携带 IdP 域 cookie,所以后端只给 URL,不代理跳转。
+//
+// 信任模型说明:end_session_url 里必然带 id_token_hint(RFC 规定的 front-channel 参数),
+// 因此该 id_token 会暴露到前端 JS、浏览器历史、Referer 及 IdP 访问日志 —— 这是
+// RP-Initiated Logout 协议固有的。可接受:它是单次性、不可重放的登出提示(octo-server
+// 自身从不把它当 bearer/assertion 复用),取出即原子作废(luaGetDel)。
+//
+// 配置缺失(未配 PostLogoutRedirectURI / 无 end_session 端点 / 无缓存的 id_token)时
+// 省略 end_session_url,前端降级为仅清本地 —— 纯增量,不影响存量行为。
 func (o *OIDC) logout(c *wkhttp.Context) {
 	uid := c.GetLoginUID()
 	if uid == "" {
@@ -756,7 +891,110 @@ func (o *OIDC) logout(c *wkhttp.Context) {
 		IP:        util.GetClientPublicIP(c.Request),
 		UserAgent: c.Request.UserAgent(),
 	}, "")
-	c.JSON(http.StatusOK, map[string]interface{}{"status": 200})
+
+	resp := map[string]interface{}{"status": 200}
+	// 拼 IdP end_session 跳转地址(RP-Initiated Logout)。任一前置缺失时返回空串,
+	// 此时省略字段,前端降级为仅清本地。end_session_url 含 id_token,不写日志。
+	if endSessionURL := o.buildEndSessionURL(ctx, uid); endSessionURL != "" {
+		resp["end_session_url"] = endSessionURL
+		// 响应体含 id_token_hint,禁止任何缓存(OAuth/OIDC 安全 BCP、RFC 6749 §5.1)。
+		c.Header("Cache-Control", "no-store")
+		c.Header("Pragma", "no-cache")
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// endSessionEndpoint 解析 IdP 的 RP-Initiated Logout 端点:config override 优先,
+// 否则取 Discovery 解析值。两者皆空时返回空串(IdP 未声明且未配 override)。
+func (o *OIDC) endSessionEndpoint() string {
+	if o.cfg != nil && o.cfg.Provider.EndSessionURL != "" {
+		return o.cfg.Provider.EndSessionURL
+	}
+	if o.client != nil {
+		return o.client.EndSessionEndpoint()
+	}
+	return ""
+}
+
+// buildEndSessionURL 构造 RP-Initiated Logout 跳转地址,带 id_token_hint +
+// post_logout_redirect_uri。任一前置不满足返回空串(调用方据此省略字段、前端降级):
+//   - 未配置 PostLogoutRedirectURI(运维写死的回跳页,同时充当白名单);
+//   - idTokens 未注入 / 取不到该 uid 的 id_token(非 OIDC 登录 / 已过期 / 已消费);
+//   - 无可用 end_session 端点。
+//
+// 取出 id_token 即一次性消费(Take 内部删除)。不带 state(Aegis Discovery 未声明)。
+//
+// 顺序很关键:先解析+校验端点,再消费 id_token。原因有二:
+//   - 端点非法时不白烧 token(GETDEL 不可逆),logout 仍可重试拿到 end_session_url;
+//   - end_session 端点可能来自 discovery(非 config override,未经启动期校验),这里统一
+//     过一道 https 校验 —— 防 IdP 万一下发 http:// 把带 id_token 的 URL 降级到非 https。
+func (o *OIDC) buildEndSessionURL(ctx context.Context, uid string) string {
+	if o.cfg == nil || o.cfg.Provider.PostLogoutRedirectURI == "" || o.idTokens == nil {
+		return ""
+	}
+	endpoint := o.endSessionEndpoint()
+	if endpoint == "" {
+		return ""
+	}
+	// 校验 + 解析端点(在消费 token 之前)。validateLogoutURL 强制绝对 https
+	// (dev 可 OCTO_OIDC_LOGOUT_ALLOW_INSECURE=1),覆盖 discovery 与 override 两种来源。
+	if err := validateLogoutURL("end_session_endpoint", endpoint); err != nil {
+		o.Error("OIDC logout end_session 端点不合法,跳过 IdP 登出", zap.String("endpoint", endpoint), zap.Error(err))
+		return ""
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		// 只记端点本身,不记含 id_token 的完整 URL。
+		o.Error("OIDC logout 解析 end_session 端点失败", zap.String("endpoint", endpoint), zap.Error(err))
+		return ""
+	}
+	idToken, err := o.idTokens.Take(ctx, uid)
+	if err != nil {
+		// 取 id_token 失败不阻断 logout(本地已踢线+吊销),仅降级跳过 IdP 跳转。
+		o.Warn("OIDC logout 取 id_token 失败,跳过 end_session 跳转", zap.Error(err))
+		return ""
+	}
+	if idToken == "" {
+		return ""
+	}
+	q := u.Query()
+	q.Set("id_token_hint", idToken)
+	q.Set("post_logout_redirect_uri", o.cfg.Provider.PostLogoutRedirectURI)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+// saveBindIDTokenHint 在自助绑定接管(callback bind_pending)时,按 bind token(jti)
+// 暂存验签过的 id_token,TTL 对齐 bind session —— bind 路径的 callback 还不知道最终
+// uid,无法直接按 uid 存。confirm/create 成功后由 promoteBindIDToken 迁移到 uid 名下。
+// 仅在 RP-Initiated Logout 启用(idTokens!=nil)时生效;best-effort,失败不阻断绑定。
+func (o *OIDC) saveBindIDTokenHint(ctx context.Context, jti, rawID string) {
+	if o.idTokens == nil || jti == "" || rawID == "" {
+		return
+	}
+	if err := o.idTokens.Save(ctx, bindIDTokenKey(jti), rawID, o.cfg.Bind.TokenTTL); err != nil {
+		o.Warn("OIDC bind 暂存 id_token 失败(不影响绑定,仅 RP-logout 降级)", zap.Error(err))
+	}
+}
+
+// promoteBindIDToken 把 bind 接管阶段按 jti 暂存的 id_token 迁移到已确定的 uid 名下,
+// 供后续 logout 当 id_token_hint。一次性消费 jti 暂存项(Take 内部删除);无值时静默
+// (非 OIDC bind 登录 / 已过期 / 功能未启用)。best-effort,失败不阻断绑定完成。
+func (o *OIDC) promoteBindIDToken(ctx context.Context, jti, uid string) {
+	if o.idTokens == nil || jti == "" || uid == "" {
+		return
+	}
+	raw, err := o.idTokens.Take(ctx, bindIDTokenKey(jti))
+	if err != nil {
+		o.Warn("OIDC bind 取暂存 id_token 失败,跳过 RP-logout 缓存", zap.Error(err))
+		return
+	}
+	if raw == "" {
+		return
+	}
+	if err := o.idTokens.Save(ctx, uid, raw, o.cfg.Provider.IDTokenTTL); err != nil {
+		o.Warn("OIDC bind 迁移 id_token 到 uid 失败", zap.Error(err))
+	}
 }
 
 func (o *OIDC) failWithAuthcode(ctx context.Context, sd *StateData, claims *IDTokenClaims, err error) {
@@ -906,6 +1144,75 @@ func fallbackReturnTo(rt string) string {
 	return rt
 }
 
+// redirectToBindPage 自助绑定触发时的 302 跳转。把 jti + 原 authcode + 清洗后
+// 的 return_to 拼到 BindConfig.RedirectBase 上。
+//
+// 设计:
+//   - 用 url.Parse + Query API 拼参,避免手拼 query 在 RedirectBase 自带 ? 时
+//     出 ?token=xxx?return_to=yyy 的 bug;
+//   - return_to 走 ValidateReturnTo 二次校验(纵深防御,与 redirectAfterCallback
+//     一致);非法时直接落空,前端按未提供处理;
+//   - RedirectBase 为空时(漏配置)记 error 并退回 redirectAfterCallback 失败
+//     路径,**绝不**裸跳 302 到空字符串(那会变 referrer 漏洞);
+//   - 不向 URL 拼任何 claims 内容(SR-7),客户端通过 /bind/info?token=... 拉脱敏。
+func (o *OIDC) redirectToBindPage(c *wkhttp.Context, sd *StateData, jti string) {
+	base := o.cfg.Bind.RedirectBase
+	if base == "" {
+		o.Error("OIDC bind redirect: OCTO_OIDC_BIND_REDIRECT_BASE not configured, falling back",
+			zap.String("jti_hash", subHash(jti)))
+		o.failBindRedirect(c, sd)
+		return
+	}
+	target, err := url.Parse(base)
+	if err != nil {
+		o.Error("OIDC bind redirect: invalid RedirectBase",
+			zap.String("base", base), zap.Error(err))
+		o.failBindRedirect(c, sd)
+		return
+	}
+	q := target.Query()
+	q.Set("token", jti)
+	// provider 段在 bind API 路径里 (/v1/auth/oidc/<provider>/bind/*),前端从
+	// query 取出后拼回 API URL;缺失时前端兜底到 legacyProviderPathID="aegis"。
+	if o.cfg.Provider.ID != "" {
+		q.Set("provider", o.cfg.Provider.ID)
+	}
+	if sd != nil && sd.ClientAuthcode != "" {
+		q.Set("authcode", sd.ClientAuthcode)
+	}
+	// 二次校验 return_to (纵深防御:即便 RedirectBase 是可信前端域,我们也
+	// 不应把任意原 return_to 透过)。
+	if sd != nil {
+		if cleaned, verr := ValidateReturnTo(sd.ReturnTo, o.cfg.Provider.ReturnToHosts); verr == nil && cleaned != "" {
+			q.Set("return_to", cleaned)
+		}
+	}
+	target.RawQuery = q.Encode()
+	// Referrer-Policy: no-referrer 仅保护这一跳:浏览器从 callback URL 跳到
+	// bind 页时不会把 callback 的 ?code=... &state=... 经 Referer 泄漏给 bind
+	// 页 host。bind 页加载之后,其内部子资源是否泄漏"含 token/authcode 的
+	// bind 页 URL",取决于 bind 页**自己**的 Referrer-Policy(响应头或 meta),
+	// 后端无法跨域强制。前端 host 应同步下发 Referrer-Policy: no-referrer
+	// 作为纵深防御。
+	c.Header("Referrer-Policy", "no-referrer")
+	c.Redirect(http.StatusFound, target.String())
+}
+
+// failBindRedirect 跳转到 bind 页失败(漏配 RedirectBase / 非法 URL)时的兜底:
+// 先把 ThirdAuthcode 写 "0",让原发起设备的前端轮询立即拿到失败信号(否则要等
+// 5min TTL 才会感知,用户会卡在加载态);再走 redirectAfterCallback 失败路径。
+//
+// 写 "0" 失败仅 log:此时已经在异常路径,继续 redirect 比 panic 更可控。
+func (o *OIDC) failBindRedirect(c *wkhttp.Context, sd *StateData) {
+	if o.authcode != nil && sd != nil && sd.ClientAuthcode != "" {
+		if e := o.authcode.SetAuthcode(c.Request.Context(), sd.ClientAuthcode, "0", thirdAuthcodeTTL); e != nil {
+			o.Error("OIDC bind redirect fallback: write ThirdAuthcode \"0\" failed",
+				zap.Error(e))
+		}
+	}
+	o.redirectAfterCallback(c, sd, true)
+}
+
 // redirectAfterCallback 统一 callback 完成后的 302 跳转。
 //
 // 做两件事:
@@ -927,6 +1234,11 @@ func (o *OIDC) redirectAfterCallback(c *wkhttp.Context, sd *StateData, failed bo
 		}
 		target = target + sep + "oidc_error=1"
 	}
+	// 与 redirectToBindPage 同语义:防止 callback URL(IdP 回填的 code/state +
+	// 我们注入的 oidc_error 标记)在跳到 return_to 那一跳经 Referer 泄漏。code
+	// 是单次消费的,但 state 与时间窗内的 code 组合对反查仍有价值。无论成功还
+	// 是失败 callback 都走这条路径,所以统一加上。
+	c.Header("Referrer-Policy", "no-referrer")
 	c.Redirect(http.StatusFound, target)
 }
 

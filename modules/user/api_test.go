@@ -16,10 +16,109 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/testutil"
+	commonsettings "github.com/Mininglamp-OSS/octo-server/modules/common"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var token = "token122323"
+
+// login.local_off=1 时 /v1/user/login（用户名/手机号 + 密码登录入口）必须
+// 在请求体合法的情况下也被守卫拒绝,而不是继续走到 QueryByUsername / 密码
+// 校验。Reason: 接入 SSO 后所有本地账号密码登录通道都应统一关闭,避免出现
+// "前端隐藏了入口但后端仍接受请求"的绕过路径。
+func TestLoginBlockedByLocalLoginOff(t *testing.T) {
+	enableFullOIDCForUserTest(t) // 让 local_off=1 通过安全回退;验证守卫本身
+	s, ctx := testutil.NewTestServer()
+	wireI18nRendererForUserTest(s)
+	require.NoError(t, testutil.CleanAllTables(ctx))
+	setSystemSettingForUserTest(t, ctx, "login", "local_off", "1", "bool")
+	require.NoError(t, commonsettings.EnsureSystemSettings(ctx).Reload())
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/user/login", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"username": "13800000000",
+		"password": "1234567",
+	}))))
+	setPublicIPForUserTest(req, "9.9.9.11")
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Contains(t, w.Body.String(), "本地登录已关闭")
+}
+
+// login.local_off=1 时设备验证二阶段必须同步关闭,否则攻击者可以绕过
+// /v1/user/login 入口直接调 /v1/user/sms/login_check_phone +
+// /v1/user/login/check_phone 拿到 token。守卫位置必须在 uid 查询和短信
+// 发送之前,避免泄露用户存在性 + 滥发短信。
+func TestSendLoginCheckPhoneCodeBlockedByLocalLoginOff(t *testing.T) {
+	enableFullOIDCForUserTest(t)
+	s, ctx := testutil.NewTestServer()
+	wireI18nRendererForUserTest(s)
+	require.NoError(t, testutil.CleanAllTables(ctx))
+	setSystemSettingForUserTest(t, ctx, "login", "local_off", "1", "bool")
+	require.NoError(t, commonsettings.EnsureSystemSettings(ctx).Reload())
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/user/sms/login_check_phone", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"uid": "some-uid",
+	}))))
+	setPublicIPForUserTest(req, "9.9.9.12")
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Contains(t, w.Body.String(), "本地登录已关闭")
+}
+
+func TestLoginCheckPhoneBlockedByLocalLoginOff(t *testing.T) {
+	enableFullOIDCForUserTest(t)
+	s, ctx := testutil.NewTestServer()
+	wireI18nRendererForUserTest(s)
+	require.NoError(t, testutil.CleanAllTables(ctx))
+	setSystemSettingForUserTest(t, ctx, "login", "local_off", "1", "bool")
+	require.NoError(t, commonsettings.EnsureSystemSettings(ctx).Reload())
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/user/login/check_phone", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"uid":  "some-uid",
+		"code": "123456",
+	}))))
+	setPublicIPForUserTest(req, "9.9.9.13")
+	s.GetRoute().ServeHTTP(w, req)
+
+	assert.Contains(t, w.Body.String(), "本地登录已关闭")
+}
+
+// 验证 register.only_china=1 时,非 0086 区号在真正注册入口被拦截。
+//
+// 这一道闸门必须在 register 这里,而不仅是在 sendRegisterCode:管理员通过
+// 系统设置把 only_china 从 0 改到 1 时,先前已发出去的短信验证码在 5 分钟
+// 缓存窗口里仍然有效。只在取码入口拦截,攻击者就能在 toggle 翻转之前抢
+// 一个非中国区号的验证码,然后用旧码在 toggle=1 之后完成注册。
+//
+// gate 命中点在 sms.Verify / createUser 之前,所以这条用例不需要 mock SMS。
+func TestPhoneRegisterBlockedByOnlyChina(t *testing.T) {
+	s, ctx := testutil.NewTestServer()
+	wireI18nRendererForUserTest(s)
+	require.NoError(t, testutil.CleanAllTables(ctx))
+	setSystemSettingForUserTest(t, ctx, "register", "only_china", "1", "bool")
+	require.NoError(t, commonsettings.EnsureSystemSettings(ctx).Reload())
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/v1/user/register", bytes.NewReader([]byte(util.ToJson(map[string]interface{}{
+		"name":     "non-china",
+		"code":     "123456",
+		"zone":     "0001",
+		"phone":    "5551234567",
+		"password": "1234567",
+	}))))
+	s.GetRoute().ServeHTTP(w, req)
+
+	// Phase 2.1 migrated the gate to err.server.user.phone_region_unsupported;
+	// the zh-CN copy elided the legacy "仅仅" / "注册" suffix, so assert on the
+	// stable error.code to avoid future copy churn breaking the security gate.
+	assert.Contains(t, w.Body.String(), "err.server.user.phone_region_unsupported",
+		"register handler must enforce only_china before sms verify; "+
+			"sendRegisterCode-only gate leaks a TTL-window bypass when admins flip the toggle at runtime")
+}
 
 func TestUser_Register(t *testing.T) {
 	t.Skip("OCTO migration TODO: see https://github.com/Mininglamp-OSS/octo-server/issues/17")

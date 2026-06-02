@@ -364,3 +364,336 @@ func TestRemoveConvExtForUserInSpace_GroupCascade_LeavesNoOrphans(t *testing.T) 
 		assert.Nil(t, got, "thread ext row %q must be gone after cascade", sid)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Issue #151 — db.UpdateSort must remain strict for ALL target types.
+// Materialization for default-followed groups (target_type=2 with category
+// but no ext row) is gated by Service.AuthorizeAndMaterializeDefaultFollowed-
+// Groups in the layer above; db.UpdateSort itself trusts the caller to have
+// pre-flighted any necessary materialization.  Code review #1 removed the
+// earlier inline materialization because it trusted the client payload (any
+// group_no, with no membership / category check) — a metadata leak risk.
+//
+// These tests pin the strict behaviour at the DB layer.  Service- and
+// handler-level coverage lives in service_test.go and api_test.go.
+// ---------------------------------------------------------------------------
+
+// TestDB_UpdateSort_StillRejectsMissingGroup verifies db.UpdateSort, called
+// without upstream pre-flight materialization, surfaces a missing group as
+// ErrSortTargetNotFound (i.e. the DB layer no longer auto-materializes).
+func TestDB_UpdateSort_StillRejectsMissingGroup(t *testing.T) {
+	db := newDBForTest(t)
+	const uid, space = "u1", "s1"
+
+	err := db.UpdateSort(uid, space, []SortItem{
+		{TargetType: targetTypeGroup, TargetID: "g-default"},
+	}, 0)
+	assert.ErrorIs(t, err, ErrSortTargetNotFound,
+		"db.UpdateSort must NOT materialize missing groups on its own — the "+
+			"caller is responsible for AuthorizeAndMaterializeDefaultFollowedGroups "+
+			"upstream (issue #151 code review #1)")
+
+	m, err := db.Get(uid, space, targetTypeGroup, "g-default")
+	require.NoError(t, err)
+	assert.Nil(t, m,
+		"db.UpdateSort must not write any ext row when it fails — preserves "+
+			"the rolled-back tx invariant")
+}
+
+// TestDB_UpdateSort_StillRejectsMissingDM verifies the strict semantics are
+// preserved for target_type=1 — DMs only appear in the follow tab if their
+// ext row exists, so a missing DM target in a sort payload remains a real
+// client/server desync.
+func TestDB_UpdateSort_StillRejectsMissingDM(t *testing.T) {
+	db := newDBForTest(t)
+	const uid, space = "u1", "s1"
+
+	require.NoError(t, db.Upsert(uid, space, targetTypeDM, "dm-real", ConvExtFields{
+		FollowedDM: int8Ptr(1),
+	}))
+
+	err := db.UpdateSort(uid, space, []SortItem{
+		{TargetType: targetTypeDM, TargetID: "dm-real"},
+		{TargetType: targetTypeDM, TargetID: "dm-ghost"},
+	}, 0)
+	assert.ErrorIs(t, err, ErrSortTargetNotFound,
+		"missing DM ext rows must still be reported as ErrSortTargetNotFound; "+
+			"only target_type=2 (groups) get lazy materialization")
+}
+
+// TestDB_UpdateSort_MixedPayload_MissingDM_NoOpportunisticGroupWrite verifies
+// that even without materialization in db.UpdateSort, a mixed payload with a
+// missing DM does not leave behind any partial state (e.g. via a pre-flight
+// step that the caller forgot to gate).  Defense in depth: the DB layer
+// itself never writes group ext rows from UpdateSort.
+func TestDB_UpdateSort_MixedPayload_MissingDM_NoOpportunisticGroupWrite(t *testing.T) {
+	db := newDBForTest(t)
+	const uid, space = "u1", "s1"
+
+	err := db.UpdateSort(uid, space, []SortItem{
+		{TargetType: targetTypeGroup, TargetID: "g-default"},
+		{TargetType: targetTypeDM, TargetID: "dm-ghost"},
+	}, 0)
+	assert.ErrorIs(t, err, ErrSortTargetNotFound,
+		"db.UpdateSort must reject any missing target regardless of type")
+
+	m, err := db.Get(uid, space, targetTypeGroup, "g-default")
+	require.NoError(t, err)
+	assert.Nil(t, m,
+		"db.UpdateSort must never write a group ext row on its own — "+
+			"materialization is the caller's responsibility (issue #151 review #1)")
+}
+
+// TestDB_UpdateSort_StillRejectsMissingThread verifies the strict semantics
+// for target_type=5 are preserved for the same reason as DMs.
+func TestDB_UpdateSort_StillRejectsMissingThread(t *testing.T) {
+	db := newDBForTest(t)
+	const uid, space = "u1", "s1"
+
+	require.NoError(t, db.Upsert(uid, space, targetTypeThread, "grp1____thr-real", ConvExtFields{
+		FollowSort: intPtr(1),
+	}))
+
+	err := db.UpdateSort(uid, space, []SortItem{
+		{TargetType: targetTypeThread, TargetID: "grp1____thr-real"},
+		{TargetType: targetTypeThread, TargetID: "grp1____thr-ghost"},
+	}, 0)
+	assert.ErrorIs(t, err, ErrSortTargetNotFound,
+		"missing thread ext rows must still be reported as ErrSortTargetNotFound")
+}
+
+// ---------------------------------------------------------------------------
+// Issue #151 symptom #2 — MaterializeDefaultFollowedGroups is the read-path
+// hook that turns default-followed groups (in a category, no ext row) into
+// real rows on first sidebar/sync of the follow tab.  Without this, the
+// OnThreadCreated fanout silently skips users whose follow status exists only
+// via category — new threads in those groups never reach their follow tab.
+// ---------------------------------------------------------------------------
+
+func TestDB_MaterializeDefaultFollowedGroups_CreatesRowsWithAutoFollowOn(t *testing.T) {
+	db := newDBForTest(t)
+	const uid, space = "u1", "s1"
+
+	require.NoError(t, db.MaterializeDefaultFollowedGroups(uid, space,
+		[]string{"g-a", "g-b", "g-c"}))
+
+	for _, id := range []string{"g-a", "g-b", "g-c"} {
+		m, err := db.Get(uid, space, targetTypeGroup, id)
+		require.NoError(t, err)
+		require.NotNil(t, m, "ext row %q must exist after materialization", id)
+		assert.Equal(t, int8(1), m.AutoFollowThreads,
+			"materialized row must have auto_follow_threads=1 so OnThreadCreated "+
+				"will fan out new threads in this group to this user")
+		assert.Equal(t, int8(0), m.GroupUnfollowed,
+			"materialized row must have group_unfollowed=0")
+	}
+}
+
+func TestDB_MaterializeDefaultFollowedGroups_Idempotent_PreservesExistingRow(t *testing.T) {
+	db := newDBForTest(t)
+	const uid, space = "u1", "s1"
+
+	// Pre-existing row with non-default state (e.g. user previously dragged
+	// the group to follow_sort=5 and explicitly opted out of thread fanout).
+	require.NoError(t, db.Upsert(uid, space, targetTypeGroup, "g-x", ConvExtFields{
+		AutoFollowThreads: int8Ptr(0),
+		GroupUnfollowed:   int8Ptr(0),
+		FollowSort:        intPtr(5),
+	}))
+
+	require.NoError(t, db.MaterializeDefaultFollowedGroups(uid, space, []string{"g-x"}))
+
+	m, err := db.Get(uid, space, targetTypeGroup, "g-x")
+	require.NoError(t, err)
+	require.NotNil(t, m)
+	assert.Equal(t, int8(0), m.AutoFollowThreads,
+		"materialization must be a no-op on existing rows; "+
+			"user's explicit auto_follow_threads=0 choice must be respected")
+	assert.Equal(t, 5, m.FollowSort,
+		"materialization must not overwrite existing follow_sort")
+}
+
+func TestDB_MaterializeDefaultFollowedGroups_EmptyInput_NoOp(t *testing.T) {
+	db := newDBForTest(t)
+	require.NoError(t, db.MaterializeDefaultFollowedGroups("u1", "s1", nil))
+	require.NoError(t, db.MaterializeDefaultFollowedGroups("u1", "s1", []string{}))
+}
+
+// ---------------------------------------------------------------------------
+// Issue #151 review #3 — ClearAutoFollowThreadsTx
+//
+// MaterializeDefaultFollowedGroups creates ext rows with auto_follow_threads=1.
+// When the implicit follow goes away (user moves group out of category),
+// the same flag must be cleared so OnThreadCreated stops fanning out new
+// threads to a user who no longer sees the group in their follow tab.
+// ---------------------------------------------------------------------------
+
+func TestDB_ClearAutoFollowThreadsTx_ClearsExistingRow(t *testing.T) {
+	db := newDBForTest(t)
+	const uid, space = "u1", "s1"
+
+	// Pre-existing row with auto_follow_threads=1 (the materialized state).
+	require.NoError(t, db.Upsert(uid, space, targetTypeGroup, "g-clear", ConvExtFields{
+		AutoFollowThreads: int8Ptr(1),
+		GroupUnfollowed:   int8Ptr(0),
+		FollowSort:        intPtr(7),
+	}))
+
+	tx, err := db.session.Begin()
+	require.NoError(t, err)
+	defer tx.RollbackUnlessCommitted()
+	require.NoError(t, ClearAutoFollowThreadsTx(tx, uid, space, []string{"g-clear"}))
+	require.NoError(t, tx.Commit())
+
+	m, err := db.Get(uid, space, targetTypeGroup, "g-clear")
+	require.NoError(t, err)
+	require.NotNil(t, m)
+	assert.Equal(t, int8(0), m.AutoFollowThreads,
+		"auto_follow_threads must be cleared")
+	assert.Equal(t, int8(0), m.GroupUnfollowed,
+		"group_unfollowed must NOT be set — uncategorize ≠ explicit unfollow; "+
+			"clearing this flag would break the existing UnfollowGroupsTx contract")
+	assert.Equal(t, 7, m.FollowSort,
+		"follow_sort must be preserved — only the auto_follow_threads flag changes")
+}
+
+func TestDB_ClearAutoFollowThreadsTx_BatchClearsMultipleRows(t *testing.T) {
+	db := newDBForTest(t)
+	const uid, space = "u1", "s1"
+
+	for _, g := range []string{"g-a", "g-b", "g-c"} {
+		require.NoError(t, db.Upsert(uid, space, targetTypeGroup, g, ConvExtFields{
+			AutoFollowThreads: int8Ptr(1),
+		}))
+	}
+	// Unrelated row in the same uid/space must be left alone (negative case).
+	require.NoError(t, db.Upsert(uid, space, targetTypeGroup, "g-keep", ConvExtFields{
+		AutoFollowThreads: int8Ptr(1),
+	}))
+
+	tx, err := db.session.Begin()
+	require.NoError(t, err)
+	defer tx.RollbackUnlessCommitted()
+	require.NoError(t, ClearAutoFollowThreadsTx(tx, uid, space, []string{"g-a", "g-b", "g-c"}))
+	require.NoError(t, tx.Commit())
+
+	for _, g := range []string{"g-a", "g-b", "g-c"} {
+		m, err := db.Get(uid, space, targetTypeGroup, g)
+		require.NoError(t, err)
+		require.NotNil(t, m)
+		assert.Equal(t, int8(0), m.AutoFollowThreads,
+			"batch member %q must be cleared", g)
+	}
+	mk, err := db.Get(uid, space, targetTypeGroup, "g-keep")
+	require.NoError(t, err)
+	require.NotNil(t, mk)
+	assert.Equal(t, int8(1), mk.AutoFollowThreads,
+		"row not in the groupNos list must NOT be touched")
+}
+
+func TestDB_ClearAutoFollowThreadsTx_NoRow_NoOp(t *testing.T) {
+	db := newDBForTest(t)
+	tx, err := db.session.Begin()
+	require.NoError(t, err)
+	defer tx.RollbackUnlessCommitted()
+	// No row materialized — the call must succeed without error and leave
+	// the table state unchanged (this is the happy path for a user who
+	// never opened the follow tab before uncategorizing).
+	require.NoError(t, ClearAutoFollowThreadsTx(tx, "u-ghost", "s1", []string{"g-ghost"}))
+	require.NoError(t, tx.Commit())
+
+	m, err := db.Get("u-ghost", "s1", targetTypeGroup, "g-ghost")
+	require.NoError(t, err)
+	assert.Nil(t, m, "no row may be created — the helper is strictly UPDATE")
+}
+
+func TestDB_ClearAutoFollowThreadsTx_EmptyInput_NoOp(t *testing.T) {
+	db := newDBForTest(t)
+	tx, err := db.session.Begin()
+	require.NoError(t, err)
+	defer tx.RollbackUnlessCommitted()
+	require.NoError(t, ClearAutoFollowThreadsTx(tx, "u1", "s1", nil))
+	require.NoError(t, ClearAutoFollowThreadsTx(tx, "u1", "s1", []string{}))
+	require.NoError(t, ClearAutoFollowThreadsTx(tx, "", "s1", []string{"g"}),
+		"empty uid is a no-op (defensive, matches other helpers)")
+	require.NoError(t, ClearAutoFollowThreadsTx(tx, "u1", "", []string{"g"}),
+		"empty spaceID is a no-op")
+	require.NoError(t, tx.Commit())
+}
+
+// RestoreAutoFollowThreadsTx is the symmetric counterpart — verify the same
+// contract surface but for the =1 side of the lifecycle.
+
+func TestDB_RestoreAutoFollowThreadsTx_RestoresClearedRow(t *testing.T) {
+	db := newDBForTest(t)
+	const uid, space = "u1", "s1"
+
+	// Simulate the post-move-out state: row exists but auto_follow_threads=0.
+	require.NoError(t, db.Upsert(uid, space, targetTypeGroup, "g-restore", ConvExtFields{
+		AutoFollowThreads: int8Ptr(0),
+		GroupUnfollowed:   int8Ptr(0),
+		FollowSort:        intPtr(3),
+	}))
+
+	tx, err := db.session.Begin()
+	require.NoError(t, err)
+	defer tx.RollbackUnlessCommitted()
+	require.NoError(t, RestoreAutoFollowThreadsTx(tx, uid, space, []string{"g-restore"}))
+	require.NoError(t, tx.Commit())
+
+	m, err := db.Get(uid, space, targetTypeGroup, "g-restore")
+	require.NoError(t, err)
+	require.NotNil(t, m)
+	assert.Equal(t, int8(1), m.AutoFollowThreads,
+		"auto_follow_threads must be restored to 1")
+	assert.Equal(t, int8(0), m.GroupUnfollowed,
+		"group_unfollowed must NOT be touched — restore is symmetric to clear, "+
+			"only the auto-subscribe flag changes")
+	assert.Equal(t, 3, m.FollowSort,
+		"follow_sort must be preserved")
+}
+
+func TestDB_RestoreAutoFollowThreadsTx_NoRow_NoOp(t *testing.T) {
+	db := newDBForTest(t)
+	tx, err := db.session.Begin()
+	require.NoError(t, err)
+	defer tx.RollbackUnlessCommitted()
+	// First-time-into-category case: no ext row yet.  Restore must NOT
+	// create a row — sidebar materialization is the canonical creation
+	// site; the move-in handler must stay strictly UPDATE so the two
+	// sites cannot race on the unique key.
+	require.NoError(t, RestoreAutoFollowThreadsTx(tx, "u-fresh", "s1", []string{"g-fresh"}))
+	require.NoError(t, tx.Commit())
+
+	m, err := db.Get("u-fresh", "s1", targetTypeGroup, "g-fresh")
+	require.NoError(t, err)
+	assert.Nil(t, m, "no row may be created — restore is strictly UPDATE")
+}
+
+func TestDB_RestoreAutoFollowThreadsTx_LeavesUnrelatedRowsAlone(t *testing.T) {
+	db := newDBForTest(t)
+	const uid, space = "u1", "s1"
+
+	// Two rows in scope, one out of scope (different target_id).
+	require.NoError(t, db.Upsert(uid, space, targetTypeGroup, "g-a", ConvExtFields{AutoFollowThreads: int8Ptr(0)}))
+	require.NoError(t, db.Upsert(uid, space, targetTypeGroup, "g-b", ConvExtFields{AutoFollowThreads: int8Ptr(0)}))
+	require.NoError(t, db.Upsert(uid, space, targetTypeGroup, "g-keep", ConvExtFields{AutoFollowThreads: int8Ptr(0)}))
+
+	tx, err := db.session.Begin()
+	require.NoError(t, err)
+	defer tx.RollbackUnlessCommitted()
+	require.NoError(t, RestoreAutoFollowThreadsTx(tx, uid, space, []string{"g-a", "g-b"}))
+	require.NoError(t, tx.Commit())
+
+	for _, id := range []string{"g-a", "g-b"} {
+		m, err := db.Get(uid, space, targetTypeGroup, id)
+		require.NoError(t, err)
+		require.NotNil(t, m)
+		assert.Equal(t, int8(1), m.AutoFollowThreads, "row %q restored", id)
+	}
+	mk, err := db.Get(uid, space, targetTypeGroup, "g-keep")
+	require.NoError(t, err)
+	require.NotNil(t, mk)
+	assert.Equal(t, int8(0), mk.AutoFollowThreads,
+		"row not in groupNos list must NOT be touched")
+}

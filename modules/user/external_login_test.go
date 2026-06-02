@@ -10,6 +10,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/testutil"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
+	commonsettings "github.com/Mininglamp-OSS/octo-server/modules/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,6 +41,14 @@ func setupExternalLoginTest(t *testing.T) *User {
 	).Exec()
 	require.NoError(t, err, "seed app_config")
 
+	// 兜底刷新 SystemSettings snapshot。CleanAllTables 只清 DB,不会触动
+	// EnsureSystemSettings 维护的进程级 snapshot;若先前测试通过
+	// setSystemSettingForUserTest + Reload 把 register.off=1 写进了 snapshot,
+	// 这里不重置就会让本测试组里依赖 yaml 默认值的用例(例如 CreateRequiresUID)
+	// 在 RegisterOff 早于 UID 校验的位置就被短路。
+	require.NoError(t, commonsettings.EnsureSystemSettings(ctx).Reload(),
+		"reset SystemSettings snapshot after CleanAllTables")
+
 	return New(ctx)
 }
 
@@ -62,12 +71,12 @@ func TestService_LoginByExternalIdentity_ExistingUser(t *testing.T) {
 	u := setupExternalLoginTest(t)
 
 	tests := []struct {
-		name      string
-		seed      *Model // nil 表示不预先插入用户
-		req       ExternalLoginReq
-		wantErr   bool
-		assertOK  func(t *testing.T, resp *ExternalLoginResp)
-		assertDB  func(t *testing.T, u *User)
+		name     string
+		seed     *Model // nil 表示不预先插入用户
+		req      ExternalLoginReq
+		wantErr  bool
+		assertOK func(t *testing.T, resp *ExternalLoginResp)
+		assertDB func(t *testing.T, u *User)
 	}{
 		{
 			name: "normal active user issues session",
@@ -245,4 +254,56 @@ func TestService_LoginByExternalIdentity_CreateRequiresUID(t *testing.T) {
 	assert.Nil(t, resp)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "UID is required")
+}
+
+// TestService_LoginByExternalIdentity_TrustedSSOCreate_BypassesRegisterOff
+// 锚定 P0 fix:OIDC 模块通过 ExternalLoginReq.TrustedSSOCreate=true 声明
+// "已经过 IssuerAllowlist 信任校验" 后,external 建号路径必须绕过
+// register.off 全局开关。与下面 CreateBlockedByRegisterOff 配对覆盖
+// "默认 false 仍拒、显式 true 放行" 的语义对称。
+//
+// 与 CreateBlockedByRegisterOff 平行:这里只断言"register.off 守卫不再
+// 阻断"——错误信息中不应再出现"注册通道暂不开放"字面。下游 createUserWithRespAndTx
+// 路径在当前测试基础设施下仍有 OCTO 迁移 TODO(见 issue #17),所以不期望全程
+// 跑通,仅锚定守卫绕过的关键语义。register.off=1 部署下 OIDC 通道端到端跑通
+// 由 oidc 模块的集成测试承接(modules/oidc/api_bind_test.go)。
+func TestService_LoginByExternalIdentity_TrustedSSOCreate_BypassesRegisterOff(t *testing.T) {
+	u := setupExternalLoginTest(t)
+	setSystemSettingForUserTest(t, u.ctx, "register", "off", "1", "bool")
+	require.NoError(t, commonsettings.EnsureSystemSettings(u.ctx).Reload())
+
+	uid := util.GenerUUID()
+	_, err := u.userService.LoginByExternalIdentity(context.Background(), ExternalLoginReq{
+		UID:              uid,
+		Name:             "TrustedSSO",
+		Email:            "trusted.sso@example.com",
+		DeviceFlag:       config.APP,
+		TrustedSSOCreate: true,
+	})
+	if err != nil {
+		assert.NotContains(t, err.Error(), "注册通道暂不开放",
+			"TrustedSSOCreate=true must bypass RegisterOff (下游失败可接受,守卫被绕过是关键)")
+	}
+}
+
+func TestService_LoginByExternalIdentity_CreateBlockedByRegisterOff(t *testing.T) {
+	u := setupExternalLoginTest(t)
+	setSystemSettingForUserTest(t, u.ctx, "register", "off", "1", "bool")
+	require.NoError(t, commonsettings.EnsureSystemSettings(u.ctx).Reload())
+
+	uid := util.GenerUUID()
+	resp, err := u.userService.LoginByExternalIdentity(context.Background(), ExternalLoginReq{
+		UID:        uid,
+		Name:       "BlockedExternal",
+		Email:      "blocked.external@example.com",
+		DeviceFlag: config.APP,
+	})
+
+	assert.Nil(t, resp)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "注册通道暂不开放")
+
+	got, queryErr := u.db.QueryByUID(uid)
+	require.NoError(t, queryErr)
+	assert.Nil(t, got, "register.off must block new external users before insert")
 }

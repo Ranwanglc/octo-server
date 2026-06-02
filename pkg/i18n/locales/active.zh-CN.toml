@@ -1,0 +1,612 @@
+# zh-CN runtime 翻译文件（active.*）。
+#
+# 命名遵循 go-i18n 约定：
+#   - active.<lang>.toml: 运行期加载（本文件）
+#   - translate.<lang>.toml: 翻译流程 WIP 中间文件，由 goi18n merge 生成 stub
+#     供翻译团队补译，翻译完成后 merge 回 active.<lang>.toml 并删除；**不会被
+#     bundle embed**（参见 pkg/i18n/bundle.go 的 go:embed pattern）
+#
+# 当前手工维护首期 err.shared.* 翻译；AST extractor 流程接入后新增 code 会
+# 先在 translate.<lang>.toml 出现，翻译完成后 merge 进本文件。
+#
+# 与 pkg/i18n/codes/shared.go 的 DefaultMessages["zh-CN"] 内容一致——TOML 是
+# 日常运行路径，DefaultMessages 仅在 bundle 加载失败时兜底（D22）。
+
+["err.shared.auth.required"]
+other = "请先登录！"
+
+["err.shared.auth.token_missing"]
+other = "token不能为空，请先登录！"
+
+["err.shared.auth.token_invalid"]
+other = "token有误！"
+
+["err.shared.auth.token_expired"]
+other = "登录已过期，请重新登录。"
+
+["err.shared.auth.forbidden"]
+other = "无权执行此操作。"
+
+["err.shared.rate.limited"]
+other = "请求过于频繁，请稍后再试。"
+
+["err.shared.param.invalid"]
+other = "请求参数无效。"
+
+["err.shared.not_found"]
+other = "资源不存在。"
+
+["err.shared.internal"]
+other = "服务器内部错误。"
+
+["err.server.thread.group_no_invalid"]
+other = "群编号无效。"
+
+["err.server.thread.short_id_invalid"]
+other = "子区短 ID 无效。"
+
+["err.server.thread.request_invalid"]
+other = "请求无效。"
+
+["err.server.thread.name_invalid"]
+other = "子区名称不能为空，且不能超过 100 个字符。"
+
+["err.server.thread.source_message_invalid"]
+other = "来源消息内容无效。"
+
+["err.server.thread.status_invalid"]
+other = "子区状态无效。"
+
+["err.server.thread.not_group_member"]
+other = "你不是群成员。"
+
+["err.server.thread.permission_denied"]
+other = "无权执行此子区操作。"
+
+["err.server.thread.not_found"]
+other = "子区不存在。"
+
+["err.server.thread.deleted"]
+other = "子区已被删除。"
+
+["err.server.thread.not_active"]
+other = "子区不是活跃状态。"
+
+["err.server.thread.status_changed"]
+other = "子区状态已变化，请重试。"
+
+["err.server.thread.creator_cannot_leave"]
+other = "子区创建者不能退出子区。"
+
+["err.server.thread.group_md_not_found"]
+other = "子区 GROUP.md 不存在。"
+
+["err.server.thread.group_md_content_empty"]
+other = "GROUP.md 内容不能为空。"
+
+["err.server.thread.group_md_content_too_large"]
+other = "GROUP.md 内容超过大小限制。"
+
+["err.server.thread.setting_invalid"]
+other = "子区设置无效。"
+
+["err.server.thread.store_failed"]
+other = "子区存储操作失败。"
+
+# ---- err.server.user.* (Phase 2.1 modules/user/api.go migration) ----
+
+["err.server.user.request_invalid"]
+other = "请求数据格式有误。"
+
+["err.server.user.lock_minute_out_of_range"]
+other = "锁屏时长必须在 0 到 60 分钟之间。"
+
+["err.server.user.short_no_format_invalid"]
+other = "短号必须以字母开头，长度 6-20 位，仅支持字母、数字、下划线或减号。"
+
+["err.server.user.language_unsupported"]
+other = "不支持的语言。"
+
+["err.server.user.token_required"]
+other = "Token 不能为空。"
+
+["err.server.user.invalid_credentials"]
+other = "用户名或密码错误。"
+
+["err.server.user.code_invalid"]
+other = "验证码错误。"
+
+["err.server.user.account_banned"]
+other = "此账号已被封禁。"
+
+["err.server.user.login_device_expired"]
+other = "登录设备已过期，请重新登录。"
+
+["err.server.user.login_locked"]
+other = "登录失败次数过多，账号已被临时锁定，请稍后再试。"
+
+["err.server.user.not_found"]
+other = "用户不存在。"
+
+["err.server.user.current_not_found"]
+other = "当前登录用户不存在。"
+
+["err.server.user.already_exists"]
+other = "该用户已存在。"
+
+["err.server.user.registration_closed"]
+other = "注册通道暂未开放。"
+
+["err.server.user.local_login_disabled"]
+other = "本地登录已关闭。"
+
+["err.server.user.phone_region_unsupported"]
+other = "仅支持中国大陆手机号。"
+
+["err.server.user.invite_code_not_found"]
+other = "邀请码不存在。"
+
+["err.server.user.account_destroyed"]
+other = "该账号已注销。"
+
+["err.server.user.account_destroying"]
+other = "账号正处于注销冷静期，请使用新版客户端撤销或查询状态。"
+
+["err.server.user.update_not_allowed"]
+other = "该字段不允许修改。"
+
+["err.server.user.short_no_already_changed"]
+other = "短号仅可修改一次。"
+
+["err.server.user.demo_lock_unsupported"]
+other = "演示账号不支持开启设备锁。"
+
+["err.server.user.auth_code_not_found"]
+other = "授权码无效或已过期。"
+
+["err.server.user.auth_code_wrong_type"]
+other = "授权码类型不是登录授权码。"
+
+["err.server.user.auth_info_invalid"]
+other = "授权信息格式错误。"
+
+["err.server.user.auth_scanner_mismatch"]
+other = "扫描者与授权者不是同一用户。"
+
+["err.server.user.qr_ver_code_missing"]
+other = "用户没有 QR 验证码。"
+
+["err.server.user.wechat_exchange_failed"]
+other = "获取微信 access_token 失败。"
+
+["err.server.user.wechat_profile_failed"]
+other = "获取微信用户资料失败。"
+
+["err.server.user.wechat_response_invalid"]
+other = "微信返回数据格式错误。"
+
+["err.server.user.chat_pwd_update_failed"]
+other = "修改聊天密码失败。"
+
+["err.server.user.login_pwd_update_failed"]
+other = "修改登录密码失败。"
+
+["err.server.user.lock_screen_pwd_update_failed"]
+other = "修改锁屏密码失败。"
+
+["err.server.user.password_process_failed"]
+other = "密码处理失败。"
+
+["err.server.user.query_failed"]
+other = "查询用户数据失败。"
+
+["err.server.user.store_failed"]
+other = "存储用户数据失败。"
+
+["err.server.user.im_call_failed"]
+other = "调用 IM 服务失败。"
+
+["err.server.user.decode_failed"]
+other = "解码内部数据失败。"
+
+["err.server.user.file_operation_failed"]
+other = "文件处理失败。"
+
+["err.server.user.sms_send_failed"]
+other = "短信发送失败。"
+
+["err.server.user.destroy_failed"]
+other = "注销账号失败。"
+
+["err.server.user.register_failed"]
+other = "注册失败。"
+
+["err.server.user.language_set_failed"]
+other = "设置语言偏好失败。"
+
+# ---- err.server.user.* (Phase 2.1 modules/user/api_manager.go migration) ----
+
+["err.server.user.manager_permission_required"]
+other = "该账号未开通管理权限。"
+
+["err.server.user.password_too_short"]
+other = "密码长度必须大于 6 位。"
+
+["err.server.user.password_mismatch"]
+other = "两次输入的密码不一致。"
+
+["err.server.user.old_password_incorrect"]
+other = "原密码错误。"
+
+["err.server.user.new_password_same_as_old"]
+other = "新密码不能与原密码相同。"
+
+["err.server.user.not_admin_account"]
+other = "该用户不是管理员账号，无法删除。"
+
+["err.server.user.cannot_delete_super_admin"]
+other = "超级管理员账号不能删除。"
+
+["err.server.user.list_filter_conflict"]
+other = "用户列表筛选条件互斥。"
+
+["err.server.user.token_cache_failed"]
+other = "更新登录令牌缓存失败。"
+
+["err.server.user.short_no_gen_failed"]
+other = "生成短编号失败。"
+
+# ---- err.server.user.* (Phase 2.1 modules/user/api_friend.go migration) ----
+
+["err.server.user.cannot_add_self"]
+other = "不能添加自己为好友。"
+
+["err.server.user.already_friend"]
+other = "已经是好友，无需重复申请。"
+
+["err.server.user.bot_not_in_space"]
+other = "该机器人不在当前空间中，无法添加。"
+
+["err.server.user.friend_apply_not_found"]
+other = "好友申请记录不存在。"
+
+["err.server.user.friend_not_found"]
+other = "好友信息不存在。"
+
+["err.server.user.friend_apply_invalid"]
+other = "好友申请无效或已过期。"
+
+# ---- err.server.user.* (Phase 2.1 modules/user/api_device.go etc.) ----
+
+["err.server.user.device_not_found"]
+other = "未查询到该设备。"
+
+# ---- err.server.user.* (Phase 2.1 destroy / pinned / oauth migration) ----
+
+["err.server.user.password_not_set"]
+other = "当前账号未设置密码，无法验证身份。"
+
+["err.server.user.password_incorrect"]
+other = "密码错误。"
+
+["err.server.user.account_state_changed"]
+other = "账号状态已变化，请刷新后重试。"
+
+["err.server.user.not_destroying"]
+other = "账号未在注销中。"
+
+["err.server.user.pinned_already_exists"]
+other = "该频道已置顶。"
+
+["err.server.user.pinned_limit_exceeded"]
+other = "置顶频道数量已达上限。"
+
+["err.server.user.channel_access_denied"]
+other = "你无权访问该频道。"
+
+["err.server.user.pinned_sort_invalid"]
+other = "置顶排序参数无效。"
+
+["err.server.user.oauth_state_expired"]
+other = "登录状态已过期，请重试。"
+
+["err.server.user.oauth_exchange_failed"]
+other = "获取第三方授权令牌失败。"
+
+["err.server.user.oauth_profile_failed"]
+other = "获取第三方用户信息失败。"
+
+# ---- err.server.user.* (Phase 2.1 modules/user/api_emaillogin.go migration) ----
+
+["err.server.user.email_invalid"]
+other = "邮箱格式不正确。"
+
+["err.server.user.email_register_disabled"]
+other = "暂不支持邮箱注册。"
+
+["err.server.user.email_login_disabled"]
+other = "暂不支持邮箱登录。"
+
+["err.server.user.account_unavailable"]
+other = "该账号已注销或被禁用。"
+
+["err.server.user.email_send_failed"]
+other = "发送邮箱验证码失败。"
+
+["err.server.user.email_rate_limited"]
+other = "验证码发送过于频繁，请 1 分钟后再试。"
+
+# ---- err.server.user.* (Phase 2.1 modules/user/api_usernamelogin.go migration) ----
+
+["err.server.user.username_register_disabled"]
+other = "暂不支持用户名注册。"
+
+["err.server.user.username_format_invalid"]
+other = "用户名必须为 8-22 位。"
+
+["err.server.user.public_key_not_found"]
+other = "该用户未上传公钥。"
+
+["err.server.user.public_key_already_exists"]
+other = "该用户已上传过公钥信息。"
+
+["err.server.user.signature_not_found"]
+other = "签名校验信息不存在或已过期。"
+
+["err.server.user.signature_invalid"]
+other = "签名校验失败。"
+
+["err.server.user.verify_type_invalid"]
+other = "验证类型不匹配。"
+
+["err.server.group.request_invalid"]
+other = "请求参数有误。"
+
+["err.server.group.member_not_friend"]
+other = "添加的用户不是好友，请先添加好友。"
+
+["err.server.group.file_helper_not_allowed"]
+other = "不支持将“文件助手”加入群聊。"
+
+["err.server.group.category_space_mismatch"]
+other = "群聊分组与空间不匹配。"
+
+["err.server.group.target_not_bot"]
+other = "目标成员不是机器人。"
+
+["err.server.group.group_md_content_too_large"]
+other = "GROUP.md 内容超过大小上限。"
+
+["err.server.group.auth_code_invalid"]
+other = "授权码无效或已失效。"
+
+["err.server.group.invite_expired"]
+other = "邀请链接已过期。"
+
+["err.server.group.creator_only"]
+other = "只有群主才能执行此操作。"
+
+["err.server.group.manager_only"]
+other = "只有群管理员才能执行此操作。"
+
+["err.server.group.creator_or_manager_only"]
+other = "只有群主或管理员才能执行此操作。"
+
+["err.server.group.not_group_member"]
+other = "你不是该群成员。"
+
+["err.server.group.view_forbidden"]
+other = "你没有权限查看。"
+
+["err.server.group.member_cannot_remove"]
+other = "普通成员无法移除群成员。"
+
+["err.server.group.cannot_remove_admin"]
+other = "管理员不能移除其他管理员。"
+
+["err.server.group.cannot_remove_owner"]
+other = "管理员不能移除群主。"
+
+["err.server.group.external_cannot_be_admin"]
+other = "不能将外部成员设为管理员。"
+
+["err.server.group.external_cannot_be_owner"]
+other = "不能将群主转让给外部成员。"
+
+["err.server.group.external_join_forbidden"]
+other = "该群已禁止外部成员加入，请联系群管理员。"
+
+["err.server.group.invite_mode_cannot_add"]
+other = "群已开启邀请模式，不能直接添加成员。"
+
+["err.server.group.invite_mode_cannot_join"]
+other = "群已开启邀请模式，不能直接加入群聊。"
+
+["err.server.group.category_forbidden"]
+other = "无权限使用此群聊分组。"
+
+["err.server.group.bot_ownership_denied"]
+other = "你没有权限邀请该机器人。"
+
+["err.server.group.bot_not_in_space"]
+other = "该机器人不属于你的空间。"
+
+["err.server.group.auth_code_user_mismatch"]
+other = "授权码与当前登录用户不匹配。"
+
+["err.server.group.qrcode_member_only"]
+other = "只有群成员才能生成二维码。"
+
+["err.server.group.not_found"]
+other = "群不存在。"
+
+["err.server.group.member_not_in_group"]
+other = "该成员不在群内。"
+
+["err.server.group.category_not_found"]
+other = "群聊分组不存在。"
+
+["err.server.group.transfer_target_not_found"]
+other = "转让的用户不存在或已注销。"
+
+["err.server.group.invite_not_found"]
+other = "未查询到邀请信息。"
+
+["err.server.group.cannot_target_self"]
+other = "不能对自己执行此操作。"
+
+["err.server.group.already_member"]
+other = "你已在群内，无需重复加入。"
+
+["err.server.group.invite_status_invalid"]
+other = "邀请信息不是待邀请状态。"
+
+["err.server.group.too_large_to_sync"]
+other = "超大群不支持同步群成员。"
+
+["err.server.group.daily_create_limit"]
+other = "今日建群数量已达上限。"
+
+["err.server.group.query_failed"]
+other = "查询群数据失败。"
+
+["err.server.group.store_failed"]
+other = "保存群数据失败。"
+
+["err.server.group.notify_failed"]
+other = "发送群通知失败。"
+
+["err.server.message.request_invalid"]
+other = "请求参数有误。"
+
+["err.server.message.id_seq_mismatch"]
+other = "消息 ID 与消息序号不匹配。"
+
+["err.server.message.not_friend"]
+other = "你与对方不是好友。"
+
+["err.server.message.peer_not_in_space"]
+other = "对方不在该空间内。"
+
+["err.server.message.conversation_forbidden"]
+other = "你没有权限操作此会话。"
+
+["err.server.message.cannot_delete_self_conversation"]
+other = "不能删除与自己的会话。"
+
+["err.server.message.channel_access_denied"]
+other = "你没有权限操作此频道。"
+
+["err.server.message.not_group_member"]
+other = "你不是该群成员。"
+
+["err.server.message.delete_forbidden"]
+other = "你没有权限删除此消息。"
+
+["err.server.message.recall_forbidden"]
+other = "你没有权限撤回此消息。"
+
+["err.server.message.pinned_forbidden"]
+other = "你没有权限置顶或取消置顶消息。"
+
+["err.server.message.edit_own_only"]
+other = "只能编辑自己发送的消息。"
+
+["err.server.message.proxy_send_unsupported"]
+other = "不支持代发消息。"
+
+["err.server.message.not_found"]
+other = "消息不存在或已删除。"
+
+["err.server.message.group_not_found"]
+other = "目标群不存在或已删除。"
+
+["err.server.message.receiver_not_found"]
+other = "消息接收者不存在。"
+
+["err.server.message.banword_not_found"]
+other = "操作的违禁词不存在。"
+
+["err.server.message.pinned_limit_exceeded"]
+other = "置顶消息数量已达上限。"
+
+["err.server.message.recall_time_exceeded"]
+other = "消息已超过可撤回时限。"
+
+["err.server.message.query_failed"]
+other = "查询消息数据失败。"
+
+["err.server.message.store_failed"]
+other = "保存消息数据失败。"
+
+["err.server.message.notify_failed"]
+other = "发送消息指令失败。"
+
+["err.server.message.search_failed"]
+other = "消息搜索失败。"
+
+["err.server.workplace.request_invalid"]
+other = "请求参数有误。"
+
+["err.server.workplace.app_not_found"]
+other = "该应用不存在或不可用。"
+
+["err.server.workplace.category_not_found"]
+other = "该分类不存在。"
+
+["err.server.workplace.app_name_exists"]
+other = "该应用名称已存在。"
+
+["err.server.workplace.category_name_exists"]
+other = "该分类名称已存在。"
+
+["err.server.workplace.query_failed"]
+other = "查询工作台数据失败。"
+
+["err.server.workplace.store_failed"]
+other = "保存工作台数据失败。"
+
+["err.server.category.request_invalid"]
+other = "请求参数有误。"
+
+["err.server.category.name_too_long"]
+other = "类别名称不能超过100个字符。"
+
+["err.server.category.sort_list_mismatch"]
+other = "分类列表数量不匹配。"
+
+["err.server.category.sort_list_duplicate"]
+other = "分类列表存在重复。"
+
+["err.server.category.group_space_missing"]
+other = "该群组不属于任何空间。"
+
+["err.server.category.space_mismatch"]
+other = "群组和分类不在同一空间。"
+
+["err.server.category.space_member_required"]
+other = "你不是该空间成员。"
+
+["err.server.category.group_member_required"]
+other = "你不是该群成员。"
+
+["err.server.category.permission_denied"]
+other = "无权操作此分类。"
+
+["err.server.category.default_immutable"]
+other = "默认分类不可修改。"
+
+["err.server.category.default_undeletable"]
+other = "默认分类不可删除。"
+
+["err.server.category.not_found"]
+other = "分类不存在。"
+
+["err.server.category.limit_exceeded"]
+other = "每个空间最多创建20个分类。"
+
+["err.server.category.query_failed"]
+other = "查询分类数据失败。"
+
+["err.server.category.store_failed"]
+other = "保存分类数据失败。"

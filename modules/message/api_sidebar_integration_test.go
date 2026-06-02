@@ -146,9 +146,9 @@ func TestIntegration_Sidebar_FollowTab_BasicSmoke(t *testing.T) {
 	}
 
 	// 5. Run the same pure-function pipeline as Sidebar.Sync follow branch.
-	items := buildFollowItems(stubConvs, categorySetting, unfollowedGroups, followedDMs, threadExtMap, nil, nil)
+	items := buildFollowItems(stubConvs, categorySetting, unfollowedGroups, followedDMs, threadExtMap, nil, nil, nil, nil, "")
 	// mergeThreadEntries: thread is already in IM result, so no new item added.
-	items = mergeThreadEntries(items, threadExtRows, map[string]*time.Time{}, categorySetting, unfollowedGroups)
+	items = mergeThreadEntries(items, threadExtRows, map[string]*time.Time{}, categorySetting, unfollowedGroups, nil, nil, "")
 	sortFollowItems(items)
 
 	// 6. Assert exactly 3 items with correct target_type.
@@ -225,7 +225,7 @@ func TestIntegration_Sidebar_FollowTab_BlacklistedGroupExcluded(t *testing.T) {
 		{ChannelID: groupNo, ChannelType: common.ChannelTypeGroup.Uint8(), Timestamp: 100},
 	}
 
-	items := buildFollowItems(stubConvs, categorySetting, unfollowedGroups, nil, nil, nil, nil)
+	items := buildFollowItems(stubConvs, categorySetting, unfollowedGroups, nil, nil, nil, nil, nil, nil, "")
 	assert.Len(t, items, 0,
 		"blacklisted group (group_unfollowed=1 in DB) must be excluded from follow tab")
 }
@@ -261,7 +261,7 @@ func TestIntegration_Sidebar_FollowTab_NoExtRows_ReturnsEmpty(t *testing.T) {
 	}
 
 	// No category → group excluded; no followed_dm row → DM excluded.
-	items := buildFollowItems(stubConvs, nil /*categorySetting*/, unfollowedGroups, followedDMs, nil, nil, nil)
+	items := buildFollowItems(stubConvs, nil /*categorySetting*/, unfollowedGroups, followedDMs, nil, nil, nil, nil, nil, "")
 	assert.Len(t, items, 0, "follow tab with no ext data must return 0 items")
 }
 
@@ -307,7 +307,7 @@ func TestIntegration_Sidebar_MergeThreadEntries_AddsDBOnlyThreads(t *testing.T) 
 	}
 
 	// buildFollowItems picks up threadInIM (has ext row + parent in follow set).
-	items := buildFollowItems(stubConvs, categorySetting, nil, nil, threadExtMap, nil, nil)
+	items := buildFollowItems(stubConvs, categorySetting, nil, nil, threadExtMap, nil, nil, nil, nil, "")
 	require.Len(t, items, 1, "buildFollowItems must include threadInIM")
 
 	// mergeThreadEntries appends threadDBOnly (not yet in items).
@@ -319,7 +319,7 @@ func TestIntegration_Sidebar_MergeThreadEntries_AddsDBOnlyThreads(t *testing.T) 
 		threadInIM:   &alive,
 		threadDBOnly: &alive,
 	}
-	items = mergeThreadEntries(items, threadExtRows, lastMsgAtMap, categorySetting, map[string]struct{}{})
+	items = mergeThreadEntries(items, threadExtRows, lastMsgAtMap, categorySetting, map[string]struct{}{}, nil, nil, "")
 	require.Len(t, items, 2, "mergeThreadEntries must add the DB-only thread")
 
 	// Both thread IDs must be present.
@@ -414,7 +414,7 @@ func TestIntegration_Sidebar_Issue41_CrossTypeDragSurvivesReload(t *testing.T) {
 
 		// 本 case DM 没绑 category（issue #41 reproduction 的 fileHelper 也没有），
 		// dmCategorySorts 直接传 nil，避免依赖 group_setting 表。
-		items := buildFollowItems(stubConvs, categorySetting, unfollowedGroups, followedDMs, nil, groupExts, nil)
+		items := buildFollowItems(stubConvs, categorySetting, unfollowedGroups, followedDMs, nil, groupExts, nil, nil, nil, "")
 		sortFollowItems(items)
 		return items
 	}
@@ -492,8 +492,187 @@ func TestIntegration_Sidebar_Issue41_DMCategorySortLoadedFromGroupCategory(t *te
 	stubConvs := []*config.SyncUserConversationResp{
 		{ChannelID: dmID, ChannelType: common.ChannelTypePerson.Uint8(), Timestamp: 100},
 	}
-	items := buildFollowItems(stubConvs, nil, nil, followedDMs, nil, nil, sorts)
+	items := buildFollowItems(stubConvs, nil, nil, followedDMs, nil, nil, sorts, nil, nil, "")
 	require.Len(t, items, 1)
 	assert.Equal(t, catSort, items[0].CategorySort,
 		"带 dm_category_id 的 DM 必须把 group_category.sort 写到 SidebarItem.CategorySort")
+}
+
+// ---------------------------------------------------------------------------
+// Scene 7g: issue #151 — default-followed group (categorized but no ext row)
+// materializes during sidebar/sync.
+//
+// Bug: buildFollowItems treats "group has category + not blacklisted" as
+// followed regardless of ext-row presence.  But OnThreadCreated's fan-out
+// filter (selectEligibleForFanoutTx) only sees users whose ext row says
+// auto_follow_threads=1.  Users whose follow status was implied solely by
+// category had no ext row → fan-out silently skipped them → new threads
+// never appeared in their follow tab.
+//
+// Fix: when sidebar/sync's follow branch emits a group SidebarItem without a
+// matching groupExts entry, materialize the ext row with
+// auto_follow_threads=1, group_unfollowed=0 so the next OnThreadCreated for
+// that group reaches this user.  This test exercises the materialization
+// step end-to-end against the real DB.
+// ---------------------------------------------------------------------------
+
+func TestIntegration_Sidebar_FollowTab_MaterializesDefaultFollowedGroup(t *testing.T) {
+	ctx := newSidebarIntegCtx(t)
+	cleanConvExtTable(t, ctx)
+
+	const uid, space = "s7g-uid", "s7g-space"
+	const groupNo = "s7g-grp"
+
+	db := convext.NewDB(ctx)
+
+	// Precondition: no ext row exists for (uid, space, groupNo).
+	pre, err := db.Get(uid, space, 2 /* Group */, groupNo)
+	require.NoError(t, err)
+	require.Nil(t, pre,
+		"precondition: default-followed group must have NO ext row at sidebar/sync time")
+
+	// Simulate the diff that the sidebar handler computes: the group is in the
+	// follow tab (because it has a category) and groupExts had no entry for it.
+	// The handler then calls MaterializeDefaultFollowedGroups with this list.
+	require.NoError(t, db.MaterializeDefaultFollowedGroups(uid, space, []string{groupNo}),
+		"sidebar handler's materialization step must succeed for a default-followed group")
+
+	// After materialization, the ext row exists with the contract the
+	// downstream OnThreadCreated fan-out filter requires:
+	//   auto_follow_threads=1 AND group_unfollowed=0
+	post, err := db.Get(uid, space, 2, groupNo)
+	require.NoError(t, err)
+	require.NotNil(t, post,
+		"ext row must exist after sidebar/sync materialization (issue #151 symptom #2)")
+	assert.Equal(t, int8(1), post.AutoFollowThreads,
+		"materialized row must have auto_follow_threads=1 so OnThreadCreated "+
+			"fans out new threads to this user (closes issue #151 symptom #2)")
+	assert.Equal(t, int8(0), post.GroupUnfollowed,
+		"materialized row must have group_unfollowed=0")
+}
+
+// ---------------------------------------------------------------------------
+// Scene 7h: issue #151 review blocker (Jerry-Xin / lml2468) — sidebar must
+// NOT materialize a group whose group_setting.category_id points at a
+// soft-deleted group_category (status=2).
+//
+// Before fix: QueryCategorySettingsByGroupNos selected gs.category_id (the
+// stale persisted field).  Even though the LEFT JOIN had `gc.status != 2`,
+// that predicate only nullifies the JOIN-side columns (gc.sort → 0 via
+// IFNULL); the SELECT still returned the stale gs.category_id.  buildFollow-
+// Items checked `cs.CategoryID == nil` to filter, which was always FALSE for
+// a soft-deleted category — the group still entered the follow tab AND the
+// new sidebar materialization branch wrote an auto_follow_threads=1 ext row.
+// Subsequent OnThreadCreated would then fan out threads of a group whose
+// category lookup model treats as "not followed any more" — phantom
+// subscription.
+//
+// After fix: QueryCategorySettingsByGroupNos selects gc.category_id (the
+// JOIN-side column).  A soft-deleted category → JOIN miss → CategoryID=nil
+// → buildFollowItems excludes the group → the materialization loop never
+// sees it.  This test exercises the full chain against real
+// group_setting + group_category rows.
+// ---------------------------------------------------------------------------
+
+func TestIntegration_Sidebar_FollowTab_DoesNotMaterializeSoftDeletedCategoryGroup(t *testing.T) {
+	ctx := newSidebarIntegCtx(t)
+	cleanConvExtTable(t, ctx)
+	ensureSidebarSoftDeletedCategoryTables(t, ctx)
+	cleanSidebarSoftDeletedCategoryRows(t, ctx)
+
+	const (
+		uid           = "s7h-uid"
+		space         = "s7h-space"
+		groupNo       = "s7h-grp"
+		softDeletedID = "s7h-cat-deleted"
+	)
+
+	// Seed: user has assigned group → soft-deleted category.  gs.category_id
+	// is non-NULL but the underlying gc row has status=2.
+	_, err := ctx.DB().Exec(
+		"INSERT INTO group_category (category_id, space_id, uid, name, sort, status) "+
+			"VALUES (?, ?, ?, ?, 0, 2)",
+		softDeletedID, "", uid, "deleted cat",
+	)
+	require.NoError(t, err, "seed soft-deleted category")
+	_, err = ctx.DB().Exec(
+		"INSERT INTO group_setting (uid, group_no, category_id) VALUES (?, ?, ?)",
+		uid, groupNo, softDeletedID,
+	)
+	require.NoError(t, err, "seed group_setting pointing at soft-deleted category")
+
+	// Stage A — QueryCategorySettingsByGroupNos must return CategoryID=nil.
+	db := newGroupCategoryDB(ctx)
+	settings, err := db.QueryCategorySettingsByGroupNos([]string{groupNo}, uid)
+	require.NoError(t, err)
+	require.Len(t, settings, 1,
+		"row must still surface (sidebar needs intraCategorySort even for uncategorized groups)")
+	assert.Nil(t, settings[0].CategoryID,
+		"CategoryID must be nil for a group whose group_setting points at a "+
+			"soft-deleted category — issue #151 review blocker")
+
+	// Stage B — buildFollowItems must drop this group from the follow tab.
+	categorySetting := map[string]*GroupCategorySetting{
+		groupNo: settings[0],
+	}
+	stubConvs := []*config.SyncUserConversationResp{
+		{ChannelID: groupNo, ChannelType: common.ChannelTypeGroup.Uint8(), Timestamp: 100},
+	}
+	items := buildFollowItems(stubConvs, categorySetting, nil, nil, nil, nil, nil, nil, nil, "")
+	assert.Empty(t, items,
+		"buildFollowItems must NOT include groups with a soft-deleted category; "+
+			"otherwise they'd be displayed and then materialized via the "+
+			"sidebar materialization loop")
+
+	// Stage C — end-to-end check: even if a future regression somehow
+	// surfaced the group into the materialization candidate set, the
+	// MaterializeDefaultFollowedGroups call would still write the row (it is
+	// not gated for sidebar callers, by design — see api_sidebar.go comment).
+	// So the real defense lives at Stages A+B above.  Pin that with a
+	// no-ext-row assertion against the conv_ext DB.
+	convDB := convext.NewDB(ctx)
+	row, err := convDB.Get(uid, space, 2 /* Group */, groupNo)
+	require.NoError(t, err)
+	assert.Nil(t, row,
+		"no ext row may be written for the soft-deleted-category group "+
+			"(verified end-to-end: sidebar dropped it at Stage B, so the "+
+			"materialization branch never saw it)")
+}
+
+// ensureSidebarSoftDeletedCategoryTables creates the minimal group_setting
+// schema the Scene 7h regression needs.  conv_ext_test ships with
+// group_category but not group_setting; this helper adds it once (idempotent
+// via DROP+CREATE so the COLLATE pin can evolve safely).
+//
+// Reuses the same COLLATE workaround as the guard E2E test
+// (default_followed_group_guard_e2e_test.go) — issue #150 forward-repair
+// migration isn't in this test database.
+func ensureSidebarSoftDeletedCategoryTables(t *testing.T, ctx *config.Context) {
+	t.Helper()
+	_, err := ctx.DB().Exec("DROP TABLE IF EXISTS group_setting")
+	require.NoError(t, err)
+	_, err = ctx.DB().Exec(
+		"CREATE TABLE group_setting (" +
+			"  id INT NOT NULL AUTO_INCREMENT PRIMARY KEY," +
+			"  uid VARCHAR(40) NOT NULL DEFAULT ''," +
+			"  group_no VARCHAR(40) NOT NULL DEFAULT ''," +
+			"  category_id VARCHAR(32) COLLATE utf8mb4_general_ci DEFAULT NULL," +
+			"  category_sort INT NOT NULL DEFAULT 0," +
+			"  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+			"  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP," +
+			"  UNIQUE KEY uk_uid_groupno (uid, group_no)" +
+			") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci",
+	)
+	require.NoError(t, err)
+}
+
+// cleanSidebarSoftDeletedCategoryRows wipes only Scene 7h's data.  Scope by
+// uid prefix to keep the shared conv_ext_test database safe when other
+// integration tests run in parallel (same rationale as the guard E2E test).
+func cleanSidebarSoftDeletedCategoryRows(t *testing.T, ctx *config.Context) {
+	t.Helper()
+	for _, tbl := range []string{"group_setting", "group_category"} {
+		_, err := ctx.DB().Exec("DELETE FROM "+tbl+" WHERE uid LIKE ?", "s7h-%")
+		require.NoError(t, err, "clean %s rows", tbl)
+	}
 }

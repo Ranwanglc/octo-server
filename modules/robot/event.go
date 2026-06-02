@@ -1,6 +1,7 @@
 package robot
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -63,6 +64,23 @@ func (rb *Robot) robotMessageListen(messages []*config.MessageResp) {
 		}
 		var robotID string
 		var robotIDs []string
+		// aisBroadcastSet captures the robotIDs that were added to
+		// `robotIDs` purely because of the `mention.ais=1` broadcast
+		// branch below (i.e. group bots that were NOT already in
+		// `mention.uids`). The fan-out loop uses this set to inject
+		// each such bot's UID into its own per-event payload copy so
+		// legacy adapters (octo-server#137) that only inspect
+		// `mention.uids` still recognise themselves as mentioned and
+		// reply.
+		//
+		// Important invariants (locked by the ais_broadcast tests):
+		//   - bots that came from the explicit `mention.uids` path
+		//     are NOT in this set, and their payload is delivered
+		//     verbatim (no rewrite) — preserving exact-@ semantics.
+		//   - the set is keyed on the SAME string that appears in
+		//     `robotIDs`, so the lookup at fan-out time is O(1) and
+		//     can't drift.
+		var aisBroadcastSet map[string]struct{}
 
 		if message.ChannelType == common.ChannelTypePerson.Uint8() {
 			uid := common.GetToChannelIDWithFakeChannelID(message.ChannelID, message.FromUID)
@@ -169,6 +187,70 @@ func (rb *Robot) robotMessageListen(messages []*config.MessageResp) {
 						}
 					}
 				}
+				// YUJ-1393 / PR#82 review #2 R2 / #142 follow-up:
+				// mention.ais=1 means "@所有 AI" (Plan X / YUJ-1389).
+				// The robot event dispatcher previously only considered
+				// robot_id / mention.uids / @username text, so a payload
+				// carrying only mention.ais=1 (no uids, no @username)
+				// silently skipped the robot event queue and group bots
+				// never received the "@所有 AI" broadcast.
+				//
+				// Post-#142 (`pkg/mentionrewrite` reverted to pass-
+				// through): legacy `mention.all=1` is NO LONGER
+				// auto-promoted to `mention.ais=1` by the send-side
+				// chokepoint. New clients that want their `@所有 AI`
+				// broadcast to summon group bots MUST set
+				// `mention.ais=1` explicitly. Legacy clients that only
+				// emit `mention.all=1` will not trigger this branch —
+				// that is intentional and matches the OBO fan-out
+				// gate's post-#142 contract (see modules/bot_api/
+				// obo_fanout.go: `mention.all` alone is not a bot
+				// summon).
+				//
+				// Scope: GROUP channels only. PERSONAL DMs are already
+				// dispatched via the realUID branch above and have no
+				// notion of "all members of a channel".
+				// COMMUNITY_TOPIC support is a deliberate follow-up —
+				// it needs the parent-group lookup (see
+				// modules/webhook/api.go parseThreadChannelID) and was
+				// intentionally left out of this hotfix to keep the
+				// change surface small.
+				//
+				// Dedup against any uid-matched robots already in
+				// robotIDs so the goroutine fan-out below never
+				// double-saves the same event for the same bot.
+				if rb.mentionAisTruthy(mentionValue.Get("ais")) &&
+					message.ChannelType == common.ChannelTypeGroup.Uint8() {
+					groupRobotIDs, err := rb.collectGroupRobotIDs(message.ChannelID)
+					if err != nil {
+						rb.Error("查询群机器人成员失败！", zap.Error(err), zap.String("channelID", message.ChannelID))
+					} else {
+						// Snapshot what was already in robotIDs (from
+						// the explicit mention.uids path) so we can
+						// compute the ais-only delta. We rewrite
+						// payload ONLY for the ais-only delta — bots
+						// already targeted via mention.uids already
+						// carry their UID in the payload and must
+						// keep the verbatim message.
+						before := make(map[string]struct{}, len(robotIDs))
+						for _, id := range robotIDs {
+							before[id] = struct{}{}
+						}
+						robotIDs = appendUniqueRobotIDs(robotIDs, groupRobotIDs)
+						if len(groupRobotIDs) > 0 {
+							aisBroadcastSet = make(map[string]struct{}, len(groupRobotIDs))
+							for _, id := range groupRobotIDs {
+								if id == "" {
+									continue
+								}
+								if _, dup := before[id]; dup {
+									continue
+								}
+								aisBroadcastSet[id] = struct{}{}
+							}
+						}
+					}
+				}
 			} else {
 				if common.ContentType(payloadValue.Get("type").Int()) == common.Text {
 					content := payloadValue.Get("content").String()
@@ -194,6 +276,18 @@ func (rb *Robot) robotMessageListen(messages []*config.MessageResp) {
 			for _, rid := range robotIDs {
 				rb.Info("投递消息到机器人事件队列", zap.String("robotID", rid), zap.String("fromUID", message.FromUID), zap.Int64("messageID", message.MessageID))
 				rid := rid // capture loop variable
+				// Per-bot payload: bots that came in via the ais
+				// broadcast branch get their UID injected into
+				// mention.uids on a SHALLOW COPY of the message so
+				// legacy adapters (octo-server#137) recognise the
+				// mention. Bots that came in via mention.uids keep
+				// the verbatim payload.
+				perBotMsg := message
+				if _, isAis := aisBroadcastSet[rid]; isAis {
+					cp := *message
+					cp.Payload = injectBotUIDIntoMentionUIDs(message.Payload, rid)
+					perBotMsg = &cp
+				}
 				rb.msgSem <- struct{}{}
 				go func() {
 					defer func() {
@@ -202,8 +296,8 @@ func (rb *Robot) robotMessageListen(messages []*config.MessageResp) {
 							rb.Error("panic in robot message goroutine", zap.Any("recover", r), zap.String("robotID", rid))
 						}
 					}()
-					rb.saveRobotMessage(message, rid)
-					rb.autoReadForBot(message, rid)
+					rb.saveRobotMessage(perBotMsg, rid)
+					rb.autoReadForBot(perBotMsg, rid)
 				}()
 			}
 		} else if len(robotID) > 0 {
@@ -243,6 +337,18 @@ func (rb *Robot) autoReadForBot(message *config.MessageResp, robotID string) {
 }
 
 func (rb *Robot) saveRobotMessage(message *config.MessageResp, robotID string) {
+
+	// YUJ-2531 / Mininglamp-OSS/octo-server#208: bot-delivery chokepoint.
+	// Strip any bare legacy `mention.all=1` and inject `mention.humans=1`
+	// so bots never observe the legacy broadcast flag regardless of the
+	// (user-machine-resident, possibly outdated) adapter version. Operates
+	// on a copy of the payload; the original `message.Payload` shared with
+	// the human-client fan-out keeps `all=1` for rendering.
+	if normalized := stripBareMentionAllForBot(message.Payload); !bytes.Equal(normalized, message.Payload) {
+		cp := *message
+		cp.Payload = normalized
+		message = &cp
+	}
 
 	seq, err := rb.ctx.GenSeq(fmt.Sprintf("%s%s", common.RobotEventSeqKey, robotID))
 	if err != nil {

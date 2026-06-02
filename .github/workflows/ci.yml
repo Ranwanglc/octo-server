@@ -6,12 +6,25 @@ name: CI
 
 on:
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
+    # converted_to_draft is kept intentionally: it creates "skipped" check entries
+    # that satisfy required-check branch-protection rules when a PR is demoted
+    # back to draft, preventing stale "pending" statuses from the last real push.
     branches:
       - main
       - 'release/**'
+    # paths-ignore is intentionally NOT set here — workflow-level path filtering
+    # prevents GitHub from creating any check run, which deadlocks required-status
+    # checks on docs-only PRs. Path-based skipping is handled by the `changes`
+    # preflight job below instead (dorny/paths-filter produces "skipped" statuses
+    # that GitHub counts as passing for required checks).
   push:
     branches:
       - main
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".github/ISSUE_TEMPLATE/**"
 
 permissions:
   contents: read
@@ -24,7 +37,54 @@ env:
   GO_VERSION: '1.25.x'
 
 jobs:
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      # code=true when at least one changed file matches the code filter.
+      # predicate-quantifier:every + negation patterns (no bare '**'):
+      # a file matches 'code' iff ALL negation patterns are satisfied
+      # (file is not a doc/template). code=false only when all changed files
+      # are docs/templates. Push events default to 'true'.
+      code: ${{ github.event_name == 'pull_request' && steps.filter.outputs.code || 'true' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        if: github.event_name == 'pull_request'
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@6852f92c20ea7fd3b0c25de3b5112db3a98da050 # v3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          # predicate-quantifier: every — a file matches 'code' only when ALL
+          # negation patterns are satisfied (file is NOT a doc/template file).
+          #
+          # Validated by picomatch v4 unit test (same library used internally):
+          #   README.md:    !**/*.md=false → every=false → not match → code=false ✅
+          #   main.go:      all negations=true → every=true → match → code=true ✅
+          #   mixed PR:     main.go matches → code=true (some over changed files) ✅
+          #   .golangci.yml: all negations=true → every=true → CI runs ✅
+          #   Dockerfile:   all negations=true → CI runs ✅
+          #
+          # Do NOT add '**': picomatch('**') doesn't match dotfiles (.golangci.yml)
+          # causing them to incorrectly skip CI with the 'every' quantifier.
+          # Do NOT use 'some' + negation: '**' short-circuits some to true always.
+          predicate-quantifier: 'every'
+          filters: |
+            code:
+              - '!**/*.md'
+              - '!docs/**'
+              - '!.github/ISSUE_TEMPLATE/**'
+
+
   build:
+    needs: [changes]
+    if: |
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
+      needs.changes.outputs.code == 'true'
     name: Build
     runs-on: ubuntu-latest
     steps:
@@ -38,6 +98,10 @@ jobs:
         run: CGO_ENABLED=0 go build -v ./...
 
   test:
+    needs: [changes]
+    if: |
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
+      needs.changes.outputs.code == 'true'
     name: Test
     runs-on: ubuntu-latest
     # MySQL and Redis are required by ~10 modules' integration tests
@@ -99,7 +163,7 @@ jobs:
         # the database default; using general_ci keeps them aligned with
         # the rest of the schema and avoids "Illegal mix of collations".
         run: |
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if mysqladmin ping -h 127.0.0.1 -uroot -pdemo --silent; then
               echo "mysql ready"
               exit 0
@@ -141,6 +205,10 @@ jobs:
           exit $fail
 
   vet:
+    needs: [changes]
+    if: |
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
+      needs.changes.outputs.code == 'true'
     name: Vet
     runs-on: ubuntu-latest
     steps:
@@ -154,6 +222,10 @@ jobs:
         run: go vet ./...
 
   lint:
+    needs: [changes]
+    if: |
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
+      needs.changes.outputs.code == 'true'
     name: Lint
     runs-on: ubuntu-latest
     steps:
@@ -170,6 +242,10 @@ jobs:
           args: --timeout=5m
 
   personal-msgsendreq-lint:
+    needs: [changes]
+    if: |
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
+      needs.changes.outputs.code == 'true'
     # Mininglamp-OSS/octo-server#37: defense-in-depth wrapper for PERSONAL
     # MsgSendReq construction. The lint AST-walks modules/ and rejects any
     # composite literal of MsgSendReq{ChannelType: ChannelTypePerson...}, since
@@ -187,3 +263,54 @@ jobs:
 
       - name: Reject direct PERSONAL MsgSendReq literals
         run: go run ./tools/lint-personal-msgsendreq ./modules
+
+  i18n-extract-check:
+    needs: [changes]
+    if: |
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
+      needs.changes.outputs.code == 'true'
+    # Phase 0.8/0.10 #1: the committed i18n marker files
+    # (tools/i18nmarkers/{shared,server}/active.en-US.toml) must stay in sync
+    # with the codes.Register / errcode.register call sites. A PR that adds or
+    # edits a Code without re-running `make i18n-extract` would otherwise ship
+    # a code with no translation marker (runtime DefaultMessage fallback). The
+    # extractor's -check mode exits non-zero when on-disk markers diverge from
+    # what extraction would emit.
+    name: i18n Extract Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Verify i18n markers are up to date
+        run: make i18n-extract-check
+
+  i18n-lint:
+    needs: [changes]
+    if: |
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
+      needs.changes.outputs.code == 'true'
+    # Phase 0.10 i18n migration gates:
+    #   #5 (D23): no NEW c.AbortWithStatusJSON / c.AbortWithStatus beyond the
+    #             committed per-file baseline — a ratchet toward zero as
+    #             modules migrate to httperr.ResponseErrorL.
+    #   #3:       no inline codes.Code{...} literals passed to ResponseErrorL,
+    #             which would bypass the registry (no translation marker, silent
+    #             runtime downgrade to err.shared.internal).
+    name: i18n Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: No new direct error responses (D23)
+        run: go run ./tools/lint-direct-error-response
+
+      - name: No unregistered codes in ResponseErrorL
+        run: go run ./tools/lint-unregistered-code
