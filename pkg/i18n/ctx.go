@@ -93,6 +93,8 @@ func languageSourcePriority(source LanguageSource) int {
 	switch source {
 	case LanguageSourceTrustedHeader:
 		return 60
+	case LanguageSourceGRPCMetadata:
+		return 60
 	case LanguageSourceQuery:
 		return 50
 	case LanguageSourceCookie:

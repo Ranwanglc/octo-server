@@ -2,7 +2,6 @@ package webhook
 
 import (
 	"bytes"
-	"runtime/debug"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -11,12 +10,10 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/group"
-	"github.com/Mininglamp-OSS/octo-server/modules/user"
-	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
@@ -24,6 +21,10 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhook"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/modules/group"
+	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	"github.com/Mininglamp-OSS/octo-server/pkg/i18n"
+	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -161,15 +162,19 @@ func grpcAuthInterceptor(expectedToken string) grpc.UnaryServerInterceptor {
 
 func (w *Webhook) Start() error {
 	var opts []grpc.ServerOption
+	unaryInterceptors := []grpc.UnaryServerInterceptor{
+		i18n.UnaryServerLanguageInterceptor(),
+	}
 
 	// 配置 gRPC 认证拦截器（通过环境变量 TS_GRPC_AUTH_TOKEN 启用）
 	grpcAuthToken := os.Getenv("TS_GRPC_AUTH_TOKEN")
 	if grpcAuthToken != "" {
-		opts = append(opts, grpc.UnaryInterceptor(grpcAuthInterceptor(grpcAuthToken)))
+		unaryInterceptors = append(unaryInterceptors, grpcAuthInterceptor(grpcAuthToken))
 		w.Info("gRPC server auth enabled")
 	} else {
 		w.Warn("gRPC server auth not configured, set TS_GRPC_AUTH_TOKEN to enable authentication")
 	}
+	opts = append(opts, grpc.ChainUnaryInterceptor(unaryInterceptors...))
 
 	w.grpcServer = grpc.NewServer(opts...)
 
