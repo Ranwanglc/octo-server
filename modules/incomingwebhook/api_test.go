@@ -191,6 +191,218 @@ func TestListAndDelete(t *testing.T) {
 	assert.Equal(t, 1, len(list))
 }
 
+// TestDelete_FreesQuota 软删除（#254）后释放每群配额：填满→删一个→可再建一个。
+func TestDelete_FreesQuota(t *testing.T) {
+	t.Setenv("DM_INCOMINGWEBHOOK_MAX_PER_GROUP", "2")
+	handler, _, groupNo := setupTestEnv(t)
+
+	ids := make([]string, 0, 2)
+	for i := 0; i < 2; i++ {
+		w := do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
+			"name": fmt.Sprintf("wh-%d", i),
+		}))
+		assert.Equalf(t, http.StatusOK, w.Code, "i=%d body=%s", i, w.Body.String())
+		ids = append(ids, parseJSON(t, w)["webhook_id"].(string))
+	}
+
+	// 配额满：第三个 409。
+	w := do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
+		"name": "overflow",
+	}))
+	assert.Equalf(t, http.StatusConflict, w.Code, "quota must be full: %s", w.Body.String())
+
+	// 删一个释放配额。
+	w = do(handler, authReq("DELETE", fmt.Sprintf("/v1/groups/%s/incoming-webhooks/%s", groupNo, ids[0]), nil))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// 现在可再建一个。
+	w = do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
+		"name": "after-delete",
+	}))
+	assert.Equalf(t, http.StatusOK, w.Code, "soft-delete must free quota: %s", w.Body.String())
+}
+
+// TestDelete_CannotRevive 软删除（#254）后该 webhook 不可被复活/再操作：
+// update / 再次 delete / regenerate 都必须 404。
+func TestDelete_CannotRevive(t *testing.T) {
+	handler, _, groupNo := setupTestEnv(t)
+	w := do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
+		"name": "x",
+	}))
+	assert.Equal(t, http.StatusOK, w.Code)
+	whID := parseJSON(t, w)["webhook_id"].(string)
+
+	w = do(handler, authReq("DELETE", fmt.Sprintf("/v1/groups/%s/incoming-webhooks/%s", groupNo, whID), nil))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// update 改名必须 404（不可对已删除资源操作）。
+	name := "revived"
+	w = do(handler, authReq("PUT", fmt.Sprintf("/v1/groups/%s/incoming-webhooks/%s", groupNo, whID),
+		map[string]interface{}{"name": name}))
+	assert.Equalf(t, http.StatusNotFound, w.Code, "update on soft-deleted webhook must 404: %s", w.Body.String())
+
+	// update 重新启用必须 404（不可复活）。
+	statusOne := 1
+	w = do(handler, authReq("PUT", fmt.Sprintf("/v1/groups/%s/incoming-webhooks/%s", groupNo, whID),
+		map[string]interface{}{"status": statusOne}))
+	assert.Equalf(t, http.StatusNotFound, w.Code, "re-enable soft-deleted webhook must 404: %s", w.Body.String())
+
+	// 再次 delete 必须 404（已删除视为不存在）。
+	w = do(handler, authReq("DELETE", fmt.Sprintf("/v1/groups/%s/incoming-webhooks/%s", groupNo, whID), nil))
+	assert.Equalf(t, http.StatusNotFound, w.Code, "re-delete soft-deleted webhook must 404: %s", w.Body.String())
+
+	// regenerate 必须 404（不可给已删除 webhook 颁发新 token）。
+	w = do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks/%s/regenerate", groupNo, whID), nil))
+	assert.Equalf(t, http.StatusNotFound, w.Code, "regenerate soft-deleted webhook must 404: %s", w.Body.String())
+}
+
+// TestDelete_PushFails 软删除（#254）后用原 token 推送必须 401（status 闸自动失效）。
+func TestDelete_PushFails(t *testing.T) {
+	handler, _, groupNo := setupTestEnv(t)
+	w := do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
+		"name": "x",
+	}))
+	created := parseJSON(t, w)
+	whID := created["webhook_id"].(string)
+	token := created["token"].(string)
+
+	w = do(handler, authReq("DELETE", fmt.Sprintf("/v1/groups/%s/incoming-webhooks/%s", groupNo, whID), nil))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	body, _ := json.Marshal(pushReq{Content: "hi"})
+	w = do(handler, anonReq("POST", fmt.Sprintf("/v1/incoming-webhooks/%s/%s", whID, token), body))
+	assert.Equalf(t, http.StatusUnauthorized, w.Code, "push with deleted webhook token must 401: %s", w.Body.String())
+}
+
+// TestDelete_ConcurrentUpdate_NoRevive 端到端回归 TOCTOU 复活漏洞（#254 follow-up）：
+// DELETE 与多个 PUT status=1 并发时，删除必须最终生效——webhook 不得复活进列表，原
+// token 不得再推送。修复后此性质与调度无关恒成立（条件 updateFields 永不写已删除行），
+// 故为稳定断言；修复前命中竞态窗口时会失败。配合 -race 一并探测数据竞争。
+func TestDelete_ConcurrentUpdate_NoRevive(t *testing.T) {
+	handler, _, groupNo := setupTestEnv(t)
+	w := do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
+		"name": "x",
+	}))
+	assert.Equal(t, http.StatusOK, w.Code)
+	created := parseJSON(t, w)
+	whID := created["webhook_id"].(string)
+	token := created["token"].(string)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		do(handler, authReq("DELETE", fmt.Sprintf("/v1/groups/%s/incoming-webhooks/%s", groupNo, whID), nil))
+	}()
+	statusOne := 1
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			do(handler, authReq("PUT", fmt.Sprintf("/v1/groups/%s/incoming-webhooks/%s", groupNo, whID),
+				map[string]interface{}{"status": statusOne}))
+		}()
+	}
+	wg.Wait()
+
+	// 删除必须最终生效：列表不含该 webhook。
+	w = do(handler, authReq("GET", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), nil))
+	res := parseJSON(t, w)
+	list, _ := res["list"].([]interface{})
+	assert.Emptyf(t, list, "deleted webhook must not be revived into the management list; list=%v", list)
+
+	// 原 token 必须保持失效。
+	body, _ := json.Marshal(pushReq{Content: "hi"})
+	w = do(handler, anonReq("POST", fmt.Sprintf("/v1/incoming-webhooks/%s/%s", whID, token), body))
+	assert.Equalf(t, http.StatusUnauthorized, w.Code, "deleted webhook token must stay revoked, body=%s", w.Body.String())
+}
+
+// TestDelete_ConcurrentRegenerate_NoRevive 端到端回归 DELETE 与 regenerate 并发：
+// regenerate 有自己的"回读 + 返回新 token"路径，必须同样不能复活已删除 webhook。无论
+// regenerate 是否赢得竞态轮换 token，删除最终生效——webhook 不在列表，且最初的 token
+// 始终失效（要么被某次 regenerate 换掉，要么因 status=2 失效）。
+func TestDelete_ConcurrentRegenerate_NoRevive(t *testing.T) {
+	handler, _, groupNo := setupTestEnv(t)
+	w := do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
+		"name": "x",
+	}))
+	assert.Equal(t, http.StatusOK, w.Code)
+	created := parseJSON(t, w)
+	whID := created["webhook_id"].(string)
+	token := created["token"].(string)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		do(handler, authReq("DELETE", fmt.Sprintf("/v1/groups/%s/incoming-webhooks/%s", groupNo, whID), nil))
+	}()
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks/%s/regenerate", groupNo, whID), nil))
+		}()
+	}
+	wg.Wait()
+
+	// 删除必须最终生效：列表不含该 webhook。
+	w = do(handler, authReq("GET", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), nil))
+	res := parseJSON(t, w)
+	list, _ := res["list"].([]interface{})
+	assert.Emptyf(t, list, "deleted webhook must not be revived by concurrent regenerate; list=%v", list)
+
+	// 最初的 token 必须保持失效。
+	body, _ := json.Marshal(pushReq{Content: "hi"})
+	w = do(handler, anonReq("POST", fmt.Sprintf("/v1/incoming-webhooks/%s/%s", whID, token), body))
+	assert.Equalf(t, http.StatusUnauthorized, w.Code, "original token must stay revoked, body=%s", w.Body.String())
+}
+
+// TestUpdate_DBError_Returns5xx / TestRegenerate_DBError_Returns5xx 守护本 PR 的语义
+// 变更：update / regenerate 在底层表不可用时按 5xx 失败，绝不退回旧的 stale-200 兜底
+// （那会谎报成功）。
+//
+// 实现说明：通过 RENAME 掉 incoming_webhook 表注入查询故障。黑盒下故障会先命中
+// queryManageable 的前置读（同样返回 5xx），无法单独触发"写后回读"那一支；但本测试仍
+// 锁定了总契约——这些管理写端点在 DB 不可用时一律 5xx，不会返回 stale-200。
+func TestUpdate_DBError_Returns5xx(t *testing.T) {
+	handler, ctx, groupNo := setupTestEnv(t)
+	w := do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
+		"name": "x",
+	}))
+	assert.Equal(t, http.StatusOK, w.Code)
+	whID := parseJSON(t, w)["webhook_id"].(string)
+
+	_, err := ctx.DB().UpdateBySql("RENAME TABLE incoming_webhook TO incoming_webhook_bak").Exec()
+	assert.NoError(t, err)
+	defer func() {
+		_, _ = ctx.DB().UpdateBySql("RENAME TABLE incoming_webhook_bak TO incoming_webhook").Exec()
+	}()
+
+	name := "x2"
+	w = do(handler, authReq("PUT", fmt.Sprintf("/v1/groups/%s/incoming-webhooks/%s", groupNo, whID),
+		map[string]interface{}{"name": name}))
+	assert.GreaterOrEqualf(t, w.Code, 500, "update must fail as 5xx when the table is unavailable, never stale-200; code=%d body=%s", w.Code, w.Body.String())
+}
+
+func TestRegenerate_DBError_Returns5xx(t *testing.T) {
+	handler, ctx, groupNo := setupTestEnv(t)
+	w := do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
+		"name": "x",
+	}))
+	assert.Equal(t, http.StatusOK, w.Code)
+	whID := parseJSON(t, w)["webhook_id"].(string)
+
+	_, err := ctx.DB().UpdateBySql("RENAME TABLE incoming_webhook TO incoming_webhook_bak").Exec()
+	assert.NoError(t, err)
+	defer func() {
+		_, _ = ctx.DB().UpdateBySql("RENAME TABLE incoming_webhook_bak TO incoming_webhook").Exec()
+	}()
+
+	w = do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks/%s/regenerate", groupNo, whID), nil))
+	assert.GreaterOrEqualf(t, w.Code, 500, "regenerate must fail as 5xx when the table is unavailable, never stale-200; code=%d body=%s", w.Code, w.Body.String())
+}
+
 func TestRegenerate_RotatesToken(t *testing.T) {
 	handler, _, groupNo := setupTestEnv(t)
 	w := do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
@@ -237,7 +449,7 @@ func TestPush_RejectsDisabledWebhook(t *testing.T) {
 	whID := created["webhook_id"].(string)
 	token := created["token"].(string)
 
-	// 禁用
+	// 禁用（status=0 即 statusDisabled）
 	_, err := ctx.DB().UpdateBySql("UPDATE incoming_webhook SET status=0 WHERE webhook_id=?", whID).Exec()
 	assert.NoError(t, err)
 
@@ -409,9 +621,11 @@ func TestCreate_QuotaConcurrent(t *testing.T) {
 	}
 	assert.Equalf(t, cap, ok, "exactly %d concurrent creates should succeed, got %d (codes=%v)", cap, ok, codes)
 
-	// DB 里也应当只有 cap 条记录
+	// DB 里也应当只有 cap 条有效记录。按 status != statusDeleted(2) 计——与
+	// insertWithQuota 的有效计数同语义；本测试无软删除行，过滤与否结果相同，但保持
+	// 一致可避免将来扩展（先删再并发建）时断言被软删除行误导。
 	var rows int
-	_, err := ctx.DB().SelectBySql("SELECT count(*) FROM incoming_webhook WHERE group_no=?", groupNo).Load(&rows)
+	_, err := ctx.DB().SelectBySql("SELECT count(*) FROM incoming_webhook WHERE group_no=? AND status != 2", groupNo).Load(&rows)
 	assert.NoError(t, err)
 	assert.Equal(t, cap, rows, "DB row count must equal cap; quota leaked under concurrency")
 }
@@ -442,7 +656,7 @@ func TestDisbandedGroup_FailsClosed(t *testing.T) {
 	assert.Equalf(t, http.StatusUnauthorized, w.Code,
 		"push must fail closed on disbanded group, body=%s", w.Body.String())
 
-	// 2) update 启用：先模拟"异步禁用已落库"，管理员 PUT status=1 复活必须 404
+	// 2) update 启用：先模拟"异步禁用已落库"（status=0 即 statusDisabled），管理员 PUT status=1 复活必须 404
 	_, err = ctx.DB().UpdateBySql("UPDATE incoming_webhook SET status=0 WHERE webhook_id=?", whID).Exec()
 	assert.NoError(t, err)
 	statusOne := 1

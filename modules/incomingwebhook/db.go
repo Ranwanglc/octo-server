@@ -55,8 +55,9 @@ func (d *incomingWebhookDB) insertWithQuota(m *incomingWebhookModel, max int) er
 
 	var count int
 	if _, err = tx.SelectBySql(
-		"SELECT count(*) FROM incoming_webhook WHERE group_no=?",
-		m.GroupNo,
+		// 软删除（statusDeleted）的行不占配额：删除即释放名额（#254）。
+		"SELECT count(*) FROM incoming_webhook WHERE group_no=? AND status != ?",
+		m.GroupNo, statusDeleted,
 	).Load(&count); err != nil {
 		return fmt.Errorf("incomingwebhook: count: %w", err)
 	}
@@ -82,10 +83,12 @@ func (d *incomingWebhookDB) queryByWebhookID(webhookID string) (*incomingWebhook
 	return m, err
 }
 
+// queryByGroupNo 列出群下 webhook 供管理端展示，隐藏软删除（statusDeleted）项（#254）。
 func (d *incomingWebhookDB) queryByGroupNo(groupNo string) ([]*incomingWebhookModel, error) {
 	var list []*incomingWebhookModel
 	_, err := d.session.Select("*").From("incoming_webhook").
 		Where("group_no=?", groupNo).
+		Where("status != ?", statusDeleted).
 		OrderDir("created_at", false).
 		Load(&list)
 	return list, err
@@ -100,6 +103,16 @@ var updateFieldsAllowed = map[string]struct{}{
 	"token_hash": {},
 }
 
+// updateFields 更新单个 webhook 的允许列。带 status != statusDeleted 守卫：对已软删除
+// 的行一律不写入——这是并发复活漏洞的根因防线。queryManageable（非事务读）与本次写入
+// 之间有 TOCTOU 窗口，若期间被并发 DELETE 软删，无守卫的写会把 status / token_hash
+// 写回，令已删除 webhook 复活（重回列表 + 旧 token 可推送）。InnoDB 行锁让该条件 UPDATE
+// 与并发 DELETE 的 UPDATE 串行化，保证"一旦删除，任何后续写都落空"。调用方应回读确认
+// 行未被软删除（见 api 层 update / regenerate）。
+//
+// ⚠️ 正确性依赖单语句 autocommit 的当前读（UPDATE ... WHERE 对最新已提交行版本求值）。
+// 若未来把 update + 回读包进同一显式 REPEATABLE READ 事务、改用快照 SELECT，这个
+// "删除后写必落空"的不变量会被破坏，须改用 SELECT ... FOR UPDATE 重新串行化。
 func (d *incomingWebhookDB) updateFields(webhookID string, fields map[string]interface{}) error {
 	if len(fields) == 0 {
 		return nil
@@ -111,32 +124,46 @@ func (d *incomingWebhookDB) updateFields(webhookID string, fields map[string]int
 	}
 	_, err := d.session.Update("incoming_webhook").
 		SetMap(fields).
-		Where("webhook_id=?", webhookID).Exec()
+		Where("webhook_id=?", webhookID).
+		Where("status != ?", statusDeleted).Exec()
 	return err
 }
 
+// deleteByWebhookID 软删除（#254）：把 status 置为 statusDeleted 而非物理 DELETE，
+// 保留行供该 webhook 历史消息的发送者名/头像渲染（display datasource 不按 status
+// 过滤）。push 闸（status != statusEnabled）随之自动失效，列表/配额按 status !=
+// statusDeleted 排除，且 update 不再允许复活已删除行。调用方应先确认目标行存在且
+// 未删除（api 层在 query 后判 statusDeleted 返回 not-found）。
+// status != statusDeleted 守卫使重复软删除幂等：并发两次 DELETE，第二次落空。
 func (d *incomingWebhookDB) deleteByWebhookID(webhookID string) error {
-	_, err := d.session.DeleteFrom("incoming_webhook").
-		Where("webhook_id=?", webhookID).Exec()
+	_, err := d.session.Update("incoming_webhook").
+		Set("status", statusDeleted).
+		Where("webhook_id=?", webhookID).
+		Where("status != ?", statusDeleted).Exec()
 	return err
 }
 
 // markUsed 累加调用计数并刷新 last_used_at；非关键路径，调用方应忽略错误（最多记日志）。
 // 走 ExecContext：审计在 push 路径的同步兜底分支下跑在请求 goroutine 上，必须受 ctx
 // 超时约束，否则 DB 饱和变慢会无限拖住 push 响应。
+// status != statusDeleted 守卫：与其它写路径一致，异步审计执行时行若已被并发软删除，
+// 不再给已删除 webhook 记账（不影响安全，仅保持纵深防御的一致性）。
 func (d *incomingWebhookDB) markUsed(ctx context.Context, webhookID string, now time.Time) error {
 	_, err := d.session.UpdateBySql(
-		"UPDATE incoming_webhook SET call_count = call_count + 1, last_used_at = ? WHERE webhook_id = ?",
-		now, webhookID,
+		"UPDATE incoming_webhook SET call_count = call_count + 1, last_used_at = ? WHERE webhook_id = ? AND status != ?",
+		now, webhookID, statusDeleted,
 	).ExecContext(ctx)
 	return err
 }
 
-// disableByGroupNo 把指定群下所有 webhook 置为禁用，用于群解散等级联场景。
+// disableByGroupNo 把指定群下所有【未删除】的 webhook 置为禁用，用于群解散等级联场景。
+// 必须跳过 statusDeleted 行：否则会把软删除（2）翻成禁用（0），令其重新出现在管理列表
+// 并重新占用配额，等同"复活"了已删除的 webhook（#254）。
 func (d *incomingWebhookDB) disableByGroupNo(groupNo string) error {
 	_, err := d.session.Update("incoming_webhook").
-		Set("status", 0).
-		Where("group_no=?", groupNo).Exec()
+		Set("status", statusDisabled).
+		Where("group_no=?", groupNo).
+		Where("status != ?", statusDeleted).Exec()
 	return err
 }
 
