@@ -106,6 +106,41 @@ func anonReq(method, path string, body []byte) *http.Request {
 	return req
 }
 
+// anonReqIP is anonReq with a fixed client IP, so tests can exercise the per-IP
+// auth-failure budget. Sets X-Real-Ip (the trusted, top-priority source that
+// clientIP() reads), matching how a real edge proxy attributes the caller.
+func anonReqIP(method, path string, body []byte, ip string) *http.Request {
+	req := anonReq(method, path, body)
+	req.RemoteAddr = ip + ":12345"
+	req.Header.Set("X-Real-Ip", ip)
+	return req
+}
+
+// resetIPFailBucket clears the per-IP auth-failure token bucket so a test starts
+// from a full budget; the bucket persists in Redis across runs (TTL) and is not
+// cleared by CleanAllTables (mirrors resetUIDRateLimit).
+func resetIPFailBucket(t *testing.T, ctx *config.Context, ip string) {
+	t.Helper()
+	delRedisKey(t, ctx, "ratelimit:incoming_webhook_ipfail:"+ip)
+}
+
+// resetStrictIPBucket clears the per-IP request limiter bucket
+// (StrictIPRateLimitMiddleware, tag "incoming_webhook") for the same reason.
+func resetStrictIPBucket(t *testing.T, ctx *config.Context, ip string) {
+	t.Helper()
+	delRedisKey(t, ctx, "ratelimit:strict:incoming_webhook:"+ip)
+}
+
+func delRedisKey(t *testing.T, ctx *config.Context, key string) {
+	t.Helper()
+	rdsClient := redis.NewClient(&redis.Options{
+		Addr:     ctx.GetConfig().DB.RedisAddr,
+		Password: ctx.GetConfig().DB.RedisPass,
+	})
+	defer rdsClient.Close()
+	_ = rdsClient.Del(key).Err()
+}
+
 func do(handler http.Handler, req *http.Request) *httptest.ResponseRecorder {
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -272,6 +307,74 @@ func TestDelete_PushFails(t *testing.T) {
 	body, _ := json.Marshal(pushReq{Content: "hi"})
 	w = do(handler, anonReq("POST", fmt.Sprintf("/v1/incoming-webhooks/%s/%s", whID, token), body))
 	assert.Equalf(t, http.StatusUnauthorized, w.Code, "push with deleted webhook token must 401: %s", w.Body.String())
+}
+
+// TestPush_SoftDeletedWebhookSpendsIPBudget locks the P2 refinement: pushing to
+// a soft-deleted webhook_id is a scan/abuse signal (no legit caller pushes to a
+// deleted URL), so it spends the IP failure budget and gets gated — closing the
+// "leaked deleted URL hammered forever, never gated" gap.
+func TestPush_SoftDeletedWebhookSpendsIPBudget(t *testing.T) {
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_FAIL_RPS", "0.01")
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_FAIL_BURST", "2")
+
+	handler, ctx, groupNo := setupTestEnv(t)
+	const ip = "203.0.113.77"
+	resetIPFailBucket(t, ctx, ip)
+	resetStrictIPBucket(t, ctx, ip)
+
+	w := do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
+		"name": "x",
+	}))
+	created := parseJSON(t, w)
+	whID := created["webhook_id"].(string)
+	token := created["token"].(string)
+	w = do(handler, authReq("DELETE", fmt.Sprintf("/v1/groups/%s/incoming-webhooks/%s", groupNo, whID), nil))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	body, _ := json.Marshal(pushReq{Content: "hi"})
+	url := fmt.Sprintf("/v1/incoming-webhooks/%s/%s", whID, token)
+	// Two pushes to the deleted webhook spend the budget (401 each).
+	for i := 0; i < 2; i++ {
+		w = do(handler, anonReqIP("POST", url, body, ip))
+		assert.Equalf(t, http.StatusUnauthorized, w.Code, "attempt %d should be 401; body=%s", i, w.Body.String())
+	}
+	// Budget exhausted → the gate now rejects with 429.
+	w = do(handler, anonReqIP("POST", url, body, ip))
+	assert.Equalf(t, http.StatusTooManyRequests, w.Code,
+		"a hammered soft-deleted webhook must spend the IP budget and get gated; body=%s", w.Body.String())
+}
+
+// TestPush_DisabledWebhookKeepsIPGrace is the other half of the asymmetry: a
+// merely DISABLED webhook (a legit caller may still hold a valid token in the
+// window right after an admin disables it) does NOT spend the budget, so it is
+// never gated — only ever a uniform 401.
+func TestPush_DisabledWebhookKeepsIPGrace(t *testing.T) {
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_FAIL_RPS", "0.01")
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_FAIL_BURST", "2")
+
+	handler, ctx, groupNo := setupTestEnv(t)
+	const ip = "203.0.113.88"
+	resetIPFailBucket(t, ctx, ip)
+	resetStrictIPBucket(t, ctx, ip)
+
+	w := do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
+		"name": "x",
+	}))
+	created := parseJSON(t, w)
+	whID := created["webhook_id"].(string)
+	token := created["token"].(string)
+	// Disable (status=0), not delete.
+	_, err := ctx.DB().UpdateBySql("UPDATE incoming_webhook SET status=0 WHERE webhook_id=?", whID).Exec()
+	assert.NoError(t, err)
+
+	body, _ := json.Marshal(pushReq{Content: "hi"})
+	url := fmt.Sprintf("/v1/incoming-webhooks/%s/%s", whID, token)
+	// Even past the failure burst of 2, a disabled webhook never gates — always 401.
+	for i := 0; i < 4; i++ {
+		w = do(handler, anonReqIP("POST", url, body, ip))
+		assert.Equalf(t, http.StatusUnauthorized, w.Code,
+			"disabled webhook must keep its grace (never 429); attempt %d body=%s", i, w.Body.String())
+	}
 }
 
 // TestDelete_ConcurrentUpdate_NoRevive 端到端回归 TOCTOU 复活漏洞（#254 follow-up）：
@@ -549,6 +652,179 @@ func TestPush_PerWebhookRateLimitIsPerWebhook(t *testing.T) {
 	w = do(handler, anonReq("POST", fmt.Sprintf("/v1/incoming-webhooks/%s/%s", wh2, tk2), body))
 	assert.NotEqualf(t, http.StatusTooManyRequests, w.Code,
 		"wh2 must not be limited by wh1's bucket; got %d body=%s", w.Code, w.Body.String())
+}
+
+// TestPush_LocalFloorRateLimits_RedisIndependent verifies the process-local
+// push floor caps the public endpoint on its own. The Redis-backed per-webhook
+// and per-IP limiters are left at their generous defaults (5/10 and 30/60), so
+// they would NOT reject these few calls — the 429 therefore comes from the
+// in-memory floor, which is exactly the protection that survives a Redis outage
+// (where both Redis limiters fail open). Floor burst is tightened to 2 via env.
+func TestPush_LocalFloorRateLimits_RedisIndependent(t *testing.T) {
+	t.Setenv("DM_INCOMINGWEBHOOK_LOCAL_BURST", "2")
+	t.Setenv("DM_INCOMINGWEBHOOK_LOCAL_RPS", "0.01") // ~never refills within the test
+
+	handler, _, groupNo := setupTestEnv(t)
+	w := do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
+		"name": "x",
+	}))
+	created := parseJSON(t, w)
+	whID := created["webhook_id"].(string)
+	token := created["token"].(string)
+
+	body, _ := json.Marshal(pushReq{Content: "hi"})
+	url := fmt.Sprintf("/v1/incoming-webhooks/%s/%s", whID, token)
+
+	// First two consume the floor burst (not rate-limited; result may be 200/502
+	// depending on WuKongIM, the point is only that they pass the floor).
+	for i := 0; i < 2; i++ {
+		w = do(handler, anonReq("POST", url, body))
+		assert.NotEqualf(t, http.StatusTooManyRequests, w.Code, "i=%d body=%s", i, w.Body.String())
+	}
+	// Third exceeds the floor → 429, despite the Redis per-webhook limiter (10
+	// burst) still having capacity. Proves the floor is an independent ceiling.
+	w = do(handler, anonReq("POST", url, body))
+	assert.Equalf(t, http.StatusTooManyRequests, w.Code, "local floor must 429 after its burst; body=%s", w.Body.String())
+}
+
+// TestPush_ValidPushesNotIPLimited is the core of "only failures count toward
+// IP": with a tiny IP failure budget but a generous per-webhook limit, a stream
+// of VALID pushes from one fixed IP is never IP-throttled, because valid pushes
+// don't spend the IP budget. This is the fixed/shared server-IP case.
+func TestPush_ValidPushesNotIPLimited(t *testing.T) {
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_FAIL_RPS", "0.01")
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_FAIL_BURST", "1")
+	// generous per-webhook bucket so the per-Key limiter doesn't 429 either
+	t.Setenv("DM_INCOMINGWEBHOOK_RPS", "1000")
+	t.Setenv("DM_INCOMINGWEBHOOK_BURST", "1000")
+
+	handler, ctx, groupNo := setupTestEnv(t)
+	const ip = "203.0.113.7"
+	resetIPFailBucket(t, ctx, ip)
+	resetStrictIPBucket(t, ctx, ip)
+
+	w := do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
+		"name": "x",
+	}))
+	created := parseJSON(t, w)
+	whID := created["webhook_id"].(string)
+	token := created["token"].(string)
+	body, _ := json.Marshal(pushReq{Content: "hi"})
+	url := fmt.Sprintf("/v1/incoming-webhooks/%s/%s", whID, token)
+
+	// Many valid pushes from one IP, far past the failure burst of 1 — none
+	// failure-gated (the per-IP REQUEST limiter stays at its generous default).
+	for i := 0; i < 5; i++ {
+		w = do(handler, anonReqIP("POST", url, body, ip))
+		assert.NotEqualf(t, http.StatusTooManyRequests, w.Code,
+			"valid push %d from a fixed IP must not be failure-limited; body=%s", i, w.Body.String())
+	}
+}
+
+// TestPush_ValidPushesCappedByPerIPRequestLimit locks the layer the reviewers
+// asked to keep: the per-IP REQUEST limiter (StrictIPRateLimitMiddleware) bounds
+// ALL requests from one IP — including valid pushes — so a single IP holding many
+// valid tokens cannot drive the full process floor. Only the per-IP request
+// budget is tightened here; every other layer stays generous, so a 429 can only
+// come from that limiter.
+func TestPush_ValidPushesCappedByPerIPRequestLimit(t *testing.T) {
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_RPS", "0.01")
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_BURST", "2")
+	t.Setenv("DM_INCOMINGWEBHOOK_RPS", "1000")
+	t.Setenv("DM_INCOMINGWEBHOOK_BURST", "1000")
+	t.Setenv("DM_INCOMINGWEBHOOK_LOCAL_BURST", "1000")
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_FAIL_BURST", "1000")
+
+	handler, ctx, groupNo := setupTestEnv(t)
+	const ip = "203.0.113.50"
+	resetStrictIPBucket(t, ctx, ip)
+
+	w := do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
+		"name": "x",
+	}))
+	created := parseJSON(t, w)
+	whID := created["webhook_id"].(string)
+	token := created["token"].(string)
+	body, _ := json.Marshal(pushReq{Content: "hi"})
+	url := fmt.Sprintf("/v1/incoming-webhooks/%s/%s", whID, token)
+
+	// First two valid pushes consume the per-IP request burst (not 429).
+	for i := 0; i < 2; i++ {
+		w = do(handler, anonReqIP("POST", url, body, ip))
+		assert.NotEqualf(t, http.StatusTooManyRequests, w.Code,
+			"valid push %d should pass the per-IP request burst; body=%s", i, w.Body.String())
+	}
+	// Third valid push exceeds the per-IP request budget → 429, even though the
+	// token is valid (the multi-valid-token-from-one-IP cap).
+	w = do(handler, anonReqIP("POST", url, body, ip))
+	assert.Equalf(t, http.StatusTooManyRequests, w.Code,
+		"per-IP request limiter must cap valid pushes from one IP; body=%s", w.Body.String())
+}
+
+// TestPush_FailedAuthGetsIPLimited verifies the failure path DOES throttle by
+// IP: with a failure budget of 2, the first two bad-token attempts return 401
+// (each spends a token), and once the budget is spent the gate rejects further
+// attempts with 429 before the handler/DB even run.
+func TestPush_FailedAuthGetsIPLimited(t *testing.T) {
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_FAIL_RPS", "0.01") // ~never refills within the test
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_FAIL_BURST", "2")
+
+	handler, ctx, groupNo := setupTestEnv(t)
+	const ip = "203.0.113.9"
+	resetIPFailBucket(t, ctx, ip)
+
+	w := do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
+		"name": "x",
+	}))
+	whID := parseJSON(t, w)["webhook_id"].(string)
+	body, _ := json.Marshal(pushReq{Content: "hi"})
+	badURL := fmt.Sprintf("/v1/incoming-webhooks/%s/wrong-token", whID)
+
+	// First two bad-token attempts spend the budget and return 401.
+	for i := 0; i < 2; i++ {
+		w = do(handler, anonReqIP("POST", badURL, body, ip))
+		assert.Equalf(t, http.StatusUnauthorized, w.Code, "attempt %d should be 401; body=%s", i, w.Body.String())
+	}
+	// Budget exhausted: the gate now rejects with 429 before the handler runs.
+	w = do(handler, anonReqIP("POST", badURL, body, ip))
+	assert.Equalf(t, http.StatusTooManyRequests, w.Code,
+		"after burning the IP failure budget, further attempts must be 429; body=%s", w.Body.String())
+}
+
+// TestPush_IPBudgetNotSpoofableViaXFF pins the trusted-IP contract: a scanner
+// varying the LEFTMOST X-Forwarded-For entry every request cannot evade the
+// failure budget, because clientIP() keys off the RIGHTMOST (trusted-proxy-
+// appended) entry — not gin's spoofable c.ClientIP().
+func TestPush_IPBudgetNotSpoofableViaXFF(t *testing.T) {
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_FAIL_RPS", "0.01")
+	t.Setenv("DM_INCOMINGWEBHOOK_IP_FAIL_BURST", "2")
+
+	handler, ctx, groupNo := setupTestEnv(t)
+	const realIP = "198.51.100.20"
+	resetIPFailBucket(t, ctx, realIP)
+
+	w := do(handler, authReq("POST", fmt.Sprintf("/v1/groups/%s/incoming-webhooks", groupNo), map[string]interface{}{
+		"name": "x",
+	}))
+	whID := parseJSON(t, w)["webhook_id"].(string)
+	body, _ := json.Marshal(pushReq{Content: "hi"})
+	badURL := fmt.Sprintf("/v1/incoming-webhooks/%s/wrong-token", whID)
+
+	// The trusted proxy appends realIP last; the attacker forges a different
+	// leftmost hop on every request. No X-Real-Ip, so clientIP() reads the
+	// rightmost XFF entry.
+	mk := func(spoof string) *http.Request {
+		req := anonReq("POST", badURL, body)
+		req.Header.Set("X-Forwarded-For", spoof+", "+realIP)
+		return req
+	}
+	assert.Equal(t, http.StatusUnauthorized, do(handler, mk("10.0.0.1")).Code)
+	assert.Equal(t, http.StatusUnauthorized, do(handler, mk("10.0.0.2")).Code)
+	// Despite a fresh spoofed leftmost IP each time, the budget (keyed on realIP)
+	// is exhausted → 429. A spoofable leftmost-XFF read would never reach this.
+	w = do(handler, mk("10.0.0.3"))
+	assert.Equalf(t, http.StatusTooManyRequests, w.Code,
+		"varying the leftmost XFF must not grant fresh budget; body=%s", w.Body.String())
 }
 
 func TestPush_RegenerateInvalidatesOldToken(t *testing.T) {
