@@ -26,8 +26,10 @@ require (
 	github.com/google/uuid v1.3.0
 	github.com/gookit/goutil v0.6.12
 	github.com/judwhite/go-svc v1.2.1
+	github.com/longbridgeapp/opencc v0.3.13
 	github.com/mattn/go-sqlite3 v1.14.17
 	github.com/minio/minio-go/v7 v7.0.61
+	github.com/mozillazg/go-pinyin v0.21.0
 	github.com/nicksnyder/go-i18n/v2 v2.6.1
 	github.com/olivere/elastic v6.2.37+incompatible
 	github.com/opentracing/opentracing-go v1.2.1-0.20220228012449-10b1cf09e00b
@@ -56,6 +58,11 @@ require (
 	google.golang.org/protobuf v1.31.0
 	gopkg.in/go-playground/assert.v1 v1.2.1
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
+)
+
+require (
+	github.com/liuzl/cedar-go v0.0.0-20170805034717-80a9c64b256d // indirect
+	github.com/liuzl/da v0.0.0-20180704015230-14771aad5b1d // indirect
 )
 
 require (

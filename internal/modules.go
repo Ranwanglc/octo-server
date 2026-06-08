@@ -49,6 +49,9 @@ import (
 	_ "github.com/Mininglamp-OSS/octo-server/modules/statistics"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/thread"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/user"
+	// usersecret 提供用户外部密钥别名表 + write-only CRUD + resolve;resolve
+	// 鉴权按 bf_ bot token 反查 robot.creator_uid,运行期查 robot 表(非 import 依赖)。
+	_ "github.com/Mininglamp-OSS/octo-server/modules/usersecret"
 	// app_bot and bot_api query user/robot tables at runtime; app_bot
 	// also imports bot_api at the Go package level, so register bot_api
 	// before app_bot（历史顺序，非 load-bearing —— Go init() 顺序由依赖图决定）.

@@ -1050,3 +1050,23 @@ other = "查询数据失败。"
 
 ["err.server.botfather.store_failed"]
 other = "更新数据失败。"
+
+# ---- modules/usersecret：用户外部密钥别名表 CRUD + resolve（YUJ-3538），保留真实 HTTP 状态码 ----
+
+["err.server.usersecret.request_invalid"]
+other = "请求无效。"
+
+["err.server.usersecret.unauthorized"]
+other = "认证失败。"
+
+["err.server.usersecret.not_found"]
+other = "未找到对应的密钥。"
+
+["err.server.usersecret.duplicate_name"]
+other = "已存在同名密钥，请换一个名称。"
+
+["err.server.usersecret.ambiguous"]
+other = "该名称匹配到多个密钥，请进一步指明。"
+
+["err.server.usersecret.resolve_failed"]
+other = "密钥解析失败。"

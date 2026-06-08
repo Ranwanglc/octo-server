@@ -975,6 +975,24 @@ other = "Failed to fetch WeChat user profile."
 ["err.server.user.wechat_response_invalid"]
 other = "WeChat response is malformed."
 
+["err.server.usersecret.ambiguous"]
+other = "The name matches multiple secrets. Please disambiguate."
+
+["err.server.usersecret.duplicate_name"]
+other = "A secret with this name already exists. Please choose another name."
+
+["err.server.usersecret.not_found"]
+other = "Secret not found."
+
+["err.server.usersecret.request_invalid"]
+other = "Invalid request."
+
+["err.server.usersecret.resolve_failed"]
+other = "Failed to resolve the secret."
+
+["err.server.usersecret.unauthorized"]
+other = "Authentication failed."
+
 ["err.server.workplace.app_name_exists"]
 other = "An app with this name already exists."
 
