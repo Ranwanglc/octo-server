@@ -344,7 +344,69 @@ func (s *Service) UpsertVerificationFromOIDC(ctx context.Context, uid string, cl
 	if err := s.verificationDB.Upsert(m); err != nil {
 		return fmt.Errorf("user: UpsertVerificationFromOIDC: db upsert: %w", err)
 	}
+	// 名字统一(实名回写):real_name 是企业强实名的权威名,回写到 user.name,
+	// 使所有读 user.name 的路径(群成员列表 / @ 提示 / 个人信息)与读
+	// user_verification.real_name 的路径(会话)显示同一个名字。两条写入路径
+	//(OIDC 登录 callback、后台 SyncWorker)都经由本方法,这里是唯一收敛点。
+	// best-effort:回写失败只 warn,绝不影响已成功的实名 upsert 与登录主流程。
+	s.syncDisplayNameFromRealName(uid, claims.LegalName)
 	return nil
+}
+
+// syncDisplayNameFromRealName 把已验证实名回写到 user.name,让 user.name 成为
+// 全局唯一显示名来源(名字统一,见 UpsertVerificationFromOIDC 注释)。
+//
+// 幂等:仅当 sanitize 后的实名与库中现值不同才写库 + 推 CMDChannelUpdate,
+// 避免每次 OIDC 登录 / 每轮 SyncWorker tick 的无谓写放大与客户端缓存刷新风暴
+//(配合 externalLoginExisting 的 hasVerifiedRealName 守卫,稳态下本方法是 no-op)。
+// @ 消毒同 externalLoginExisting,防 token cache key(uid@name@role)注入。
+func (s *Service) syncDisplayNameFromRealName(uid, realName string) {
+	newName := sanitizeExternalName(strings.TrimSpace(realName))
+	if uid == "" || newName == "" {
+		return
+	}
+	cur, err := s.db.QueryByUID(uid)
+	if err != nil {
+		s.Warn("实名回写 user.name 前查询用户失败", zap.String("uid", uid), zap.Error(err))
+		return
+	}
+	if cur == nil || cur.Name == newName {
+		return
+	}
+	if err := s.db.UpdateUsersWithField("name", newName, uid); err != nil {
+		s.Warn("实名回写 user.name 失败",
+			zap.String("uid", uid), zap.String("new_name", newName), zap.Error(err))
+		return
+	}
+	s.notifyDisplayNameChanged(uid)
+}
+
+// notifyDisplayNameChanged 通知好友刷新本人 1v1 人频道信息(显示名变更即时生效)。
+// 镜像 userUpdate 改名路径(api.go 的 CMDChannelUpdate 推送),让对端本地缓存的
+// 显示名及时更新而不必等下次主动拉取。best-effort:查询好友 / 发 CMD 失败只 warn。
+func (s *Service) notifyDisplayNameChanged(uid string) {
+	friends, err := s.friendDB.QueryFriends(uid)
+	if err != nil {
+		s.Warn("实名回写后查询好友失败,跳过人频道刷新通知", zap.String("uid", uid), zap.Error(err))
+		return
+	}
+	if len(friends) == 0 {
+		return
+	}
+	subscribers := make([]string, 0, len(friends))
+	for _, f := range friends {
+		subscribers = append(subscribers, f.ToUID)
+	}
+	if err := s.ctx.SendCMD(config.MsgCMDReq{
+		CMD:         common.CMDChannelUpdate,
+		Subscribers: subscribers,
+		Param: map[string]interface{}{
+			"channel_id":   uid,
+			"channel_type": common.ChannelTypePerson,
+		},
+	}); err != nil {
+		s.Warn("实名回写后发送人频道更新 CMD 失败", zap.String("uid", uid), zap.Error(err))
+	}
 }
 
 // stripOIDCVerifiedProvider 把 Aegis 返回的 verified_provider(如 "cas.example.com")
