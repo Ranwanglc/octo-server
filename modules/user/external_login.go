@@ -114,7 +114,13 @@ func (u *User) externalLoginExisting(ctx context.Context, req ExternalLoginReq) 
 	// 重复登录:IdP 返回的 name 与库中不一致时同步覆盖,保证 OCTO 改名能反映到 IM。
 	// 仅在 IdP 明确给了非空 name 时才动 — 偶发不返 name 不应破坏已有数据(issue #1307)。
 	// 必须先消毒再比较,否则 IdP 反复给 `evil@0@admin` 会每次都触发 update。
-	if req.Name != "" {
+	//
+	// 名字统一(实名优先):该用户已有权威实名时,user.name 改由实名治理 ——
+	// service.go::UpsertVerificationFromOIDC 在实名 upsert 后把 real_name 回写到
+	// user.name。此处不再让 IdP 的 name claim 覆盖,否则同一次 OIDC 登录里两条写入
+	// 路径会来回翻转 user.name 并每次触发 CMDChannelUpdate 风暴。未实名用户保持原
+	// #1307 行为(IdP name 同步)。
+	if req.Name != "" && !u.hasVerifiedRealName(req.ExistingUID) {
 		newName := sanitizeExternalName(req.Name)
 		if newName != userInfoM.Name {
 			if err := u.db.UpdateUsersWithField("name", newName, req.ExistingUID); err != nil {
@@ -195,6 +201,25 @@ func (u *User) externalLoginCreate(ctx context.Context, req ExternalLoginReq) (*
 		IsNewUser:     true,
 		LoginRespJSON: util.ToJson(loginResp),
 	}, nil
+}
+
+// hasVerifiedRealName 判断用户是否已有权威实名(user_verification.real_name 非空)。
+//
+// 名字统一:有实名时 user.name 由实名治理(UpsertVerificationFromOIDC 回写),
+// 不再被 IdP 的 name claim 覆盖。查询失败保守返回 false —— 退化为原 #1307 的
+// IdP name 同步行为,实名表抖动不应阻断登录,也不该意外清掉已对齐的实名显示名
+//(返回 false 只是"这次不拦截 name 同步",真正的实名回写仍由 UpsertVerificationFromOIDC 兜底)。
+func (u *User) hasVerifiedRealName(uid string) bool {
+	if uid == "" {
+		return false
+	}
+	vr, err := u.verificationDB.QueryByUID(uid)
+	if err != nil {
+		u.Warn("查询实名记录失败,本次登录退化为同步 IdP name",
+			zap.String("uid", uid), zap.Error(err))
+		return false
+	}
+	return vr != nil && strings.TrimSpace(vr.RealName) != ""
 }
 
 func toDeviceReq(d *DeviceInfo) *deviceReq {
