@@ -153,6 +153,22 @@ type channelListItem struct {
 	IsActive         bool   `json:"is_active"`
 }
 
+// channelMemberListResp 表三子表A：会话内成员消息统计汇总。
+type channelMemberListResp struct {
+	Count         int64                    `json:"count"`
+	TotalMsgCount int64                    `json:"total_msg_count"`
+	List          []*channelMemberListItem `json:"list"`
+}
+
+type channelMemberListItem struct {
+	MemberUID     string  `db:"member_uid" json:"member_uid"`
+	Name          string  `db:"name" json:"name"`
+	Email         string  `db:"email" json:"email"`
+	MemberType    uint8   `db:"member_type" json:"member_type"`
+	TotalMsgCount int64   `db:"total_msg_count" json:"total_msg_count"`
+	Percentage    float64 `json:"percentage"`
+}
+
 // directChatItem 全局私聊活跃列表行(口径2：私聊走独立全局列表)。
 type directChatItem struct {
 	ChannelID   string `json:"channel_id"`
