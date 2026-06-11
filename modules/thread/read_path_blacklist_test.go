@@ -13,6 +13,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/testutil"
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -67,6 +68,19 @@ func doGet(t *testing.T, s *server.Server, path string) *httptest.ResponseRecord
 	return w
 }
 
+// assertBlacklistDenied 收紧版 deny 断言（issue #353 P2）：原先四处裸
+// assert.NotEqual(200) 会把 404/500 等无关失败也当成"门禁生效"。deny 必须是
+// 成员门禁产生的业务错误——legacy D14 兼容下 ResponseErrorL wire=400，且 body
+// 文案是预期错误码的 DefaultMessage（testutil 服务器用默认 renderer，只透出
+// msg/status，不带 i18n code id）。
+func assertBlacklistDenied(t *testing.T, w *httptest.ResponseRecorder, wantMsg, hint string) {
+	t.Helper()
+	assert.Equal(t, http.StatusBadRequest, w.Code,
+		"%s（deny 走 ResponseErrorL，legacy D14 wire=400），body=%s", hint, w.Body.String())
+	assert.Contains(t, w.Body.String(), wantMsg,
+		"%s：deny 原因应是成员门禁而非其它失败", hint)
+}
+
 // TestReadPath_ListThreads_BlacklistTransition 列表读路径：normal 放行，
 // 被拉黑后直接 deny。
 func TestReadPath_ListThreads_BlacklistTransition(t *testing.T) {
@@ -78,7 +92,7 @@ func TestReadPath_ListThreads_BlacklistTransition(t *testing.T) {
 
 	blacklistLoginUser(t, ctx, groupNo)
 	w = doGet(t, s, path)
-	assert.NotEqual(t, http.StatusOK, w.Code, "被拉黑后列子区必须被拒")
+	assertBlacklistDenied(t, w, errcode.ErrThreadNotGroupMember.DefaultMessage, "被拉黑后列子区必须被拒")
 }
 
 // TestReadPath_GetThread_BlacklistTransition 详情读路径转换。
@@ -91,7 +105,7 @@ func TestReadPath_GetThread_BlacklistTransition(t *testing.T) {
 
 	blacklistLoginUser(t, ctx, groupNo)
 	w = doGet(t, s, path)
-	assert.NotEqual(t, http.StatusOK, w.Code, "被拉黑后读详情必须被拒")
+	assertBlacklistDenied(t, w, errcode.ErrThreadNotGroupMember.DefaultMessage, "被拉黑后读详情必须被拒")
 }
 
 // TestReadPath_ListMembers_BlacklistTransition 成员列表读路径转换。
@@ -104,7 +118,7 @@ func TestReadPath_ListMembers_BlacklistTransition(t *testing.T) {
 
 	blacklistLoginUser(t, ctx, groupNo)
 	w = doGet(t, s, path)
-	assert.NotEqual(t, http.StatusOK, w.Code, "被拉黑后列成员必须被拒")
+	assertBlacklistDenied(t, w, errcode.ErrThreadNotGroupMember.DefaultMessage, "被拉黑后列成员必须被拒")
 }
 
 // TestReadPath_GetThreadSimple_BlacklistTransition 简化路由读路径转换。
@@ -117,5 +131,21 @@ func TestReadPath_GetThreadSimple_BlacklistTransition(t *testing.T) {
 
 	blacklistLoginUser(t, ctx, groupNo)
 	w = doGet(t, s, path)
-	assert.NotEqual(t, http.StatusOK, w.Code, "被拉黑后读子区(简化路由)必须被拒")
+	assertBlacklistDenied(t, w, errcode.ErrThreadNotGroupMember.DefaultMessage, "被拉黑后读子区(简化路由)必须被拒")
+}
+
+// TestReadPath_ThreadMdGet_BlacklistTransition 子区 GROUP.md 读路径转换
+// （issue #353 P2 点名补强：threadMdGet 返回 GROUP.md 正文，越权读面与
+// 列表/详情同级，此前没有 blacklist 覆盖）。deny 码与其它读路径不同——
+// threadMdGet 的非活跃成员走 ErrThreadPermissionDenied。
+func TestReadPath_ThreadMdGet_BlacklistTransition(t *testing.T) {
+	s, ctx, groupNo, shortID := setupReadPathBlacklistData(t)
+	path := "/v1/groups/" + groupNo + "/threads/" + shortID + "/md"
+
+	w := doGet(t, s, path)
+	assert.Equal(t, http.StatusOK, w.Code, "正常成员应能读子区 GROUP.md（无内容时返回空 content）")
+
+	blacklistLoginUser(t, ctx, groupNo)
+	w = doGet(t, s, path)
+	assertBlacklistDenied(t, w, errcode.ErrThreadPermissionDenied.DefaultMessage, "被拉黑后读子区 GROUP.md 必须被拒")
 }
