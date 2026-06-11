@@ -19,6 +19,7 @@ import (
 	_ "github.com/Mininglamp-OSS/octo-server/internal"
 	commonapi "github.com/Mininglamp-OSS/octo-server/modules/base/common"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
+	"github.com/Mininglamp-OSS/octo-server/modules/group"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-server/pkg/accesslog"
 	"github.com/Mininglamp-OSS/octo-server/pkg/auth"
@@ -82,15 +83,60 @@ func main() {
 	log.Configure(logOpts)
 
 	var serverType string
-	if len(os.Args) > 1 {
+	subArgs := flag.Args()
+	if len(subArgs) > 0 {
+		serverType = strings.TrimSpace(subArgs[0])
+		serverType = strings.Replace(serverType, "-", "", -1)
+	} else if len(os.Args) > 1 {
 		serverType = strings.TrimSpace(os.Args[1])
 		serverType = strings.Replace(serverType, "-", "", -1)
+	}
+
+	switch serverType {
+	case "reconcilethreadsubs": // 存量子区订阅泄漏一次性对账工具（Issue YUJ-4186）
+		var rest []string
+		if len(subArgs) > 1 {
+			rest = subArgs[1:]
+		}
+		runReconcileThreadSubs(ctx, rest)
+		return
 	}
 
 	if serverType == "api" || serverType == "" || serverType == "config" { // api服务启动
 		runAPI(ctx)
 	}
 
+}
+
+// runReconcileThreadSubs 运行存量子区订阅泄漏对账工具（Issue YUJ-4186）。
+// 默认 dry-run（只统计、不摘订阅），加 --apply 才真正执行。
+//
+//	用法: app [-config configs/tsdd.yaml] reconcile-thread-subs [--apply] [--batch-size N] [--interval 200ms]
+func runReconcileThreadSubs(ctx *config.Context, args []string) {
+	fs := flag.NewFlagSet("reconcile-thread-subs", flag.ExitOnError)
+	apply := fs.Bool("apply", false, "实际摘除订阅（默认 false，即 dry-run，只统计不写）")
+	batchSize := fs.Int("batch-size", 100, "单次 IMRemoveSubscriber 调用最多携带的 uid 数（同一子区频道下分批）")
+	interval := fs.Duration("interval", 0, "每次 IMRemoveSubscriber 调用之间的休眠（限速，如 200ms）")
+	if err := fs.Parse(args); err != nil {
+		panic(err)
+	}
+
+	report, err := group.RunThreadSubscriptionReconcile(ctx, log.NewTLog("reconcileThreadSubs"), group.ReconcileOptions{
+		Apply:     *apply,
+		BatchSize: *batchSize,
+		Interval:  *interval,
+	})
+	if report != nil {
+		fmt.Print(report.String())
+	}
+	if err != nil {
+		log.Error("子区订阅对账失败", zap.Error(err))
+		os.Exit(1)
+	}
+	if report != nil && len(report.Failures) > 0 {
+		// 有失败项时以非零退出码收尾，便于运维脚本感知（失败本身不中断对账，已全部跑完）。
+		os.Exit(2)
+	}
 }
 
 func runAPI(ctx *config.Context) {
