@@ -12,14 +12,20 @@ package message
 // 静默漏过。本文件不带 tag，直接吃 CI 已就绪的 MySQL service，跑生产同款
 // newThreadAuthChecker（真实 group/group_member/thread 表）。
 //
-// 测试基建约定（PR #356 round-1 CI 红的教训）：本包非 integration-tag 测试一律
-// 不跑 sql-migrate（既有 testutil.NewTestServer 用例全部 t.Skip；手建表用例与
-// 迁移在 -shuffle 下互撞 Error 1050）。照搬 e2e helper 的做法：手建最小表 +
-// 裸 INSERT 种子，ctx 显式 Migration=false。
+// 测试基建约定（PR #356 round-1 CI 红 + round-2 review 的教训）：
+//  1. 不跑 sql-migrate——本包非 integration-tag 测试一律不经 module.Setup（既有
+//     testutil.NewTestServer 用例全部 t.Skip；手建表用例与迁移在 -shuffle 下互撞
+//     Error 1050）。
+//  2. 不碰共享 test 库——本文件要 DROP+CREATE group/group_member/thread，而
+//     go test ./... 默认跨包并行、modules/group、modules/thread 等包用
+//     testutil.NewTestServer 连同一个 test 库，破坏性 DDL 会撞别包的查询。
+//     因此先在 MySQL 实例上建独立库再连入，所有 DDL/数据只落在隔离库里。
+// 写法照搬 e2e helper：手建最小表 + 裸 INSERT 种子，ctx 显式 Migration=false。
 // =============================================================================
 
 import (
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -33,21 +39,43 @@ import (
 
 const ccaSpaceID = "s_cca"
 
-// ccaNewCtx 构造指向测试 MySQL 的 *config.Context（config.New 默认 DSN 即
-// root:demo@…/test，与 CI service 一致），显式 Migration=false——不经 module.Setup。
+// ccaDBName 是本文件专用的隔离库名：与共享 test 库（testutil.NewTestServer /
+// 其它包的迁移与查询）完全隔离，跨包并行的 go test ./... 下破坏性 DDL 不会外溢。
+// 与 thread_ext_blacklist_filter_test.go（PR #356）同名复用一个隔离库——两文件的
+// 每个用例都自建 schema，包内测试顺序执行，互不踩踏。
+const ccaDBName = "octo_msg_blacklist_test"
+
+// ccaNewCtx 构造指向隔离库的 *config.Context：先用 config.New 默认 DSN（与 CI
+// MySQL service 同源的 root:demo@…/test）建隔离库，再把 DSN 的库名换成隔离库连入。
+// 显式 Migration=false——不经 module.Setup。可用 MSG_BLACKLIST_TEST_MYSQL_ADDR
+// 覆盖隔离库 DSN（与 newSidebarIntegCtx 的 env 覆盖风格一致）。
 func ccaNewCtx(t *testing.T) *config.Context {
 	t.Helper()
+	bootCfg := config.New()
+	bootCfg.Test = true
+	bootCfg.DB.Migration = false
+	boot := config.NewContext(bootCfg)
+	_, err := boot.DB().Exec(
+		"CREATE DATABASE IF NOT EXISTS " + ccaDBName +
+			" CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci")
+	require.NoError(t, err, "create isolated db")
+
+	addr := os.Getenv("MSG_BLACKLIST_TEST_MYSQL_ADDR")
+	if addr == "" {
+		addr = "root:demo@tcp(127.0.0.1:3306)/" + ccaDBName + "?charset=utf8mb4&parseTime=true"
+	}
 	cfg := config.New()
 	cfg.Test = true
 	cfg.DB.Migration = false
+	cfg.DB.MySQLAddr = addr
 	return config.NewContext(cfg)
 }
 
-// ccaEnsureTables 手建 checkChannelAccess / AuthorizeThreadFollow 触达的最小表
+// ccaEnsureTables 在隔离库里手建 checkChannelAccess / AuthorizeThreadFollow 触达的最小表
 // （DDL 与 modules/group、modules/thread 迁移中本测试触达的列对齐；写法照搬
 // default_followed_group_guard_e2e_test.go / thread_follow_blacklist_e2e_test.go
-// 的同名 helper）。DROP + CREATE 而非 IF NOT EXISTS：其它用例可能先以更窄的
-// 列集建过 group_member；表只装每用例自种数据，破坏性 DDL 安全。
+// 的同名 helper）。DROP + CREATE 保证每个用例拿到本文件期望的 schema；隔离库
+// 只被本包顺序执行的测试使用，破坏性 DDL 安全。
 func ccaEnsureTables(t *testing.T, ctx *config.Context) {
 	t.Helper()
 	for _, tbl := range []string{"thread", "group_member", "`group`"} {
