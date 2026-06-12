@@ -167,11 +167,17 @@ type spaceResp struct {
 }
 
 type memberResp struct {
-	UID       string `json:"uid"`
-	Name      string `json:"name"`
-	Role      int    `json:"role"`
-	Robot     int    `json:"robot"`
-	CreatedAt string `json:"created_at"`
+	UID   string `json:"uid"`
+	Name  string `json:"name"`
+	Role  int    `json:"role"`
+	Robot int    `json:"robot"`
+	// OCTO 实名认证三字段（issue #344），JSON tag 与 modules/group
+	// memberDetailResp（YUJ-413）逐字对齐 —— Android/iOS 已按这套契约解析。
+	// 未实名：realname_verified=false，其余 omitempty 省略。
+	RealnameVerified   bool   `json:"realname_verified"`
+	RealName           string `json:"real_name,omitempty"`
+	RealnameVerifiedAt int64  `json:"realname_verified_at,omitempty"`
+	CreatedAt          string `json:"created_at"`
 }
 
 type inviteResp struct {

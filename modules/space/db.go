@@ -161,6 +161,48 @@ func (d *DB) queryMembers(spaceId string, loginUID string, page uint64, limit ui
 	return models, err
 }
 
+// memberVerificationModel 成员列表展示名兜底所需的最小实名视图（issue #344），
+// 对应 user_verification 表（modules/user/sql/20260505000003）。
+type memberVerificationModel struct {
+	UserID     string    `db:"user_id"`
+	RealName   string    `db:"real_name"`
+	VerifiedAt time.Time `db:"verified_at"`
+}
+
+// memberVerificationBatchSize 限制单次 `WHERE user_id IN (?)` 的参数数量，
+// 取值与 modules/user/db_verification.go verificationBatchSize 一致（成员列表
+// 单页上限 10000，分批避免超大 IN list 对 packet/planner 不友好）。
+const memberVerificationBatchSize = 1000
+
+// queryVerificationsByUIDs 批量查 user_verification，返回 uid → 实名记录；
+// 无记录的 uid 不在 map 中（调用方视为未实名）。
+//
+// 不能复用 modules/user.QueryVerificationsByUIDs —— user 包反向依赖 space
+// （service.go 等 4 处 import），这里直查表。不在 queryMembers SQL 里 JOIN
+// 的原因：user_verification 是 utf8mb4_general_ci，而存量库的 legacy 表可能
+// 还是 utf8mb4_0900_ai_ci（issue #150 的混排雷区），参数化 IN 查询不触发
+// 跨表 collation 比较；同时与 group fillRealnameFields 的批量回填同模式。
+func (d *DB) queryVerificationsByUIDs(uids []string) (map[string]*memberVerificationModel, error) {
+	out := make(map[string]*memberVerificationModel, len(uids))
+	for start := 0; start < len(uids); start += memberVerificationBatchSize {
+		end := start + memberVerificationBatchSize
+		if end > len(uids) {
+			end = len(uids)
+		}
+		var models []*memberVerificationModel
+		_, err := d.session.Select("user_id", "real_name", "verified_at").
+			From("user_verification").
+			Where("user_id IN ?", uids[start:end]).Load(&models)
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range models {
+			out[m.UserID] = m
+		}
+	}
+	return out, nil
+}
+
 // removeMemberLocked 锁内重读角色后移除成员，防并发转让产生无主空间，
 // 见 db_manager.go removeMemberLocked。
 func (d *DB) removeMemberLocked(spaceId, uid string, rejectRoleAtOrAbove int) error {

@@ -60,6 +60,11 @@ func TestMain(m *testing.M) {
 		// username/phone 对齐生产 user 表（modules/user/sql/20191106000003），管理端成员搜索按这两列做 LIKE 匹配。
 		"DROP TABLE IF EXISTS `user`",
 		"CREATE TABLE `user` (id BIGINT AUTO_INCREMENT PRIMARY KEY, uid VARCHAR(40) NOT NULL DEFAULT '', name VARCHAR(100) DEFAULT '', username VARCHAR(40) DEFAULT '', email VARCHAR(200) DEFAULT '', phone VARCHAR(20) DEFAULT '', avatar VARCHAR(200) DEFAULT '', robot SMALLINT DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, UNIQUE KEY idx_uid(uid)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci",
+		// user_verification 属 user 模块迁移（20260505000003_user_legacy01.sql），
+		// 但 user 包反向依赖 space，本测试二进制不含 user 模块，迁移不会建表；
+		// 成员列表展示名兜底（issue #344）批量查此表，这里按生产 schema 重建。
+		"DROP TABLE IF EXISTS user_verification",
+		"CREATE TABLE user_verification (user_id VARCHAR(40) NOT NULL, real_name VARCHAR(128) NOT NULL, source VARCHAR(32) NOT NULL, source_sub VARCHAR(128) NOT NULL, emp_id VARCHAR(64) DEFAULT NULL, dept VARCHAR(255) DEFAULT NULL, email VARCHAR(255) DEFAULT NULL, mobile VARCHAR(32) DEFAULT NULL, verified_at DATETIME NOT NULL, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, PRIMARY KEY (user_id), KEY idx_user_verification_source (source, source_sub)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci",
 	}
 	for _, ddl := range depDDLs {
 		if _, err := db.Exec(ddl); err != nil {

@@ -20,6 +20,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	commonmod "github.com/Mininglamp-OSS/octo-server/modules/common"
+	"github.com/Mininglamp-OSS/octo-server/pkg/displayname"
 	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
 	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
 	octoredis "github.com/Mininglamp-OSS/octo-server/pkg/redis"
@@ -620,15 +621,37 @@ func (s *Space) listMembers(c *wkhttp.Context) {
 		return
 	}
 
+	// 展示名兜底（issue #344）：user.name 允许为空（RegisterUserMustCompleteInfoOn==1
+	// 时的注册/SSO 建号路径），列表不能渲染空名。实名记录批量查（零 N+1），
+	// 查询失败仅 log 不阻断 —— 实名是增强信息，语义同 group fillRealnameFields。
+	uids := make([]string, 0, len(members))
+	for _, m := range members {
+		uids = append(uids, m.UID)
+	}
+	verifications, vErr := s.db.queryVerificationsByUIDs(uids)
+	if vErr != nil {
+		s.Warn("查询空间成员实名认证记录失败", zap.Error(vErr), zap.String("space_id", spaceId))
+		verifications = map[string]*memberVerificationModel{}
+	}
+
 	resps := make([]memberResp, 0, len(members))
 	for _, m := range members {
-		resps = append(resps, memberResp{
+		resp := memberResp{
 			UID:       m.UID,
 			Name:      m.Name,
 			Role:      m.Role,
 			Robot:     m.Robot,
 			CreatedAt: m.CreatedAt.String(),
-		})
+		}
+		if v, ok := verifications[m.UID]; ok {
+			resp.RealnameVerified = true
+			resp.RealName = v.RealName
+			if !v.VerifiedAt.IsZero() {
+				resp.RealnameVerifiedAt = v.VerifiedAt.Unix()
+			}
+		}
+		resp.Name = displayname.Resolve(m.Name, resp.RealName, m.UID)
+		resps = append(resps, resp)
 	}
 	c.Response(resps)
 }
