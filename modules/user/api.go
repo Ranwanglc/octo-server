@@ -22,6 +22,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/file"
 	"github.com/Mininglamp-OSS/octo-server/modules/source"
 	"github.com/Mininglamp-OSS/octo-server/pkg/avatarrender"
+	"github.com/Mininglamp-OSS/octo-server/pkg/displayname"
 	"github.com/Mininglamp-OSS/octo-server/pkg/avatarversion"
 	octoredis "github.com/Mininglamp-OSS/octo-server/pkg/redis"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
@@ -585,7 +586,22 @@ func (u *User) UserAvatar(c *wkhttp.Context) {
 				c.Header("Cache-Control", "public, max-age=300, must-revalidate")
 			}
 
-			text := avatarrender.IndividualText(userInfo.Name)
+			// 展示名与成员列表的兜底链保持一致（issue #344 / pkg/displayname）：
+			// 空名用户列表已显示 real_name/占位名，头像若仍按裸 user.name 走 uid
+			// ASCII 兜底图，同一用户两个 UI 面会不一致。仅空名才多查一次实名记录
+			// （PK 单查），正常用户热路径零额外开销；查询失败仅 log 按未实名继续
+			// —— 占位名仍保证可渲染。
+			avatarName := userInfo.Name
+			if strings.TrimSpace(avatarName) == "" {
+				realName := ""
+				if vr, vErr := u.verificationDB.QueryByUID(uid); vErr != nil {
+					u.Warn("查询实名认证记录失败（头像展示名兜底）", zap.Error(vErr), zap.String("uid", uid))
+				} else if vr != nil {
+					realName = vr.RealName
+				}
+				avatarName = displayname.Resolve(userInfo.Name, realName, uid)
+			}
+			text := avatarrender.IndividualText(avatarName)
 			nameMode := avatarrender.Renderable(text)
 			// ETag 覆盖决定内容的因子：渲染模式版本 + uid(决定颜色) + 展示文字。
 			etag := avatarETag("ascii-v1", uid)
