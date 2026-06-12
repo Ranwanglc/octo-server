@@ -109,6 +109,13 @@ func (bf *BotFather) Route(r *wkhttp.WKHttp) {
 	// Robot Apply API 端点（使用用户认证）
 	bf.setupApplyRoutes(r)
 
+	// Runtime onboarding (web session auth) — replaces the legacy
+	// BotFather `/daemon` IM command. Returns api_key (lazy-create) +
+	// server/fleet/matter URLs + pre-rendered install/start command
+	// strings for the web CreateRuntimeModal.
+	authedAPI := r.Group("/v1", bf.ctx.AuthMiddleware(r))
+	authedAPI.GET("/runtime-onboarding", bf.runtimeOnboarding)
+
 	// 初始化BotFather系统用户（使用sync.Once确保只执行一次）
 	bf.initOnce.Do(func() {
 		bf.initBotFatherUser()
@@ -305,7 +312,6 @@ func (bf *BotFather) initBotFatherUser() {
 func (bf *BotFather) registerBotFatherCommands() {
 	commands := []map[string]string{
 		{"command": CmdInstall, "description": "安装/更新 Octo 插件"},
-		{"command": CmdDaemon, "description": "获取 Agent Runtime 监控启动命令"},
 		{"command": CmdQuickstart, "description": "AI Agent 快速入门"},
 		{"command": CmdNewBot, "description": "创建新机器人"},
 		{"command": CmdMyBots, "description": "查看我的机器人"},
