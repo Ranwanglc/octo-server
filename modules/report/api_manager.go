@@ -9,6 +9,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	"github.com/Mininglamp-OSS/octo-server/pkg/authz"
 	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
 	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
 	wkutil "github.com/Mininglamp-OSS/octo-server/pkg/util"
@@ -40,7 +41,10 @@ func NewManager(ctx *config.Context) *Manager {
 // Route 配置路由规则
 func (m *Manager) Route(l *wkhttp.WKHttp) {
 
-	auth := l.Group("/v1/manager", l.AuthMiddleware(m.ctx.Cache(), m.ctx.GetConfig().Cache.TokenCachePrefix))
+	// Role gate is declarative: RequireAdmin() enforces admin∪superAdmin at the
+	// route, mounted after AuthMiddleware (#366 Part 2). reportList no longer
+	// re-checks the role in its body.
+	auth := l.Group("/v1/manager", l.AuthMiddleware(m.ctx.Cache(), m.ctx.GetConfig().Cache.TokenCachePrefix), authz.RequireAdmin())
 	{
 		auth.GET("/report/list", m.reportList) // 举报列表
 	}
@@ -48,11 +52,6 @@ func (m *Manager) Route(l *wkhttp.WKHttp) {
 
 // 举报列表
 func (m *Manager) reportList(c *wkhttp.Context) {
-	err := c.CheckLoginRole()
-	if err != nil {
-		httperr.ResponseErrorL(c, errcode.ErrSharedForbidden, nil, nil)
-		return
-	}
 	pageIndex, pageSize := c.GetPage()
 	channelType := c.Query("channel_type")
 	if channelType == "" {
