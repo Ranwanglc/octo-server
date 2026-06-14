@@ -1,7 +1,7 @@
 # RFC: Centralized Authorization Layer for Management Routes
 
 **Issue**: [#366](https://github.com/Mininglamp-OSS/octo-server/issues/366) Part 2 · follow-up to [#363](https://github.com/Mininglamp-OSS/octo-server/issues/363) audit / [#364](https://github.com/Mininglamp-OSS/octo-server/pull/364) fix
-**Status**: **Draft RFC — design proposal for maintainer review. Not yet implemented.**
+**Status**: **RFC — design decisions resolved 2026-06-14 (see §8). Not yet implemented; implementation pending go-ahead.**
 **Date**: 2026-06-14
 **Scope**: design only. Part 1 (the CI guard, `tools/lint-manager-authz`) has already landed; this document proposes Part 2 and how it dovetails with Part 1. No business code is changed by this RFC.
 **Decision target**: agree on the *shape* of the declarative authz layer (middleware-first vs. policy-table), the migration strategy, and the eventual runtime guard — before any module is migrated.
@@ -256,10 +256,19 @@ auth.PUT("/backup/config", m.updateConfig) // body no longer re-checks
 
 ---
 
-## 8. Open questions for maintainer sign-off
+## 8. Resolved decisions (2026-06-14)
 
-1. **Middleware-first vs. policy-table-first** — this RFC recommends middleware-first with an optional derived audit table. Agree?
-2. **`RequireRole(min)` core vs. two named functions** — two named functions proposed for readability; OK, or prefer the single parameterized form?
-3. **Runtime-guard mechanism** — registration-tagging shim (records middleware names per route) vs. tagging the authz middleware. Preference?
-4. **Retire vs. keep the Part-1 AST guard** after migration completes.
-5. Should the same middleware be adopted for the non-manager privileged write(s) (#363's `/v1/common` note) in the same effort, or tracked separately?
+Settled with the maintainer; the RFC above reflects these choices.
+
+1. **Enforcement mechanism → middleware at route registration.** `RequireAdmin()` / `RequireSuperAdmin()` mounted after `AuthMiddleware`, requirement co-located with the route, already recognized by the Part-1 guard. A one-screen audit table, if wanted, is a *derived read-only* view added later — not the enforcement mechanism. (Policy-table-as-enforcement was rejected: drifts from the real routes, needs new guard logic.)
+2. **Scope of the first effort → `/v1/manager` only.** The ~108 manager routes migrate now; the non-manager privileged write(s) (#363's `/v1/common appversion`, etc.) are tracked as a separate follow-up so each PR keeps a small blast radius. The Part-1 guard's prefix list stays `/v1/manager` for now.
+3. **API shape → two named middlewares** `RequireAdmin()` / `RequireSuperAdmin()` (a `RequireRole(min)` core is an internal impl detail; names read best at the call site and match the guard's recognized set).
+4. **Runtime-guard mechanism → registration-time recording.** A thin wrapper records each route's middleware names as routes are added, and the test asserts every `/v1/manager` route's recorded chain contains an authz middleware. (More general than tagging the middleware value.)
+5. **Part-1 AST guard → kept as belt-and-braces** after migration completes (costs ~nothing on CI); revisit only if it ever becomes redundant noise.
+
+### Next implementation slice (pending go-ahead)
+
+1. `pkg/auth/authz.go` — `RequireAdmin()` / `RequireSuperAdmin()` + unit tests (allow / deny / abort / resolver-degradation parity).
+2. First module migration as the pattern-setter: **`backup`** (uniformly `superAdmin`) → group-level `authz.RequireSuperAdmin()`, drop the 8 in-handler preambles, keep its regression green.
+3. The registration-recording shim + `TestEveryManagerRouteIsRoleGated`, landed once the first module proves the shape.
+
