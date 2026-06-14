@@ -18,6 +18,8 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
+	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
 	pkgutil "github.com/Mininglamp-OSS/octo-server/pkg/util"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -61,15 +63,15 @@ func (f *File) makeImageCompose(c *wkhttp.Context) {
 	var imageURLs []string
 	if err := c.BindJSON(&imageURLs); err != nil {
 		f.Error("数据格式有误！", zap.Error(err))
-		c.ResponseError(errors.New("数据格式有误！"))
+		respondFileRequestInvalid(c, "")
 		return
 	}
 	if len(imageURLs) <= 0 {
-		c.ResponseError(errors.New("图片不能为空！"))
+		respondFileRequestInvalid(c, "images")
 		return
 	}
 	if len(imageURLs) > 9 {
-		c.ResponseError(errors.New("图片数量不能大于9！"))
+		respondFileImageCountExceeded(c, 9)
 		return
 	}
 	uploadPath := c.Param("path")
@@ -77,13 +79,13 @@ func (f *File) makeImageCompose(c *wkhttp.Context) {
 	resultMap, err := f.service.DownloadAndMakeCompose(uploadPath, imageURLs)
 	if err != nil {
 		f.Error("组合图片失败！", zap.String("uploadPath", uploadPath), zap.Any("imageURLs", imageURLs), zap.Error(err))
-		c.ResponseError(errors.New("组合图片失败！"))
+		httperr.ResponseErrorL(c, errcode.ErrFileImageComposeFailed, nil, nil)
 		return
 	}
 	fid, ok := resultMap["fid"].(string)
 	if !ok || fid == "" {
 		f.Error("图片合成返回结果异常", zap.Any("resultMap", resultMap))
-		c.ResponseError(errors.New("图片合成失败：返回结果异常"))
+		httperr.ResponseErrorL(c, errcode.ErrFileImageComposeFailed, nil, nil)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -98,14 +100,14 @@ func (f *File) getFilePath(c *wkhttp.Context) {
 	fileType := c.Query("type")
 	err := f.checkReq(Type(fileType), uploadPath)
 	if err != nil {
-		c.ResponseError(err)
+		respondFileRequestInvalid(c, "")
 		return
 	}
 	if uploadPath != "" {
 		var sanitizeErr error
 		uploadPath, sanitizeErr = sanitizePath(uploadPath)
 		if sanitizeErr != nil {
-			c.ResponseError(errors.New("无效的文件路径"))
+			httperr.ResponseErrorL(c, errcode.ErrFileInvalidPath, nil, nil)
 			return
 		}
 	}
@@ -142,14 +144,14 @@ func (f *File) uploadFile(c *wkhttp.Context) {
 	contentType := c.DefaultPostForm("contenttype", "application/octet-stream")
 	err := f.checkReq(Type(fileType), uploadPath)
 	if err != nil {
-		c.ResponseError(err)
+		respondFileRequestInvalid(c, "")
 		return
 	}
 	if uploadPath != "" {
 		var sanitizeErr error
 		uploadPath, sanitizeErr = sanitizePath(uploadPath)
 		if sanitizeErr != nil {
-			c.ResponseError(errors.New("无效的文件路径"))
+			httperr.ResponseErrorL(c, errcode.ErrFileInvalidPath, nil, nil)
 			return
 		}
 	}
@@ -160,7 +162,7 @@ func (f *File) uploadFile(c *wkhttp.Context) {
 	file, fileHeader, err := c.Request.FormFile("file")
 	if err != nil {
 		f.Error("读取文件失败！", zap.Error(err))
-		c.ResponseError(errors.New("读取文件失败！"))
+		httperr.ResponseErrorL(c, errcode.ErrFileReadFailed, nil, nil)
 		return
 	}
 	defer file.Close()
@@ -168,7 +170,7 @@ func (f *File) uploadFile(c *wkhttp.Context) {
 	// 文件大小检查
 	if fileHeader.Size > MaxFileSize {
 		f.Warn("文件大小超出限制", zap.Int64("size", fileHeader.Size), zap.Int64("max", MaxFileSize))
-		c.ResponseError(fmt.Errorf("文件大小不能超过%dMB", MaxFileSize/1024/1024))
+		respondFileTooLarge(c, MaxFileSize/1024/1024)
 		return
 	}
 
@@ -177,17 +179,17 @@ func (f *File) uploadFile(c *wkhttp.Context) {
 	ext := strings.ToLower(filepath.Ext(fileName))
 	if ext == "" {
 		f.Warn("上传的文件没有扩展名", zap.String("filename", fileName))
-		c.ResponseError(errors.New("文件必须包含扩展名"))
+		httperr.ResponseErrorL(c, errcode.ErrFileExtensionRequired, nil, nil)
 		return
 	}
 	if IsBlockedExtension(ext) {
 		f.Warn("上传了禁止的文件类型", zap.String("filename", fileName), zap.String("ext", ext))
-		c.ResponseError(fmt.Errorf("禁止上传%s类型的文件", ext))
+		respondFileTypeUnsupported(c, ext)
 		return
 	}
 	if !IsAllowedExtension(ext) {
 		f.Warn("上传了不支持的文件类型", zap.String("filename", fileName), zap.String("ext", ext))
-		c.ResponseError(fmt.Errorf("不支持上传%s类型的文件", ext))
+		respondFileTypeUnsupported(c, ext)
 		return
 	}
 
@@ -207,7 +209,7 @@ func (f *File) uploadFile(c *wkhttp.Context) {
 	n, err := file.Read(magicHeader)
 	if err != nil && err.Error() != "EOF" {
 		f.Error("读取文件头部失败", zap.Error(err))
-		c.ResponseError(errors.New("读取文件失败"))
+		httperr.ResponseErrorL(c, errcode.ErrFileReadFailed, nil, nil)
 		return
 	}
 	magicHeader = magicHeader[:n]
@@ -215,14 +217,14 @@ func (f *File) uploadFile(c *wkhttp.Context) {
 	// 验证文件魔数是否与扩展名匹配
 	if !ValidateMagicNumber(ext, magicHeader) {
 		f.Warn("文件内容与扩展名不匹配", zap.String("filename", fileName), zap.String("ext", ext))
-		c.ResponseError(errors.New("文件内容与扩展名不匹配"))
+		httperr.ResponseErrorL(c, errcode.ErrFileContentMismatch, nil, nil)
 		return
 	}
 
 	// 重置文件指针到开头
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		f.Error("重置文件指针失败", zap.Error(err))
-		c.ResponseError(errors.New("文件处理失败"))
+		httperr.ResponseErrorL(c, errcode.ErrFileProcessFailed, nil, nil)
 		return
 	}
 
@@ -250,7 +252,7 @@ func (f *File) uploadFile(c *wkhttp.Context) {
 		_, err := io.Copy(h, file)
 		if err != nil {
 			f.Error("签名复制文件错误", zap.Error(err))
-			c.ResponseError(errors.New("签名复制文件错误"))
+			httperr.ResponseErrorL(c, errcode.ErrFileProcessFailed, nil, nil)
 			return
 		}
 		sign = h.Sum(nil)
@@ -267,7 +269,7 @@ func (f *File) uploadFile(c *wkhttp.Context) {
 	})
 	if err != nil {
 		f.Error("上传文件失败！", zap.Error(err))
-		c.ResponseError(errors.New("上传文件失败！"))
+		httperr.ResponseErrorL(c, errcode.ErrFileUploadFailed, nil, nil)
 		return
 	}
 
@@ -324,11 +326,11 @@ func inferContentType(contentType string, ext string) string {
 func (f *File) getFile(c *wkhttp.Context) {
 	ph, err := sanitizePath(c.Param("path"))
 	if err != nil {
-		c.ResponseError(err)
+		httperr.ResponseErrorL(c, errcode.ErrFileInvalidPath, nil, nil)
 		return
 	}
 	if ph == "" {
-		c.Response(errors.New("访问路径不能为空"))
+		respondFileRequestInvalid(c, "path")
 		return
 	}
 	filename := c.Query("filename")
@@ -365,7 +367,8 @@ func (f *File) getFile(c *wkhttp.Context) {
 	}
 	downloadURL, err := f.service.DownloadURL(ph, dlFilename)
 	if err != nil {
-		c.ResponseError(err)
+		f.Error("生成下载URL失败", zap.String("path", ph), zap.Error(err))
+		httperr.ResponseErrorL(c, errcode.ErrFilePresignFailed, nil, nil)
 		return
 	}
 	c.Redirect(http.StatusFound, downloadURL)
@@ -448,18 +451,18 @@ func (f *File) getUploadCredentials(c *wkhttp.Context) {
 	// `MaxFileSize`). Reject the request rather than silently producing a
 	// URL the storage gateway cannot bound.
 	if fileSizeRaw == "" {
-		c.ResponseError(errors.New("fileSize 参数必填，且不能超过最大限制"))
+		respondFileRequestInvalid(c, "fileSize")
 		return
 	}
 	fileSize, parseErr := strconv.ParseInt(fileSizeRaw, 10, 64)
 	if parseErr != nil || fileSize <= 0 {
-		c.ResponseError(errors.New("fileSize 参数必须为正整数（字节）"))
+		respondFileRequestInvalid(c, "fileSize")
 		return
 	}
 	if fileSize > MaxFileSize {
 		f.Warn("预签名上传 fileSize 超出限制",
 			zap.Int64("size", fileSize), zap.Int64("max", MaxFileSize))
-		c.ResponseError(fmt.Errorf("文件大小不能超过%dMB", MaxFileSize/1024/1024))
+		respondFileTooLarge(c, MaxFileSize/1024/1024)
 		return
 	}
 
@@ -469,7 +472,7 @@ func (f *File) getUploadCredentials(c *wkhttp.Context) {
 		pathForCheck = filename
 	}
 	if err := f.checkReq(Type(fileType), pathForCheck); err != nil {
-		c.ResponseError(err)
+		respondFileRequestInvalid(c, "")
 		return
 	}
 
@@ -484,7 +487,7 @@ func (f *File) getUploadCredentials(c *wkhttp.Context) {
 		ext = strings.ToLower(filepath.Ext(uploadPath))
 	}
 	if ext == "" || IsBlockedExtension(ext) || !IsAllowedExtension(ext) {
-		c.ResponseError(errors.New("不支持的文件类型"))
+		respondFileTypeUnsupported(c, ext)
 		return
 	}
 
@@ -505,7 +508,7 @@ func (f *File) getUploadCredentials(c *wkhttp.Context) {
 	if uploadPath != "" {
 		sanitized, err := sanitizePath(uploadPath)
 		if err != nil {
-			c.ResponseError(errors.New("无效的文件路径"))
+			httperr.ResponseErrorL(c, errcode.ErrFileInvalidPath, nil, nil)
 			return
 		}
 		if !strings.HasPrefix(sanitized, "/") {
@@ -528,7 +531,7 @@ func (f *File) getUploadCredentials(c *wkhttp.Context) {
 	uploadURL, downloadURL, err := f.service.PresignedPutURL(objectKey, contentType, contentDisposition, fileSize, expiry)
 	if err != nil {
 		f.Error("生成预签名URL失败", zap.Error(err))
-		c.ResponseError(errors.New("生成预签名上传 URL 失败"))
+		httperr.ResponseErrorL(c, errcode.ErrFilePresignFailed, nil, nil)
 		return
 	}
 
@@ -552,7 +555,7 @@ func (f *File) getUploadCredentials(c *wkhttp.Context) {
 func (f *File) getDownloadURL(c *wkhttp.Context) {
 	ph := c.Query("path")
 	if strings.TrimSpace(ph) == "" {
-		c.ResponseError(errors.New("path参数不能为空"))
+		respondFileRequestInvalid(c, "path")
 		return
 	}
 
@@ -639,7 +642,7 @@ func (f *File) getDownloadURL(c *wkhttp.Context) {
 
 	sanitized, err := sanitizePath(ph)
 	if err != nil {
-		c.ResponseError(errors.New("无效的文件路径"))
+		httperr.ResponseErrorL(c, errcode.ErrFileInvalidPath, nil, nil)
 		return
 	}
 
@@ -658,7 +661,7 @@ func (f *File) getDownloadURL(c *wkhttp.Context) {
 	signedURL, err := f.service.PresignedGetURL(sanitized, filename, disposition, expiry)
 	if err != nil {
 		f.Error("生成预签名下载URL失败", zap.Error(err))
-		c.ResponseError(errors.New("生成预签名下载URL失败"))
+		httperr.ResponseErrorL(c, errcode.ErrFilePresignFailed, nil, nil)
 		return
 	}
 

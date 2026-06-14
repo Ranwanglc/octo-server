@@ -1,17 +1,18 @@
 package channel
 
 import (
-	"errors"
 	"net/http"
-	"strings"
 	"strconv"
+	"strings"
 	"time"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/user"
-	"github.com/Mininglamp-OSS/octo-server/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
+	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
+	"github.com/Mininglamp-OSS/octo-server/pkg/util"
 	"go.uber.org/zap"
 )
 
@@ -56,13 +57,13 @@ func (ch *Channel) getStoryline(c *wkhttp.Context) {
 	channelType := uint8(channelTypeI64)
 
 	if channelID == "" {
-		c.ResponseError(errors.New("频道ID不能为空"))
+		respondChannelRequestInvalid(c, "channel_id")
 		return
 	}
 
 	// 仅支持群聊
 	if channelType != common.ChannelTypeGroup.Uint8() {
-		c.ResponseError(errors.New("故事线功能仅支持群聊"))
+		httperr.ResponseErrorL(c, errcode.ErrChannelStorylineGroupOnly, nil, nil)
 		return
 	}
 
@@ -70,11 +71,11 @@ func (ch *Channel) getStoryline(c *wkhttp.Context) {
 	isMember, err := ch.groupService.ExistMember(channelID, loginUID)
 	if err != nil {
 		ch.Error("查询群成员信息错误", zap.Error(err))
-		c.ResponseError(errors.New("查询群成员信息错误"))
+		httperr.ResponseErrorL(c, errcode.ErrChannelQueryFailed, nil, nil)
 		return
 	}
 	if !isMember {
-		c.ResponseError(errors.New("非群成员无法查询故事线"))
+		httperr.ResponseErrorL(c, errcode.ErrChannelForbidden, nil, nil)
 		return
 	}
 
@@ -85,17 +86,17 @@ func (ch *Channel) getStoryline(c *wkhttp.Context) {
 	if strings.HasPrefix(filter, "with_user:") {
 		targetUID := strings.TrimPrefix(filter, "with_user:")
 		if targetUID == "" {
-			c.ResponseError(errors.New("with_user 过滤器缺少目标用户"))
+			respondChannelRequestInvalid(c, "filter")
 			return
 		}
 		targetIsMember, err := ch.groupService.ExistMember(channelID, targetUID)
 		if err != nil {
 			ch.Error("查询目标用户群成员信息错误", zap.Error(err))
-			c.ResponseError(errors.New("查询群成员信息错误"))
+			httperr.ResponseErrorL(c, errcode.ErrChannelQueryFailed, nil, nil)
 			return
 		}
 		if !targetIsMember {
-			c.ResponseError(errors.New("目标用户不是群成员"))
+			respondChannelRequestInvalid(c, "filter")
 			return
 		}
 	}
@@ -126,7 +127,7 @@ func (ch *Channel) getStoryline(c *wkhttp.Context) {
 	})
 	if err != nil {
 		ch.Error("同步频道消息失败", zap.Error(err), zap.String("channel_id", channelID))
-		c.ResponseError(errors.New("同步频道消息失败"))
+		httperr.ResponseErrorL(c, errcode.ErrChannelSendFailed, nil, nil)
 		return
 	}
 

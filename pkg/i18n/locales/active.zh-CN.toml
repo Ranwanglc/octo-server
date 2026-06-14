@@ -380,6 +380,93 @@ other = "批量数量超过上限。"
 ["err.server.notify.deliver_failed"]
 other = "通知投递失败。"
 
+["err.server.file.request_invalid"]
+other = "请求参数有误。"
+
+["err.server.file.image_count_exceeded"]
+other = "图片数量超出限制。"
+
+["err.server.file.invalid_path"]
+other = "无效的文件路径。"
+
+["err.server.file.too_large"]
+other = "文件大小超过限制。"
+
+["err.server.file.extension_required"]
+other = "文件必须包含扩展名。"
+
+["err.server.file.type_unsupported"]
+other = "不支持的文件类型。"
+
+["err.server.file.content_mismatch"]
+other = "文件内容与扩展名不匹配。"
+
+["err.server.file.read_failed"]
+other = "读取文件失败。"
+
+["err.server.file.process_failed"]
+other = "文件处理失败。"
+
+["err.server.file.image_compose_failed"]
+other = "图片合成失败。"
+
+["err.server.file.upload_failed"]
+other = "上传文件失败。"
+
+["err.server.file.presign_failed"]
+other = "生成预签名地址失败。"
+
+["err.server.channel.request_invalid"]
+other = "请求参数有误。"
+
+["err.server.channel.storyline_group_only"]
+other = "故事线功能仅支持群聊。"
+
+["err.server.channel.forbidden"]
+other = "无权操作此频道。"
+
+["err.server.channel.not_found"]
+other = "频道不存在。"
+
+["err.server.channel.query_failed"]
+other = "查询频道数据失败。"
+
+["err.server.channel.store_failed"]
+other = "更新频道数据失败。"
+
+["err.server.channel.send_failed"]
+other = "发送消息失败。"
+
+["err.server.conversation_ext.request_invalid"]
+other = "请求参数有误。"
+
+["err.server.conversation_ext.items_too_many"]
+other = "排序项过多。"
+
+["err.server.conversation_ext.duplicate_item"]
+other = "请求中存在重复项。"
+
+["err.server.conversation_ext.follow_forbidden"]
+other = "无权关注该目标。"
+
+["err.server.conversation_ext.category_forbidden"]
+other = "该分组不存在或不属于你。"
+
+["err.server.conversation_ext.sort_target_not_found"]
+other = "部分排序目标不存在，请刷新关注列表后重试。"
+
+["err.server.conversation_ext.version_conflict"]
+other = "关注列表已变更，请刷新后重试。"
+
+["err.server.conversation_ext.follow_failed"]
+other = "关注操作失败。"
+
+["err.server.conversation_ext.unfollow_failed"]
+other = "取消关注操作失败。"
+
+["err.server.conversation_ext.sort_update_failed"]
+other = "更新排序失败。"
+
 ["err.server.group.request_invalid"]
 other = "请求参数有误。"
 

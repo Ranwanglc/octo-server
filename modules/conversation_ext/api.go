@@ -2,12 +2,12 @@ package conversation_ext
 
 import (
 	"errors"
-	"net/http"
 
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
+	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
-	pkgerrors "github.com/pkg/errors"
 	"go.uber.org/zap"
 )
 
@@ -105,7 +105,7 @@ type updateSortReq struct {
 func spaceGuard(c *wkhttp.Context) (spaceID string, ok bool) {
 	spaceID = spacepkg.GetSpaceID(c)
 	if spaceID == "" {
-		c.ResponseError(pkgerrors.New("space_id 不能为空"))
+		respondConvExtRequestInvalid(c, "space_id")
 		return "", false
 	}
 	return spaceID, true
@@ -126,11 +126,11 @@ func (f *Follow) FollowDM(c *wkhttp.Context) {
 
 	var req followDMReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(pkgerrors.New("参数错误"))
+		respondConvExtRequestInvalid(c, "")
 		return
 	}
 	if req.PeerUID == "" {
-		c.ResponseError(pkgerrors.New("peer_uid 不能为空"))
+		respondConvExtRequestInvalid(c, "peer_uid")
 		return
 	}
 
@@ -138,11 +138,12 @@ func (f *Follow) FollowDM(c *wkhttp.Context) {
 		// PR #21 Round-6：DMCategoryChecker 拒绝时把具体业务错暴露给客户端，
 		// 不要吞成通用 "关注 DM 失败"，让客户端知道是 category 不存在 / 不属于自己。
 		if errors.Is(err, ErrDMCategoryForbidden) {
-			c.ResponseError(err)
+			f.Warn("FollowDM category 鉴权失败", zap.Error(err))
+			httperr.ResponseErrorL(c, errcode.ErrConvExtCategoryForbidden, nil, nil)
 			return
 		}
 		f.Error("关注 DM 失败", zap.Error(err))
-		c.ResponseError(pkgerrors.New("关注 DM 失败"))
+		httperr.ResponseErrorL(c, errcode.ErrConvExtFollowFailed, nil, nil)
 		return
 	}
 	c.ResponseOK()
@@ -159,13 +160,13 @@ func (f *Follow) UnfollowDM(c *wkhttp.Context) {
 
 	peerUID := c.Query("peer_uid")
 	if peerUID == "" {
-		c.ResponseError(pkgerrors.New("peer_uid 不能为空"))
+		respondConvExtRequestInvalid(c, "peer_uid")
 		return
 	}
 
 	if err := f.svc.UnfollowDM(loginUID, spaceID, peerUID); err != nil {
 		f.Error("取消关注 DM 失败", zap.Error(err))
-		c.ResponseError(pkgerrors.New("取消关注 DM 失败"))
+		httperr.ResponseErrorL(c, errcode.ErrConvExtUnfollowFailed, nil, nil)
 		return
 	}
 	c.ResponseOK()
@@ -182,17 +183,17 @@ func (f *Follow) UnfollowChannel(c *wkhttp.Context) {
 
 	var req unfollowChannelReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(pkgerrors.New("参数错误"))
+		respondConvExtRequestInvalid(c, "")
 		return
 	}
 	if req.GroupNo == "" {
-		c.ResponseError(pkgerrors.New("group_no 不能为空"))
+		respondConvExtRequestInvalid(c, "group_no")
 		return
 	}
 
 	if err := f.svc.UnfollowChannel(loginUID, spaceID, req.GroupNo); err != nil {
 		f.Error("取消关注群失败", zap.Error(err))
-		c.ResponseError(pkgerrors.New("取消关注群失败"))
+		httperr.ResponseErrorL(c, errcode.ErrConvExtUnfollowFailed, nil, nil)
 		return
 	}
 	c.ResponseOK()
@@ -209,11 +210,11 @@ func (f *Follow) FollowChannel(c *wkhttp.Context) {
 
 	var req unfollowChannelReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(pkgerrors.New("参数错误"))
+		respondConvExtRequestInvalid(c, "")
 		return
 	}
 	if req.GroupNo == "" {
-		c.ResponseError(pkgerrors.New("group_no 不能为空"))
+		respondConvExtRequestInvalid(c, "group_no")
 		return
 	}
 
@@ -222,11 +223,11 @@ func (f *Follow) FollowChannel(c *wkhttp.Context) {
 		// 不向客户端泄露内部细节（仅写日志）。与 FollowThread 同样处理 ErrThreadForbidden。
 		if errors.Is(err, ErrChannelForbidden) {
 			f.Warn("关注群鉴权失败", zap.Error(err))
-			c.ResponseErrorWithStatus(pkgerrors.New("无权关注该群"), http.StatusForbidden)
+			httperr.ResponseErrorL(c, errcode.ErrConvExtFollowForbidden, nil, nil)
 			return
 		}
 		f.Error("重新关注群失败", zap.Error(err))
-		c.ResponseError(pkgerrors.New("重新关注群失败"))
+		httperr.ResponseErrorL(c, errcode.ErrConvExtFollowFailed, nil, nil)
 		return
 	}
 	c.ResponseOK()
@@ -243,11 +244,11 @@ func (f *Follow) FollowThread(c *wkhttp.Context) {
 
 	var req followThreadReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(pkgerrors.New("参数错误"))
+		respondConvExtRequestInvalid(c, "")
 		return
 	}
 	if req.ThreadChannelID == "" {
-		c.ResponseError(pkgerrors.New("thread_channel_id 不能为空"))
+		respondConvExtRequestInvalid(c, "thread_channel_id")
 		return
 	}
 
@@ -256,11 +257,11 @@ func (f *Follow) FollowThread(c *wkhttp.Context) {
 		// 不向客户端泄露内部细节，只写到日志（zap.Error）。
 		if errors.Is(err, ErrThreadForbidden) {
 			f.Warn("关注子区认证失败", zap.Error(err))
-			c.ResponseErrorWithStatus(pkgerrors.New("无权关注该子区"), http.StatusForbidden)
+			httperr.ResponseErrorL(c, errcode.ErrConvExtFollowForbidden, nil, nil)
 			return
 		}
 		f.Error("关注子区失败", zap.Error(err))
-		c.ResponseError(pkgerrors.New("关注子区失败"))
+		httperr.ResponseErrorL(c, errcode.ErrConvExtFollowFailed, nil, nil)
 		return
 	}
 	c.ResponseOK()
@@ -277,13 +278,13 @@ func (f *Follow) UnfollowThread(c *wkhttp.Context) {
 
 	threadChannelID := c.Query("thread_channel_id")
 	if threadChannelID == "" {
-		c.ResponseError(pkgerrors.New("thread_channel_id 不能为空"))
+		respondConvExtRequestInvalid(c, "thread_channel_id")
 		return
 	}
 
 	if err := f.svc.UnfollowThread(loginUID, spaceID, threadChannelID); err != nil {
 		f.Error("取消关注子区失败", zap.Error(err))
-		c.ResponseError(pkgerrors.New("取消关注子区失败"))
+		httperr.ResponseErrorL(c, errcode.ErrConvExtUnfollowFailed, nil, nil)
 		return
 	}
 	c.ResponseOK()
@@ -300,18 +301,18 @@ func (f *Follow) UpdateSort(c *wkhttp.Context) {
 
 	var req updateSortReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseError(pkgerrors.New("参数错误"))
+		respondConvExtRequestInvalid(c, "")
 		return
 	}
 
 	if len(req.Items) == 0 {
-		c.ResponseError(pkgerrors.New("items 不能为空"))
+		respondConvExtRequestInvalid(c, "items")
 		return
 	}
 	// PR #21 Round-4 review I3 (yujiawei)：cap len、reject 空 target_id 与重复对，
 	// 让客户端看到精确错误而非通用 "sort target not found"，也避免无效请求打到 DB。
 	if len(req.Items) > maxUpdateSortItems {
-		c.ResponseError(pkgerrors.Errorf("items 太多（max %d）", maxUpdateSortItems))
+		respondConvExtItemsTooMany(c, maxUpdateSortItems)
 		return
 	}
 
@@ -320,16 +321,16 @@ func (f *Follow) UpdateSort(c *wkhttp.Context) {
 	seen := make(map[sortItemKey]struct{}, len(req.Items))
 	for _, it := range req.Items {
 		if !validFollowTargetTypes[it.TargetType] {
-			c.ResponseError(pkgerrors.New("无效的 target_type，仅支持 1（DM）/ 2（群）/ 5（子区）"))
+			respondConvExtRequestInvalid(c, "target_type")
 			return
 		}
 		if it.TargetID == "" {
-			c.ResponseError(pkgerrors.New("items 中存在空的 target_id"))
+			respondConvExtRequestInvalid(c, "target_id")
 			return
 		}
 		key := sortItemKey{TargetType: it.TargetType, TargetID: it.TargetID}
 		if _, dup := seen[key]; dup {
-			c.ResponseError(pkgerrors.Errorf("items 中存在重复项: (target_type=%d, target_id=%q)", it.TargetType, it.TargetID))
+			respondConvExtDuplicateItem(c, it.TargetType, it.TargetID)
 			return
 		}
 		seen[key] = struct{}{}
@@ -356,25 +357,25 @@ func (f *Follow) UpdateSort(c *wkhttp.Context) {
 	if len(groupCandidates) > 0 {
 		if err := f.svc.AuthorizeAndMaterializeDefaultFollowedGroups(loginUID, spaceID, groupCandidates); err != nil {
 			f.Error("default-followed group materialization failed", zap.Error(err))
-			c.ResponseError(pkgerrors.New("更新排序失败"))
+			httperr.ResponseErrorL(c, errcode.ErrConvExtSortUpdateFailed, nil, nil)
 			return
 		}
 	}
 
 	if err := f.db.UpdateSort(loginUID, spaceID, items, req.Version); err != nil {
 		if errors.Is(err, ErrVersionConflict) {
-			c.ResponseError(err)
+			httperr.ResponseErrorL(c, errcode.ErrConvExtVersionConflict, nil, nil)
 			return
 		}
 		// PR #21 Round-4 review I5 (lml2468)：ErrSortTargetNotFound 是 swagger
 		// 承诺的客户端可处理业务错误，必须区别于通用 DB 失败，让客户端走
 		// "重拉关注列表后整体重试" 的恢复路径。
 		if errors.Is(err, ErrSortTargetNotFound) {
-			c.ResponseError(err)
+			httperr.ResponseErrorL(c, errcode.ErrConvExtSortTargetNotFound, nil, nil)
 			return
 		}
 		f.Error("更新排序失败", zap.Error(err))
-		c.ResponseError(pkgerrors.New("更新排序失败"))
+		httperr.ResponseErrorL(c, errcode.ErrConvExtSortUpdateFailed, nil, nil)
 		return
 	}
 	c.ResponseOK()

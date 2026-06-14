@@ -14,6 +14,8 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/botfather/cmdmenu"
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
+	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
 	octoi18n "github.com/Mininglamp-OSS/octo-server/pkg/i18n"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/Mininglamp-OSS/octo-server/pkg/util"
@@ -64,7 +66,7 @@ func (ch *Channel) clearChannelMessages(c *wkhttp.Context) {
 	channelTypeI64 := util.ParseInt64OrDefault(c.Param("channel_type"), 0)
 	channelType := uint8(channelTypeI64)
 	if channelID == "" {
-		c.ResponseError(errors.New("频道Id不能为空"))
+		respondChannelRequestInvalid(c, "channel_id")
 		return
 	}
 	modules := register.GetModules(ch.ctx)
@@ -78,7 +80,7 @@ func (ch *Channel) clearChannelMessages(c *wkhttp.Context) {
 					continue
 				}
 				ch.Error("查询频道失败！", zap.Error(err))
-				c.ResponseError(err)
+				httperr.ResponseErrorL(c, errcode.ErrChannelQueryFailed, nil, nil)
 				return
 			}
 			break
@@ -86,43 +88,43 @@ func (ch *Channel) clearChannelMessages(c *wkhttp.Context) {
 	}
 	if channelResp == nil {
 		ch.Error("频道不存在！", zap.String("channel_id", channelID), zap.Uint8("channelType", channelType))
-		c.ResponseError(errors.New("频道不存在！"))
+		httperr.ResponseErrorL(c, errcode.ErrChannelNotFound, nil, nil)
 		return
 	}
 	fakeChannelID := channelID
 	if channelType == common.ChannelTypePerson.Uint8() {
 		// 验证当前用户是私聊的参与者
 		if loginUID == channelID {
-			c.ResponseError(errors.New("频道ID不合法"))
+			respondChannelRequestInvalid(c, "channel_id")
 			return
 		}
 		isFriend, err := ch.userService.IsFriend(loginUID, channelID)
 		if err != nil {
 			ch.Error("查询好友关系错误", zap.Error(err))
-			c.ResponseError(errors.New("查询好友关系错误"))
+			httperr.ResponseErrorL(c, errcode.ErrChannelQueryFailed, nil, nil)
 			return
 		}
 		if !isFriend {
-			c.ResponseError(errors.New("没有权限操作此频道"))
+			httperr.ResponseErrorL(c, errcode.ErrChannelForbidden, nil, nil)
 			return
 		}
 		fakeChannelID = common.GetFakeChannelIDWith(loginUID, channelID)
 	} else {
 		isCreatorOrManager, err := ch.groupService.IsCreatorOrManager(channelID, loginUID)
 		if err != nil {
-			c.ResponseError(errors.New("查询群的创建者或管理员错误"))
 			ch.Error("查询群的创建者或管理员错误", zap.Error(err))
+			httperr.ResponseErrorL(c, errcode.ErrChannelQueryFailed, nil, nil)
 			return
 		}
 		if !isCreatorOrManager {
-			c.ResponseError(errors.New("没有权限设置"))
+			httperr.ResponseErrorL(c, errcode.ErrChannelForbidden, nil, nil)
 			return
 		}
 	}
 	channelMaxSeqResp, err := ch.ctx.IMGetChannelMaxSeq(channelID, channelType)
 	if err != nil {
 		ch.Error("查询频道最大序列号失败！", zap.Error(err))
-		c.ResponseError(errors.New("查询频道最大序列号失败！"))
+		httperr.ResponseErrorL(c, errcode.ErrChannelQueryFailed, nil, nil)
 		return
 	}
 	var maxSeq uint32 = 0
@@ -131,7 +133,7 @@ func (ch *Channel) clearChannelMessages(c *wkhttp.Context) {
 	}
 	if err := ch.channelSettingDB.insertOrAddOffsetMessageSeq(fakeChannelID, channelType, maxSeq); err != nil {
 		ch.Error("设置频道最大偏移序列号失败", zap.Error(err))
-		c.ResponseError(errors.New("设置频道最大偏移序列号失败"))
+		httperr.ResponseErrorL(c, errcode.ErrChannelStoreFailed, nil, nil)
 		return
 	}
 	err = ch.ctx.SendCMD(config.MsgCMDReq{
@@ -149,7 +151,7 @@ func (ch *Channel) clearChannelMessages(c *wkhttp.Context) {
 	})
 	if err != nil {
 		ch.Error("发送清空频道聊天记录命令失败！", zap.String("channel_id", channelID), zap.Error(err))
-		c.ResponseError(errors.New("发送清空频道聊天记录命令失败！"))
+		httperr.ResponseErrorL(c, errcode.ErrChannelSendFailed, nil, nil)
 		return
 	}
 	c.ResponseOK()
@@ -180,7 +182,7 @@ func (ch *Channel) channelGet(c *wkhttp.Context) {
 					continue
 				}
 				ch.Error("查询频道失败！", zap.Error(err))
-				c.ResponseError(err)
+				httperr.ResponseErrorL(c, errcode.ErrChannelQueryFailed, nil, nil)
 				return
 			}
 			break
@@ -188,7 +190,7 @@ func (ch *Channel) channelGet(c *wkhttp.Context) {
 	}
 	if channelResp == nil {
 		ch.Error("频道不存在！", zap.String("channel_id", channelID), zap.Uint8("channelType", channelType))
-		c.ResponseError(errors.New("频道不存在！"))
+		httperr.ResponseErrorL(c, errcode.ErrChannelNotFound, nil, nil)
 		return
 	}
 	fakeChannelID := channelID
@@ -199,7 +201,7 @@ func (ch *Channel) channelGet(c *wkhttp.Context) {
 	channelSettingM, err := ch.channelSettingDB.queryWithChannel(fakeChannelID, channelType) // TODO: 这里虽然暂时看着没啥用，后面可以统一频道的设置信息
 	if err != nil {
 		ch.Error("查询频道设置失败！", zap.Error(err))
-		c.ResponseError(errors.New("查询频道设置失败！"))
+		httperr.ResponseErrorL(c, errcode.ErrChannelQueryFailed, nil, nil)
 		return
 	}
 	if channelSettingM != nil {
@@ -243,19 +245,19 @@ func (ch *Channel) state(c *wkhttp.Context) {
 		// 验证当前用户是否是群组成员
 		isMember, err := ch.groupService.ExistMember(channelID, loginUID)
 		if err != nil {
-			c.ResponseError(errors.New("查询群成员信息错误"))
 			ch.Error("查询群成员信息错误", zap.Error(err))
+			httperr.ResponseErrorL(c, errcode.ErrChannelQueryFailed, nil, nil)
 			return
 		}
 		if !isMember {
-			c.ResponseError(errors.New("非群成员无法查询群状态"))
+			httperr.ResponseErrorL(c, errcode.ErrChannelForbidden, nil, nil)
 			return
 		}
 
 		members, err := ch.groupService.GetMembers(channelID)
 		if err != nil {
-			c.ResponseError(errors.New("查询群成员错误"))
 			ch.Error("查询群成员错误", zap.Error(err))
+			httperr.ResponseErrorL(c, errcode.ErrChannelQueryFailed, nil, nil)
 			return
 		}
 		uids := make([]string, 0)
@@ -266,8 +268,8 @@ func (ch *Channel) state(c *wkhttp.Context) {
 		}
 		onlineUsers, err := ch.userService.GetUserOnlineStatus(uids)
 		if err != nil {
-			c.ResponseError(errors.New("查询群成员在线数量错误"))
 			ch.Error("查询群成员在线数量错误", zap.Error(err))
+			httperr.ResponseErrorL(c, errcode.ErrChannelQueryFailed, nil, nil)
 			return
 		}
 		if len(onlineUsers) > 0 {
@@ -324,8 +326,8 @@ func (ch *Channel) setAutoDeleteForMessage(c *wkhttp.Context) {
 		MsgAutoDelete int64 `json:"msg_auto_delete"` // 单位秒
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.ResponseError(errors.New("参数错误"))
 		ch.Error("参数错误", zap.Error(err))
+		respondChannelRequestInvalid(c, "")
 		return
 	}
 
@@ -336,20 +338,20 @@ func (ch *Channel) setAutoDeleteForMessage(c *wkhttp.Context) {
 	} else {
 		isCreatorOrManager, err := ch.groupService.IsCreatorOrManager(channelID, loginUID)
 		if err != nil {
-			c.ResponseError(errors.New("查询群的创建者或管理员错误"))
 			ch.Error("查询群的创建者或管理员错误", zap.Error(err))
+			httperr.ResponseErrorL(c, errcode.ErrChannelQueryFailed, nil, nil)
 			return
 		}
 		if !isCreatorOrManager {
-			c.ResponseError(errors.New("没有权限设置"))
 			ch.Error("没有权限设置")
+			httperr.ResponseErrorL(c, errcode.ErrChannelForbidden, nil, nil)
 			return
 		}
 	}
 
 	if err := ch.channelSettingDB.insertOrAddMsgAutoDelete(fakeChannelID, channelType, req.MsgAutoDelete); err != nil {
-		c.ResponseError(errors.New("设置失败"))
 		ch.Error("设置失败", zap.Error(err))
+		httperr.ResponseErrorL(c, errcode.ErrChannelStoreFailed, nil, nil)
 		return
 	}
 	if req.MsgAutoDelete > 0 {
@@ -393,7 +395,7 @@ func (ch *Channel) setAutoDeleteForMessage(c *wkhttp.Context) {
 		}
 		if err != nil {
 			ch.Error("发送消息失败！", zap.Error(err))
-			c.ResponseError(errors.New("发送消息失败！"))
+			httperr.ResponseErrorL(c, errcode.ErrChannelSendFailed, nil, nil)
 			return
 		}
 	}

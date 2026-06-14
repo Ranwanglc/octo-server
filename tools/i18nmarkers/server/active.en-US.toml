@@ -225,6 +225,93 @@ other = "The group and the category are not in the same space."
 ["err.server.category.store_failed"]
 other = "Failed to update category data."
 
+["err.server.channel.forbidden"]
+other = "You do not have permission to operate this channel."
+
+["err.server.channel.not_found"]
+other = "Channel not found."
+
+["err.server.channel.query_failed"]
+other = "Failed to query channel data."
+
+["err.server.channel.request_invalid"]
+other = "Invalid request."
+
+["err.server.channel.send_failed"]
+other = "Failed to send the message."
+
+["err.server.channel.store_failed"]
+other = "Failed to update channel data."
+
+["err.server.channel.storyline_group_only"]
+other = "Storyline is only available for group chats."
+
+["err.server.conversation_ext.category_forbidden"]
+other = "The category does not exist or does not belong to you."
+
+["err.server.conversation_ext.duplicate_item"]
+other = "Duplicate item in the request."
+
+["err.server.conversation_ext.follow_failed"]
+other = "Failed to follow the target."
+
+["err.server.conversation_ext.follow_forbidden"]
+other = "You are not allowed to follow this target."
+
+["err.server.conversation_ext.items_too_many"]
+other = "Too many items."
+
+["err.server.conversation_ext.request_invalid"]
+other = "Invalid request."
+
+["err.server.conversation_ext.sort_target_not_found"]
+other = "One or more sort targets were not found."
+
+["err.server.conversation_ext.sort_update_failed"]
+other = "Failed to update the sort order."
+
+["err.server.conversation_ext.unfollow_failed"]
+other = "Failed to unfollow the target."
+
+["err.server.conversation_ext.version_conflict"]
+other = "The follow list changed; please retry."
+
+["err.server.file.content_mismatch"]
+other = "The file content does not match its extension."
+
+["err.server.file.extension_required"]
+other = "The file must have an extension."
+
+["err.server.file.image_compose_failed"]
+other = "Failed to compose images."
+
+["err.server.file.image_count_exceeded"]
+other = "Too many images."
+
+["err.server.file.invalid_path"]
+other = "Invalid file path."
+
+["err.server.file.presign_failed"]
+other = "Failed to generate the presigned URL."
+
+["err.server.file.process_failed"]
+other = "Failed to process the file."
+
+["err.server.file.read_failed"]
+other = "Failed to read the file."
+
+["err.server.file.request_invalid"]
+other = "Invalid request."
+
+["err.server.file.too_large"]
+other = "The file exceeds the maximum allowed size."
+
+["err.server.file.type_unsupported"]
+other = "Unsupported file type."
+
+["err.server.file.upload_failed"]
+other = "Failed to upload the file."
+
 ["err.server.group.already_member"]
 other = "You are already a member of this group."
 
