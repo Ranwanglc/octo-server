@@ -6,6 +6,12 @@
 #
 # CI rejects PRs that change codes.Register input without re-running extract.
 
+["err.server.app.disabled"]
+other = "This application is disabled."
+
+["err.server.app.not_found"]
+other = "Application not found."
+
 ["err.server.bot.occupied"]
 other = "Bot is already occupied by another agent."
 
@@ -459,6 +465,18 @@ other = "Message search failed."
 ["err.server.message.store_failed"]
 other = "Failed to persist message data."
 
+["err.server.notify.batch_limit_exceeded"]
+other = "The batch size exceeds the maximum allowed."
+
+["err.server.notify.deliver_failed"]
+other = "Failed to deliver the notification."
+
+["err.server.notify.request_invalid"]
+other = "Invalid request."
+
+["err.server.notify.unauthorized"]
+other = "Unauthorized."
+
 ["err.server.oidc.bind_already_bound"]
 other = "This identity is already bound. Please sign in via OIDC to continue."
 
@@ -782,6 +800,9 @@ other = "Authorization payload is invalid."
 
 ["err.server.user.auth_scanner_mismatch"]
 other = "Scanner and authorizer are not the same user."
+
+["err.server.user.avatar_update_forbidden"]
+other = "You do not have permission to modify this user's avatar."
 
 ["err.server.user.bot_not_in_space"]
 other = "This bot is not in the current space and cannot be added."

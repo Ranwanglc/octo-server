@@ -659,13 +659,13 @@ func (u *User) uploadAvatar(c *wkhttp.Context) {
 				"SELECT scope, IFNULL(space_id,'') as space_id FROM app_bot WHERE uid=? LIMIT 1", targetUID,
 			).Load(&appBot)
 			if appErr != nil || cnt == 0 {
-				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "无权限修改该用户头像", "status": 403})
+				respondUserAvatarUpdateForbidden(c)
 				return
 			}
 			switch appBot.Scope {
 			case "platform":
 				if err := c.CheckLoginRoleIsSuperAdmin(); err != nil {
-					c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "无权限修改该用户头像", "status": 403})
+					respondUserAvatarUpdateForbidden(c)
 					return
 				}
 			case "space":
@@ -679,12 +679,12 @@ func (u *User) uploadAvatar(c *wkhttp.Context) {
 						"SELECT role FROM space_member WHERE space_id=? AND uid=? AND status=1 LIMIT 1", appBot.SpaceID, loginUID,
 					).Load(&member)
 					if mErr != nil || mCnt == 0 || member.Role < 1 {
-						c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "无权限修改该用户头像", "status": 403})
+						respondUserAvatarUpdateForbidden(c)
 						return
 					}
 				}
 			default:
-				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"msg": "无权限修改该用户头像", "status": 403})
+				respondUserAvatarUpdateForbidden(c)
 				return
 			}
 		}
@@ -3954,7 +3954,7 @@ func (u *User) verifyTokenAegisRedirect(c *wkhttp.Context) {
 	// AuthMiddleware 已经保证未登录会被拒;这里再 double-check 一次 LoginUID,
 	// 避免将来有人不小心把中间件摘掉导致 return_to 泄露给匿名用户。
 	if strings.TrimSpace(c.GetLoginUID()) == "" {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "login required"})
+		respondUserNotLoggedIn(c)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -3998,12 +3998,14 @@ func (u *User) authVerifyToken(c *wkhttp.Context) {
 	// (v2 JSON) 或 legacy "uid@name[@role]"。auth.Decode 兼容两者。
 	raw, cacheErr := u.ctx.Cache().Get(u.ctx.GetConfig().Cache.TokenCachePrefix + req.Token)
 	if cacheErr != nil || strings.TrimSpace(raw) == "" {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "invalid or expired token"})
+		u.Warn("authVerifyToken token 无效或已过期", zap.Error(cacheErr))
+		respondUserTokenInvalid(c)
 		return
 	}
 	info, decodeErr := auth.Decode(raw)
 	if decodeErr != nil {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "malformed token data"})
+		u.Warn("authVerifyToken token 数据解码失败", zap.Error(decodeErr))
+		respondUserTokenInvalid(c)
 		return
 	}
 
@@ -4069,7 +4071,8 @@ func (u *User) authVerifyBot(c *wkhttp.Context) {
 		Where("bot_token = ? AND bot_token != '' AND status = 1", req.BotToken).
 		LoadOne(&botInfo)
 	if err != nil {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "invalid bot token"})
+		u.Warn("authVerifyBot bot_token 无效", zap.Error(err))
+		respondUserTokenInvalid(c)
 		return
 	}
 

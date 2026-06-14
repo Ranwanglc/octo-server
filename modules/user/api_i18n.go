@@ -88,6 +88,12 @@ var errSharedAuthRequired = mustLookupSharedCode("err.shared.auth.required")
 // guards (CheckLoginRole / CheckLoginRoleIsSuperAdmin).
 var errSharedForbidden = mustLookupSharedCode("err.shared.auth.forbidden")
 
+// errSharedAuthTokenInvalid caches the shared 401 code for the verify-token /
+// verify-bot endpoints (authVerifyToken / authVerifyBot). Expired, malformed,
+// and not-found tokens all collapse to this single anti-enumeration code; the
+// specific reason is logged, never returned.
+var errSharedAuthTokenInvalid = mustLookupSharedCode("err.shared.auth.token_invalid")
+
 func mustLookupSharedCode(id string) codes.Code {
 	c, ok := codes.Lookup(id)
 	if !ok {
@@ -143,4 +149,21 @@ func respondUserListFilterConflict(c *wkhttp.Context, filter, conflictsWith stri
 		"filter":         filter,
 		"conflicts_with": conflictsWith,
 	})
+}
+
+// respondUserAvatarUpdateForbidden renders the uploadAvatar ownership 403. The
+// specific failed factor (not the target user / not the bot creator / not an
+// authorized admin) is logged at the call site, never surfaced, so the bot
+// ownership graph cannot be probed.
+func respondUserAvatarUpdateForbidden(c *wkhttp.Context) {
+	httperr.ResponseErrorL(c, errcode.ErrUserAvatarUpdateForbidden, nil, nil)
+}
+
+// respondUserTokenInvalid renders the shared anti-enumeration 401 for the
+// verify-token / verify-bot endpoints, preserving the real 401 wire status
+// (these are new internal endpoints with no D14-fixed-400 clients; the Aegis
+// page and bot adapters branch on HTTP 401). The specific reason — expired,
+// malformed, or not found — is logged by the caller, never returned.
+func respondUserTokenInvalid(c *wkhttp.Context) {
+	httperr.ResponseErrorLWithStatus(c, errSharedAuthTokenInvalid, nil, nil)
 }

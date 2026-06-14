@@ -37,7 +37,7 @@ func TestUserAPINoLegacyResponseError(t *testing.T) {
 		clean.WriteByte('\n')
 	}
 	cleaned := clean.String()
-	for _, banned := range []string{".ResponseError(", ".ResponseErrorf(", "c.Response(\""} {
+	for _, banned := range []string{".ResponseError(", ".ResponseErrorf(", "c.Response(\"", ".AbortWithStatusJSON(", ".AbortWithStatus("} {
 		if strings.Contains(cleaned, banned) {
 			t.Fatalf("modules/user/api.go must use httperr.ResponseErrorL via respondUser* helpers instead of legacy %s", banned)
 		}
@@ -64,7 +64,7 @@ func TestManagerAPINoLegacyResponseError(t *testing.T) {
 		clean.WriteByte('\n')
 	}
 	cleaned := clean.String()
-	for _, banned := range []string{".ResponseError(", ".ResponseErrorf(", "c.Response(\""} {
+	for _, banned := range []string{".ResponseError(", ".ResponseErrorf(", "c.Response(\"", ".AbortWithStatusJSON(", ".AbortWithStatus("} {
 		if strings.Contains(cleaned, banned) {
 			t.Fatalf("modules/user/api_manager.go must use httperr.ResponseErrorL via respond* helpers instead of legacy %s", banned)
 		}
@@ -98,7 +98,7 @@ func TestMigratedUserFilesNoLegacyResponseError(t *testing.T) {
 				clean.WriteByte('\n')
 			}
 			cleaned := clean.String()
-			for _, banned := range []string{".ResponseError(", ".ResponseErrorf(", "c.Response(\""} {
+			for _, banned := range []string{".ResponseError(", ".ResponseErrorf(", "c.Response(\"", ".AbortWithStatusJSON(", ".AbortWithStatus("} {
 				if strings.Contains(cleaned, banned) {
 					t.Fatalf("modules/user/%s must use httperr.ResponseErrorL via respond* helpers instead of legacy %s", f, banned)
 				}
@@ -476,6 +476,22 @@ func TestRespondUserHelpers(t *testing.T) {
 			wantSemStatus:   http.StatusTooManyRequests,
 			wantTransStatus: http.StatusBadRequest,
 			wantContains:    "发送过于频繁",
+		},
+		{
+			name:            "respondUserAvatarUpdateForbidden surfaces 403 zh-CN copy",
+			probe:           func(c *wkhttp.Context) { respondUserAvatarUpdateForbidden(c) },
+			wantCodeID:      "err.server.user.avatar_update_forbidden",
+			wantSemStatus:   http.StatusForbidden,
+			wantTransStatus: http.StatusBadRequest,
+			wantContains:    "无权限修改该用户头像",
+		},
+		{
+			name:            "respondUserTokenInvalid preserves real 401 wire status",
+			probe:           func(c *wkhttp.Context) { respondUserTokenInvalid(c) },
+			wantCodeID:      "err.shared.auth.token_invalid",
+			wantSemStatus:   http.StatusUnauthorized,
+			wantTransStatus: http.StatusUnauthorized,
+			wantContains:    "token有误",
 		},
 	}
 

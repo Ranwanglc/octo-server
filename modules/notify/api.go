@@ -99,12 +99,13 @@ func (n *Notify) Route(r *wkhttp.WKHttp) {
 func (n *Notify) internalAuthMiddleware() wkhttp.HandlerFunc {
 	return func(c *wkhttp.Context) {
 		if n.internalToken == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, map[string]string{"error": "internal API auth not configured"})
+			n.Error("internal API auth not configured — rejecting request (set NOTIFY_INTERNAL_TOKEN)")
+			respondNotifyUnauthorized(c)
 			return
 		}
 		token := c.GetHeader(InternalTokenHeader)
 		if subtle.ConstantTimeCompare([]byte(token), []byte(n.internalToken)) != 1 {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			respondNotifyUnauthorized(c)
 			return
 		}
 		c.Next()
@@ -129,14 +130,14 @@ func (n *Notify) handleSpaceMemberEvent(data []byte, commit config.EventCommit) 
 func (n *Notify) sendNotify(c *wkhttp.Context) {
 	var req NotifyReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseErrorWithStatus(errors.New("参数格式错误"), http.StatusBadRequest)
+		respondNotifyRequestInvalid(c, "")
 		return
 	}
 
 	resp, err := n.deliverNotification(&req)
 	if err != nil {
 		n.Error("投递通知失败", zap.Error(err), zap.String("space_id", req.SpaceID))
-		c.ResponseErrorWithStatus(errors.New("internal error"), http.StatusInternalServerError)
+		respondNotifyDeliverFailed(c)
 		return
 	}
 	c.Response(resp)
@@ -146,15 +147,15 @@ func (n *Notify) sendNotify(c *wkhttp.Context) {
 func (n *Notify) sendNotifyBatch(c *wkhttp.Context) {
 	var req BatchNotifyReq
 	if err := c.BindJSON(&req); err != nil {
-		c.ResponseErrorWithStatus(errors.New("参数格式错误"), http.StatusBadRequest)
+		respondNotifyRequestInvalid(c, "")
 		return
 	}
 	if len(req.Notifications) == 0 {
-		c.ResponseErrorWithStatus(errors.New("notifications不能为空"), http.StatusBadRequest)
+		respondNotifyRequestInvalid(c, "notifications")
 		return
 	}
 	if len(req.Notifications) > 50 {
-		c.ResponseErrorWithStatus(errors.New("批量上限50条"), http.StatusBadRequest)
+		respondNotifyBatchLimitExceeded(c, 50)
 		return
 	}
 

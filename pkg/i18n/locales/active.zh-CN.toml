@@ -359,6 +359,27 @@ other = "签名校验失败。"
 ["err.server.user.verify_type_invalid"]
 other = "验证类型不匹配。"
 
+["err.server.user.avatar_update_forbidden"]
+other = "无权限修改该用户头像。"
+
+["err.server.app.not_found"]
+other = "应用不存在。"
+
+["err.server.app.disabled"]
+other = "应用已停用。"
+
+["err.server.notify.unauthorized"]
+other = "未授权。"
+
+["err.server.notify.request_invalid"]
+other = "请求参数有误。"
+
+["err.server.notify.batch_limit_exceeded"]
+other = "批量数量超过上限。"
+
+["err.server.notify.deliver_failed"]
+other = "通知投递失败。"
+
 ["err.server.group.request_invalid"]
 other = "请求参数有误。"
 

@@ -1,7 +1,6 @@
 package app
 
 import (
-	"errors"
 	"net/http"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -26,11 +25,11 @@ func (a *App) get(c *wkhttp.Context) {
 	appID := c.Param("app_id")
 	resp, err := a.service.GetApp(appID)
 	if err != nil {
-		c.ResponseError(err)
+		respondAppNotFound(c)
 		return
 	}
 	if resp.Status == StatusDisable {
-		c.ResponseError(errors.New("app is disable"))
+		respondAppDisabled(c)
 		return
 	}
 	c.JSON(http.StatusOK, &appResp{
