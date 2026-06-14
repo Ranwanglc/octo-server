@@ -49,10 +49,20 @@ env-test:
 #                   - lint-unregistered-code: no inline codes.Code{} literals
 #                     passed to httperr.ResponseErrorL (registry bypass)
 
-.PHONY: i18n-extract i18n-extract-check i18n-merge i18n-lint
+# authz-lint   : #366 Part 1 — assert every handler mounted under /v1/manager
+#                 performs a role check (in-handler CheckLoginRole* / require*
+#                 wrapper, or a declarative authz middleware). Intentional
+#                 exceptions live in tools/lint-manager-authz/allowlist.txt with
+#                 a reason; the lint fails on an ungated route OR a stale
+#                 allowlist entry. Mirrors the i18n-lint guard pattern.
+
+.PHONY: i18n-extract i18n-extract-check i18n-merge i18n-lint authz-lint
 
 i18n-extract:
 	go run ./pkg/i18n/cmd/octo-i18n-extract
+
+authz-lint:
+	go run ./tools/lint-manager-authz
 
 i18n-lint:
 	go run ./tools/lint-direct-error-response

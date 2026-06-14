@@ -306,6 +306,31 @@ jobs:
       - name: Reject direct PERSONAL MsgSendReq literals
         run: go run ./tools/lint-personal-msgsendreq ./modules
 
+  manager-authz-lint:
+    needs: [changes]
+    if: |
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
+      needs.changes.outputs.code == 'true'
+    # Mininglamp-OSS/octo-server#366 Part 1: authorization safety net. The lint
+    # AST-walks modules/ and asserts every handler mounted under /v1/manager
+    # performs a role check (in-handler CheckLoginRole* / require* wrapper, or a
+    # declarative authz middleware). A new ungated management endpoint fails CI
+    # instead of shipping as a silent privilege escalation (the #364 class of
+    # bug). Intentional exceptions are allowlisted with a reason in
+    # tools/lint-manager-authz/allowlist.txt; a stale allowlist entry also fails.
+    name: Manager Authz Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Require a role check on every /v1/manager route
+        run: go run ./tools/lint-manager-authz
+
   i18n-extract-check:
     needs: [changes]
     if: |

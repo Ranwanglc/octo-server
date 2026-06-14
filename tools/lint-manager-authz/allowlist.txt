@@ -1,0 +1,26 @@
+# Manager-route authz allowlist (lint-manager-authz, #366 Part 1).
+#
+# Routes under /v1/manager that are INTENTIONALLY not role-gated. Every entry
+# MUST carry a "# reason". Format per line:
+#
+#     <METHOD> <path>  # why this route is exempt
+#
+# METHOD may be "*" (any verb); path may end in "/*" to match a whole subtree.
+# This list is strict: an entry that no longer matches any ungated manager
+# route fails the lint as STALE, so the exceptions cannot rot. Adding a real
+# role gate to one of these routes means deleting its line here.
+#
+# Everything NOT listed here must perform a role check (c.CheckLoginRole /
+# c.CheckLoginRoleIsSuperAdmin, a require* wrapper, or an authz middleware).
+
+# User-scoped secrets CRUD: owner = the current login user (c.GetLoginUID()),
+# not an admin. These live under /v1/manager purely for path grouping; gating
+# them on admin/superAdmin would be wrong (a normal user manages their own
+# secrets). See modules/usersecret/api.go.
+* /v1/manager/secrets/*  # user-scoped CRUD, owner = current login user (not admin)
+
+# Manager login endpoint itself: mounted on the pre-auth group (no
+# AuthMiddleware), so there is no session to role-check yet. It verifies the
+# account's role against the DB record after password check. See
+# modules/user/api_manager.go (m.login).
+POST /v1/manager/login  # pre-auth login entry; role verified from DB post-auth
