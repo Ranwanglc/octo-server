@@ -49,7 +49,7 @@ func TestGetStoryline_NotGroupMember(t *testing.T) {
 
 	// Should return error because not a group member
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "非群成员无法查询故事线")
+	assert.Contains(t, w.Body.String(), "err.server.channel.forbidden")
 }
 
 // TestGetStoryline_OnlyGroupChannel tests that storyline only works for group channels
@@ -77,7 +77,7 @@ func TestGetStoryline_OnlyGroupChannel(t *testing.T) {
 
 	// Should return error because storyline only supports group channels
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "故事线功能仅支持群聊")
+	assert.Contains(t, w.Body.String(), "err.server.channel.storyline_group_only")
 }
 
 // TestGetStoryline_EmptyChannel tests storyline response for empty channel

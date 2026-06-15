@@ -10,10 +10,35 @@ import (
 	"testing"
 
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"github.com/Mininglamp-OSS/octo-server/pkg/i18n"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// wireRenderer attaches the i18n error renderer so handlers emit the full
+// localized envelope (error.code / error.http_status / details) exactly as the
+// production server does — without it httperr.ResponseErrorL falls back to the
+// bare {msg,status} shape and error.code is absent.
+func wireRenderer(r *wkhttp.WKHttp) {
+	r.SetErrorRenderer(i18n.NewErrorRenderer(i18n.NewLocalizer(i18n.DefaultLanguage)))
+}
+
+// errorCode decodes the localized error envelope and returns error.code, so
+// tests assert the stable code id rather than a language-specific message body.
+func errorCode(t *testing.T, w *httptest.ResponseRecorder) string {
+	t.Helper()
+	var env struct {
+		Error struct {
+			Code       string `json:"code"`
+			HTTPStatus int    `json:"http_status"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode error envelope: %v\nbody: %s", err, w.Body.String())
+	}
+	return env.Error.Code
+}
 
 func strconvI(i int) string { return strconv.Itoa(i) }
 
@@ -116,6 +141,7 @@ func newTestRouter(svc followService, db sortDB) *wkhttp.WKHttp {
 	gin.SetMode(gin.TestMode)
 	r := wkhttp.New()
 	f := NewFollow(svc, db)
+	wireRenderer(r)
 
 	// auth + space_id injection middleware
 	inject := func(c *wkhttp.Context) {
@@ -237,7 +263,7 @@ func TestFollow_FollowDM_CategoryForbidden(t *testing.T) {
 		"category_id": "not-mine-uuid",
 	})
 	assertBadRequest(t, w)
-	assert.Contains(t, w.Body.String(), "dm category forbidden")
+	assert.Equal(t, "err.server.conversation_ext.category_forbidden", errorCode(t, w))
 }
 
 // ---------------------------------------------------------------------------
@@ -549,7 +575,7 @@ func TestFollow_UpdateSort_CASConflict(t *testing.T) {
 		"version": 0,
 	})
 	assertBadRequest(t, w)
-	assert.Contains(t, w.Body.String(), "version conflict")
+	assert.Equal(t, "err.server.conversation_ext.version_conflict", errorCode(t, w))
 }
 
 func TestFollow_UpdateSort_DBError(t *testing.T) {
@@ -591,7 +617,7 @@ func TestFollow_UpdateSort_TooManyItems_Rejected(t *testing.T) {
 		"version": 0,
 	})
 	assertBadRequest(t, w)
-	assert.Contains(t, w.Body.String(), "items 太多")
+	assert.Equal(t, "err.server.conversation_ext.items_too_many", errorCode(t, w))
 }
 
 func TestFollow_UpdateSort_EmptyTargetID_Rejected(t *testing.T) {
@@ -608,7 +634,7 @@ func TestFollow_UpdateSort_EmptyTargetID_Rejected(t *testing.T) {
 		"version": 0,
 	})
 	assertBadRequest(t, w)
-	assert.Contains(t, w.Body.String(), "target_id")
+	assert.Equal(t, "err.server.conversation_ext.request_invalid", errorCode(t, w))
 }
 
 func TestFollow_UpdateSort_DuplicateItems_Rejected(t *testing.T) {
@@ -626,7 +652,7 @@ func TestFollow_UpdateSort_DuplicateItems_Rejected(t *testing.T) {
 		"version": 0,
 	})
 	assertBadRequest(t, w)
-	assert.Contains(t, w.Body.String(), "重复")
+	assert.Equal(t, "err.server.conversation_ext.duplicate_item", errorCode(t, w))
 }
 
 // PR #21 Round-4 review I5 (lml2468)：ErrSortTargetNotFound 必须作为独立业务错误
@@ -645,7 +671,7 @@ func TestFollow_UpdateSort_TargetNotFound_DistinctError(t *testing.T) {
 		"version": 0,
 	})
 	assertBadRequest(t, w)
-	assert.Contains(t, w.Body.String(), "sort target not found")
+	assert.Equal(t, "err.server.conversation_ext.sort_target_not_found", errorCode(t, w))
 }
 
 // ---------------------------------------------------------------------------
@@ -750,6 +776,7 @@ func newTestRouterNoSpace(svc followService, db sortDB) *wkhttp.WKHttp {
 	gin.SetMode(gin.TestMode)
 	r := wkhttp.New()
 	f := NewFollow(svc, db)
+	wireRenderer(r)
 
 	// Only inject uid, NOT space_id.
 	inject := func(c *wkhttp.Context) {
@@ -773,14 +800,14 @@ func TestFollow_FollowDM_MissingSpaceID(t *testing.T) {
 	r := newTestRouterNoSpace(&stubService{}, &stubDB{})
 	w := do(r, "POST", "/v1/follow/dm", map[string]interface{}{"peer_uid": "peer1"})
 	assertBadRequest(t, w)
-	assert.Contains(t, w.Body.String(), "space_id")
+	assert.Equal(t, "err.server.conversation_ext.request_invalid", errorCode(t, w))
 }
 
 func TestFollow_UnfollowDM_MissingSpaceID(t *testing.T) {
 	r := newTestRouterNoSpace(&stubService{}, &stubDB{})
 	w := do(r, "DELETE", "/v1/follow/dm?peer_uid=p", nil)
 	assertBadRequest(t, w)
-	assert.Contains(t, w.Body.String(), "space_id")
+	assert.Equal(t, "err.server.conversation_ext.request_invalid", errorCode(t, w))
 }
 
 func TestFollow_UnfollowChannel_MissingSpaceID(t *testing.T) {

@@ -4,16 +4,20 @@ import (
 	"net/http"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	"go.uber.org/zap"
 )
 
 type App struct {
 	service IService
+	log.Log
 }
 
 func New(ctx *config.Context) *App {
 	return &App{
 		service: NewService(ctx),
+		Log:     log.NewTLog("App"),
 	}
 }
 
@@ -25,6 +29,9 @@ func (a *App) get(c *wkhttp.Context) {
 	appID := c.Param("app_id")
 	resp, err := a.service.GetApp(appID)
 	if err != nil {
+		// GetApp conflates "not found" with read errors; log so a genuine
+		// storage failure is observable rather than an unobservable 404.
+		a.Error("GetApp failed", zap.String("app_id", appID), zap.Error(err))
 		respondAppNotFound(c)
 		return
 	}

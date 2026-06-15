@@ -153,8 +153,8 @@ func respondUserListFilterConflict(c *wkhttp.Context, filter, conflictsWith stri
 
 // respondUserAvatarUpdateForbidden renders the uploadAvatar ownership 403. The
 // specific failed factor (not the target user / not the bot creator / not an
-// authorized admin) is logged at the call site, never surfaced, so the bot
-// ownership graph cannot be probed.
+// authorized admin) is never surfaced, so the bot ownership graph cannot be
+// probed (anti-enumeration: all four guard branches collapse to this one 403).
 func respondUserAvatarUpdateForbidden(c *wkhttp.Context) {
 	httperr.ResponseErrorL(c, errcode.ErrUserAvatarUpdateForbidden, nil, nil)
 }

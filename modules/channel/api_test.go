@@ -110,7 +110,7 @@ func TestClearChannelMessages_PersonChannel_NoPermission(t *testing.T) {
 
 	// Should return error because not friends
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "没有权限操作此频道")
+	assert.Contains(t, w.Body.String(), "err.server.channel.forbidden")
 }
 
 // TestClearChannelMessages_PersonChannel_SelfChannel tests that users cannot clear their own channel
@@ -139,5 +139,5 @@ func TestClearChannelMessages_PersonChannel_SelfChannel(t *testing.T) {
 
 	// Should return error because channelID == loginUID
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "频道ID不合法")
+	assert.Contains(t, w.Body.String(), "err.server.channel.request_invalid")
 }

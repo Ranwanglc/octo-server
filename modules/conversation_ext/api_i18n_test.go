@@ -137,11 +137,13 @@ func TestRespondConvExtHelpers(t *testing.T) {
 		},
 		// ---- direct codes: 403 / 404 / 409 (D14) -----------------------------
 		{
-			name:            "ErrConvExtFollowForbidden surfaces 403",
-			probe:           func(c *wkhttp.Context) { convExtHTTPErrL(c, errcode.ErrConvExtFollowForbidden) },
+			// respondConvExtFollowForbidden preserves the real 403 on the wire
+			// (FollowChannel/FollowThread clients branch on 403, not generic 400).
+			name:            "respondConvExtFollowForbidden preserves real 403 wire status",
+			probe:           respondConvExtFollowForbidden,
 			wantCodeID:      "err.server.conversation_ext.follow_forbidden",
 			wantSemStatus:   http.StatusForbidden,
-			wantTransStatus: http.StatusBadRequest,
+			wantTransStatus: http.StatusForbidden,
 		},
 		{
 			name:            "ErrConvExtCategoryForbidden surfaces 403",

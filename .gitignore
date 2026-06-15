@@ -59,7 +59,7 @@ wukongimdata/
 /main
 tsdd
 TangSengDaoDaoServer
-app
+/app
 tsdd-static
 bin/
 dist/

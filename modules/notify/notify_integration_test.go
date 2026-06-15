@@ -300,7 +300,7 @@ func TestIntegration_InternalAuth_TokenNotConfigured_Rejects(t *testing.T) {
 			}
 			w := doJSONRequest(t, r, "POST", "/v1/internal/notify", h, map[string]string{"x": "y"})
 			assert.Equal(t, http.StatusUnauthorized, w.Code)
-			assert.Contains(t, w.Body.String(), "internal API auth not configured")
+			assert.Contains(t, w.Body.String(), "Unauthorized")
 			// Never leak token value in response body.
 			if tc.token != "" {
 				assert.NotContains(t, w.Body.String(), tc.token)
@@ -321,7 +321,7 @@ func TestIntegration_InternalAuth_MissingHeader(t *testing.T) {
 
 	w := doJSONRequest(t, r, "POST", "/v1/internal/notify", nil, map[string]string{"x": "y"})
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
-	assert.Contains(t, w.Body.String(), "unauthorized")
+	assert.Contains(t, w.Body.String(), "Unauthorized")
 	assert.NotContains(t, w.Body.String(), "secret-token-42")
 }
 
@@ -339,7 +339,7 @@ func TestIntegration_InternalAuth_WrongToken(t *testing.T) {
 	h.Set(InternalTokenHeader, "wrong-token")
 	w := doJSONRequest(t, r, "POST", "/v1/internal/notify", h, map[string]string{"x": "y"})
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
-	assert.Contains(t, w.Body.String(), "unauthorized")
+	assert.Contains(t, w.Body.String(), "Unauthorized")
 	// The error response must not echo either the real token nor the attacker-provided one.
 	assert.NotContains(t, w.Body.String(), "secret-token-42")
 	assert.NotContains(t, w.Body.String(), "wrong-token")
@@ -391,7 +391,7 @@ func TestIntegration_InternalAuth_ConstantTimeCompare_DiffLengths(t *testing.T) 
 	h.Set(InternalTokenHeader, "short") // different length — ConstantTimeCompare returns 0
 	w := doJSONRequest(t, r, "POST", "/v1/internal/notify", h, map[string]string{})
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
-	assert.Contains(t, w.Body.String(), "unauthorized")
+	assert.Contains(t, w.Body.String(), "Unauthorized")
 }
 
 // =============================================================================
@@ -412,7 +412,7 @@ func TestIntegration_SendNotify_BadJSON(t *testing.T) {
 	h.Set(InternalTokenHeader, "tk")
 	w := doJSONRequest(t, r, "POST", "/v1/internal/notify", h, []byte("{not json"))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "参数格式错误")
+	assert.Contains(t, w.Body.String(), "Invalid request.")
 }
 
 // Table-driven: direct deliverNotification calls cover its internal
@@ -488,7 +488,7 @@ func TestIntegration_SendNotify_InternalErrorSurfaces500(t *testing.T) {
 	h.Set(InternalTokenHeader, "tk")
 	w := doJSONRequest(t, r, "POST", "/v1/internal/notify", h, body)
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
-	assert.Contains(t, w.Body.String(), "internal error")
+	assert.Contains(t, w.Body.String(), "Failed to deliver the notification.")
 }
 
 func TestIntegration_SendNotifyBatch_Empty(t *testing.T) {
@@ -510,7 +510,7 @@ func TestIntegration_SendNotifyBatch_Empty(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	body := w.Body.String()
 	// Accept either validator-produced or notifications-empty message.
-	if !strings.Contains(body, "notifications不能为空") && !strings.Contains(body, "参数格式错误") {
+	if !strings.Contains(body, "Invalid request.") {
 		t.Errorf("unexpected body for empty batch: %s", body)
 	}
 }
@@ -535,7 +535,7 @@ func TestIntegration_SendNotifyBatch_TooMany(t *testing.T) {
 	body := BatchNotifyReq{Notifications: notifs}
 	w := doJSONRequest(t, r, "POST", "/v1/internal/notify/batch", h, body)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "批量上限50条")
+	assert.Contains(t, w.Body.String(), "The batch size exceeds the maximum allowed.")
 }
 
 func TestIntegration_SendNotifyBatch_MixedResults_207(t *testing.T) {

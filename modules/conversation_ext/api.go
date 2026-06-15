@@ -223,7 +223,7 @@ func (f *Follow) FollowChannel(c *wkhttp.Context) {
 		// 不向客户端泄露内部细节（仅写日志）。与 FollowThread 同样处理 ErrThreadForbidden。
 		if errors.Is(err, ErrChannelForbidden) {
 			f.Warn("关注群鉴权失败", zap.Error(err))
-			httperr.ResponseErrorL(c, errcode.ErrConvExtFollowForbidden, nil, nil)
+			respondConvExtFollowForbidden(c)
 			return
 		}
 		f.Error("重新关注群失败", zap.Error(err))
@@ -257,7 +257,7 @@ func (f *Follow) FollowThread(c *wkhttp.Context) {
 		// 不向客户端泄露内部细节，只写到日志（zap.Error）。
 		if errors.Is(err, ErrThreadForbidden) {
 			f.Warn("关注子区认证失败", zap.Error(err))
-			httperr.ResponseErrorL(c, errcode.ErrConvExtFollowForbidden, nil, nil)
+			respondConvExtFollowForbidden(c)
 			return
 		}
 		f.Error("关注子区失败", zap.Error(err))

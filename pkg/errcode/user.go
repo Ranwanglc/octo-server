@@ -574,8 +574,8 @@ var (
 	// ErrUserAvatarUpdateForbidden covers the uploadAvatar ownership guards when
 	// the login user is neither the target user, the bot creator, nor a platform/
 	// space admin authorized to manage the target bot's avatar. All of those
-	// branches collapse to this one 403 — the specific failed factor is logged,
-	// never surfaced, so an external caller cannot probe the bot ownership graph.
+	// branches collapse to this one 403 — the specific failed factor is never
+	// surfaced, so an external caller cannot probe the bot ownership graph.
 	ErrUserAvatarUpdateForbidden = register(codes.Code{
 		ID:             "err.server.user.avatar_update_forbidden",
 		HTTPStatus:     http.StatusForbidden,
