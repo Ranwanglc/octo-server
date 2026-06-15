@@ -3954,7 +3954,7 @@ func (u *User) verifyTokenAegisRedirect(c *wkhttp.Context) {
 	// AuthMiddleware 已经保证未登录会被拒;这里再 double-check 一次 LoginUID,
 	// 避免将来有人不小心把中间件摘掉导致 return_to 泄露给匿名用户。
 	if strings.TrimSpace(c.GetLoginUID()) == "" {
-		respondUserNotLoggedIn(c)
+		respondUserNotLoggedInWithStatus(c)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{

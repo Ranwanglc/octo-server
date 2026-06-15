@@ -78,6 +78,7 @@ func TestFormatSecondToDisplayTime_Boundaries(t *testing.T) {
 // TestClearChannelMessages_PersonChannel_NoPermission tests that non-friend users cannot clear personal channel messages
 func TestClearChannelMessages_PersonChannel_NoPermission(t *testing.T) {
 	s, ctx := testutil.NewTestServer()
+	wireI18nRendererForChannelTest(s)
 	// Note: testutil.NewTestServer() already registers all module routes via module.Setup()
 
 	// Create test user (the target of the personal channel)
@@ -116,6 +117,7 @@ func TestClearChannelMessages_PersonChannel_NoPermission(t *testing.T) {
 // TestClearChannelMessages_PersonChannel_SelfChannel tests that users cannot clear their own channel
 func TestClearChannelMessages_PersonChannel_SelfChannel(t *testing.T) {
 	s, ctx := testutil.NewTestServer()
+	wireI18nRendererForChannelTest(s)
 	// Note: testutil.NewTestServer() already registers all module routes via module.Setup()
 
 	// Create login user

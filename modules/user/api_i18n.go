@@ -151,12 +151,24 @@ func respondUserListFilterConflict(c *wkhttp.Context, filter, conflictsWith stri
 	})
 }
 
-// respondUserAvatarUpdateForbidden renders the uploadAvatar ownership 403. The
-// specific failed factor (not the target user / not the bot creator / not an
-// authorized admin) is never surfaced, so the bot ownership graph cannot be
-// probed (anti-enumeration: all four guard branches collapse to this one 403).
+// respondUserAvatarUpdateForbidden renders the uploadAvatar ownership 403,
+// preserving the real 403 on the wire (the original handler returned
+// AbortWithStatusJSON(403); clients branch on 403, so it must not collapse to
+// the D14 compatibility 400). The specific failed factor (not the target user /
+// not the bot creator / not an authorized admin) is never surfaced, so the bot
+// ownership graph cannot be probed (anti-enumeration: all four guard branches
+// collapse to this one 403).
 func respondUserAvatarUpdateForbidden(c *wkhttp.Context) {
-	httperr.ResponseErrorL(c, errcode.ErrUserAvatarUpdateForbidden, nil, nil)
+	httperr.ResponseErrorLWithStatus(c, errcode.ErrUserAvatarUpdateForbidden, nil, nil)
+}
+
+// respondUserNotLoggedInWithStatus is the real-401 variant of
+// respondUserNotLoggedIn, for the verify-token Aegis endpoint whose anonymous
+// double-check originally returned AbortWithStatusJSON(401). The shared
+// respondUserNotLoggedIn (D14 wire-400) is kept for the legacy public-route
+// fallthroughs that predate this change.
+func respondUserNotLoggedInWithStatus(c *wkhttp.Context) {
+	httperr.ResponseErrorLWithStatus(c, errSharedAuthRequired, nil, nil)
 }
 
 // respondUserTokenInvalid renders the shared anti-enumeration 401 for the

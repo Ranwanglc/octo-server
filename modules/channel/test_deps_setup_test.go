@@ -12,5 +12,20 @@ package channel
 // Mirrors the pattern used in modules/botfather/api_bot_group_test.go.
 
 import (
+	"github.com/Mininglamp-OSS/octo-lib/server"
+	"github.com/Mininglamp-OSS/octo-server/pkg/i18n"
+
 	_ "github.com/Mininglamp-OSS/octo-server/modules/robot"
 )
+
+// wireI18nRendererForChannelTest wires the i18n error renderer onto the route
+// returned by testutil.NewTestServer, mirroring what main.go does at boot (and
+// what modules/group/message/category do in their full-server tests).
+// Post-migration, modules/channel handlers respond via httperr.ResponseErrorL →
+// c.RenderError; without a renderer wired the route falls back to octo-lib's
+// legacy {msg,status} envelope (English DefaultMessage, no error.code field),
+// so assertions on the localized envelope — including error.code — would fail.
+// testutil.NewTestServer lives in octo-lib and is intentionally not touched here.
+func wireI18nRendererForChannelTest(s *server.Server) {
+	s.GetRoute().SetErrorRenderer(i18n.NewErrorRenderer(i18n.NewLocalizer(i18n.DefaultLanguage)))
+}

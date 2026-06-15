@@ -478,11 +478,11 @@ func TestRespondUserHelpers(t *testing.T) {
 			wantContains:    "发送过于频繁",
 		},
 		{
-			name:            "respondUserAvatarUpdateForbidden surfaces 403 zh-CN copy",
+			name:            "respondUserAvatarUpdateForbidden preserves real 403 wire status",
 			probe:           func(c *wkhttp.Context) { respondUserAvatarUpdateForbidden(c) },
 			wantCodeID:      "err.server.user.avatar_update_forbidden",
 			wantSemStatus:   http.StatusForbidden,
-			wantTransStatus: http.StatusBadRequest,
+			wantTransStatus: http.StatusForbidden,
 			wantContains:    "无权限修改该用户头像",
 		},
 		{
@@ -492,6 +492,14 @@ func TestRespondUserHelpers(t *testing.T) {
 			wantSemStatus:   http.StatusUnauthorized,
 			wantTransStatus: http.StatusUnauthorized,
 			wantContains:    "token有误",
+		},
+		{
+			name:            "respondUserNotLoggedInWithStatus preserves real 401 wire status",
+			probe:           func(c *wkhttp.Context) { respondUserNotLoggedInWithStatus(c) },
+			wantCodeID:      "err.shared.auth.required",
+			wantSemStatus:   http.StatusUnauthorized,
+			wantTransStatus: http.StatusUnauthorized,
+			wantContains:    "请先登录",
 		},
 	}
 

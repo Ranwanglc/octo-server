@@ -18,6 +18,7 @@ import (
 // TestGetStoryline_NotGroupMember tests that non-group members cannot access storyline
 func TestGetStoryline_NotGroupMember(t *testing.T) {
 	s, ctx := testutil.NewTestServer()
+	wireI18nRendererForChannelTest(s)
 
 	// Create login user
 	userService := user.NewService(ctx)
@@ -55,6 +56,7 @@ func TestGetStoryline_NotGroupMember(t *testing.T) {
 // TestGetStoryline_OnlyGroupChannel tests that storyline only works for group channels
 func TestGetStoryline_OnlyGroupChannel(t *testing.T) {
 	s, ctx := testutil.NewTestServer()
+	wireI18nRendererForChannelTest(s)
 
 	// Create login user
 	userService := user.NewService(ctx)
@@ -84,6 +86,7 @@ func TestGetStoryline_OnlyGroupChannel(t *testing.T) {
 func TestGetStoryline_EmptyChannel(t *testing.T) {
 	t.Skip("OCTO migration TODO: see https://github.com/Mininglamp-OSS/octo-server/issues/17")
 	s, ctx := testutil.NewTestServer()
+	wireI18nRendererForChannelTest(s)
 
 	// Create login user
 	userService := user.NewService(ctx)
