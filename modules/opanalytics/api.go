@@ -68,7 +68,7 @@ func (m *Manager) Route(r *wkhttp.WKHttp) {
 
 // overview 模块A 概览(私聊只出活跃数)。
 func (m *Manager) overview(c *wkhttp.Context) {
-	if !m.requireSuperAdmin(c) {
+	if !m.requireAdmin(c) {
 		return
 	}
 	start, end, ok := parseDateRange(c)
@@ -87,7 +87,7 @@ func (m *Manager) overview(c *wkhttp.Context) {
 
 // trend 模块C 趋势(day/week，缺桶补 0)。
 func (m *Manager) trend(c *wkhttp.Context) {
-	if !m.requireSuperAdmin(c) {
+	if !m.requireAdmin(c) {
 		return
 	}
 	start, end, ok := parseDateRange(c)
@@ -111,7 +111,7 @@ func (m *Manager) trend(c *wkhttp.Context) {
 
 // spaces 表一 Space 列表。
 func (m *Manager) spaces(c *wkhttp.Context) {
-	if !m.requireSuperAdmin(c) {
+	if !m.requireAdmin(c) {
 		return
 	}
 	start, end, ok := parseDateRange(c)
@@ -133,7 +133,7 @@ func (m *Manager) spaces(c *wkhttp.Context) {
 
 // spaceChannels 表二 群组列表(仅群组，私聊不进表二)。
 func (m *Manager) spaceChannels(c *wkhttp.Context) {
-	if !m.requireSuperAdmin(c) {
+	if !m.requireAdmin(c) {
 		return
 	}
 	spaceID := c.Param("space_id")
@@ -175,7 +175,7 @@ func (m *Manager) spaceChannels(c *wkhttp.Context) {
 
 // channelMembers 表三子表A：会话内成员消息统计汇总。
 func (m *Manager) channelMembers(c *wkhttp.Context) {
-	if !m.requireSuperAdmin(c) {
+	if !m.requireAdmin(c) {
 		return
 	}
 	channelID := c.Param("channel_id")
@@ -217,7 +217,7 @@ func (m *Manager) channelMembers(c *wkhttp.Context) {
 
 // globalDirectChats 全局私聊活跃列表(无活跃状态筛选；私聊恒活跃集)。
 func (m *Manager) globalDirectChats(c *wkhttp.Context) {
-	if !m.requireSuperAdmin(c) {
+	if !m.requireAdmin(c) {
 		return
 	}
 	start, end, ok := parseDateRange(c)
@@ -266,6 +266,19 @@ func (m *Manager) runETL(c *wkhttp.Context) {
 
 func (m *Manager) requireSuperAdmin(c *wkhttp.Context) bool {
 	if err := c.CheckLoginRoleIsSuperAdmin(); err != nil {
+		respForbidden(c)
+		return false
+	}
+	return true
+}
+
+// requireAdmin 放行 admin∪superAdmin，用于看板只读端点。看板读面不比 admin 已有的
+// 访问更敏感：含私聊元数据的 globalDirectChats 也只是"谁跟谁聊过、几条、何时"，而 admin
+// 经 message 模块的 recordpersonal/record 早已能读任意 (uid,touid) 的私聊正文，元数据
+// 严格更弱；用户/群/空间列表同样早是 admin 读面。故放给 admin 一致；手动触发类写操作
+// （runETL）仍走 requireSuperAdmin。
+func (m *Manager) requireAdmin(c *wkhttp.Context) bool {
+	if err := c.CheckLoginRole(); err != nil {
 		respForbidden(c)
 		return false
 	}

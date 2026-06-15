@@ -66,6 +66,7 @@ func (m *Manager) Route(r *wkhttp.WKHttp) {
 	}
 	auth := r.Group("/v1/manager", m.ctx.AuthMiddleware(r))
 	{
+		auth.GET("/me", m.me)                                 // 当前登录管理员的身份 + 能力图谱（前端据此渲染权限）
 		auth.POST("/user/admin", m.addAdminUser)              // 添加一个管理员
 		auth.GET("/user/admin", m.getAdminUsers)              // 查询管理员用户
 		auth.DELETE("/user/admin", m.deleteAdminUsers)        // 删除管理员用户
@@ -79,6 +80,76 @@ func (m *Manager) Route(r *wkhttp.WKHttp) {
 		auth.PUT("/user/liftban/:uid/:status", m.liftBanUser) // 解禁或封禁用户
 		auth.POST("/user/updatepassword", m.updatePwd)        // 修改用户密码
 		auth.GET("/user/devices", m.devices)                  // 查看某用户设备列表
+	}
+}
+
+// managerMeResp 是管理台「我是谁 + 我能做什么」响应。capabilities 是一张后端拥有
+// 的 feature→是否放行 布尔图，供前端渲染菜单/按钮（隐藏或禁用），从而不必靠撞
+// 403 反推权限。
+//
+// 反枚举：这张图只回答「当前用户能做什么」，不暴露「某端点需要什么角色」。它由
+// 本次请求解析出的权威角色（pkg/auth RoleResolver，吊销感知）计算。
+type managerMeResp struct {
+	UID          string          `json:"uid"`
+	Name         string          `json:"name"`
+	Role         string          `json:"role"`
+	Capabilities map[string]bool `json:"capabilities"`
+}
+
+// me 返回当前登录管理员的身份与能力图谱。管理台任一已登录管理员（admin∪
+// superAdmin）可读自己的能力；普通用户没有管理台访问，被 CheckLoginRole 挡下。
+func (m *Manager) me(c *wkhttp.Context) {
+	if err := c.CheckLoginRole(); err != nil {
+		respondManagerForbidden(c)
+		return
+	}
+	role := c.GetLoginRole()
+	c.Response(&managerMeResp{
+		UID:          c.GetLoginUID(),
+		Name:         c.GetLoginName(),
+		Role:         role,
+		Capabilities: managerCapabilities(role == string(wkhttp.SuperAdmin)),
+	})
+}
+
+// managerCapabilities 把当前各管理端点的角色档位映射为 feature→是否放行。调用方
+// 已通过 CheckLoginRole（admin∪superAdmin），故 admin 档位项恒 true；superAdmin
+// 专属项取 isSuper。键名是与前端的稳定约定。
+//
+// 读/写分档：每个能力键按该组操作的真实 gate 取值——admin 可达的读/写恒 true，
+// superAdmin 专属的写/销毁取 isSuper——既避免前端拿单一粗标志去渲染会被后端 403 的
+// 写按钮（confused-deputy UI），也避免反过来把 admin 实际能做的操作藏掉。注意有的域
+// 是三档（读=admin、写=admin、销毁=superAdmin，如 space），不要漏掉 admin 写这一档。
+// 当前已按各端点真实 gate 拆分：
+//   - users.read   = list/friends/blacklist/disableUsers/devices/online（CheckLoginRole）
+//   - users.write  = resetUserPassword/addUser/liftBanUser/updatePwd（CheckLoginRoleIsSuperAdmin）
+//   - users.manage_admin = get/add/delete 管理员账号（CheckLoginRoleIsSuperAdmin）
+//   - groups.read  = list/disablelist/members/blacklist（CheckLoginRole）
+//   - groups.write = leftbangroup/forbidden/removeMember（CheckLoginRoleIsSuperAdmin）
+//   - space.read        = 空间/成员/邀请/入群申请 列表查询（requireAdmin）
+//   - space.write       = 建空间/改资料/加成员/邀请增改禁用/通过拒绝入群申请（requireAdmin，故恒 true）
+//   - space.destructive = 强制解散/封禁/强制移除/改成员角色（requireSuperAdmin）
+//
+// TODO(#366 Part 2): 目前这张表按各端点当前档位手工维护；集中式 authz 策略表落地
+// 后，应改为由同一份 route→role 真源派生，彻底消除前后端漂移。
+func managerCapabilities(isSuper bool) map[string]bool {
+	return map[string]bool{
+		// superAdmin 专属
+		"system_setting":     isSuper, // 系统配置：读写均超管
+		"backup":             isSuper, // 备份管理：读写均超管
+		"appversion.write":   isSuper, // 版本发布 / 下载源设置
+		"dashboard.trigger":  isSuper, // 手动触发 ETL
+		"space.destructive":  isSuper, // 强制解散/封禁/强制移除/改成员角色
+		"users.write":        isSuper, // 重置密码 / 新增用户 / 解封 / 改密
+		"users.manage_admin": isSuper, // 管理员账号 增/查/删
+		"groups.write":       isSuper, // 解散封禁群 / 强制移除成员
+		// admin ∪ superAdmin（此处恒 true，列出供前端统一读取）
+		"appversion.read": true, // 版本列表
+		"dashboard.read":  true, // 运营看板查看
+		"users.read":      true, // 用户列表 / 好友 / 黑名单 / 禁用 / 设备 / 在线
+		"groups.read":     true, // 群组列表 / 禁用群 / 群成员 / 群黑名单
+		"space.read":      true, // 空间查看 / 列表
+		"space.write":     true, // 建空间 / 改资料 / 加成员 / 邀请增改禁用 / 通过拒绝入群申请（requireAdmin）
 	}
 }
 
