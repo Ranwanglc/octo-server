@@ -11,6 +11,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/testutil"
+	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
 	"github.com/stretchr/testify/assert"
 
 	// Ensure dependent modules register SQL migrations and HTTP routes.
@@ -135,7 +136,7 @@ func TestBotGroupCreate_EmptyMembers(t *testing.T) {
 	}))
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "members is required")
+	assert.Contains(t, w.Body.String(), errcode.ErrBotAPIRequestInvalid.DefaultMessage)
 }
 
 func TestBotGroupCreate_EmptyCreator(t *testing.T) {
@@ -350,9 +351,14 @@ func TestBotGroupMemberRemove_CannotRemoveCreator(t *testing.T) {
 		"members": []string{testutil.UID},
 	}))
 
-	assert.Equal(t, http.StatusOK, w.Code)
-	result := jsonResult(t, w)
-	assert.Equal(t, float64(0), result["removed"])
+	// PR#355 review (Jerry-Xin): the bot member-remove role guard now rejects
+	// the request outright instead of silently skipping the creator. This
+	// mirrors the Web API memberRemove rule (a manager cannot kick the
+	// creator/managers) — see modules/bot_api/groups.go and the matching
+	// err.server.bot_api.cannot_remove_privileged 403 in
+	// modules/bot_api/group_member_remove_guard_test.go.
+	assert.Equalf(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+	assert.Contains(t, w.Body.String(), "cannot be removed through the bot API")
 }
 
 func TestBotGroupMemberRemove_NotBotAdmin(t *testing.T) {
@@ -621,7 +627,7 @@ func TestBotSpaceMembers_RejectOtherSpace(t *testing.T) {
 	w := doRequest(handler, botReq("GET", fmt.Sprintf("/v1/bot/space/members?space_id=%s", otherSpaceID), botToken, nil))
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
-	assert.Contains(t, w.Body.String(), "not a member of this space")
+	assert.Contains(t, w.Body.String(), errcode.ErrBotAPINotSpaceMember.DefaultMessage)
 }
 
 // TestBotGroupCreate_RejectCreatorOutsideSpace 验证 creator 不在 Space 时应失败
@@ -776,7 +782,7 @@ func TestBotGroupMemberAdd_RejectPureBotMembers(t *testing.T) {
 	}))
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "only human members")
+	assert.Contains(t, w.Body.String(), errcode.ErrBotAPIMemberNotHuman.DefaultMessage)
 }
 
 // TestBotGroupMemberAdd_MixedHumanAndBot 混合传入时 bot 被过滤，人正常添加

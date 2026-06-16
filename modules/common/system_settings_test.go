@@ -4,6 +4,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,21 +28,61 @@ var fullOIDCTestEnv = map[string]string{
 	"DM_OIDC_RT_ENC_KEY": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 }
 
+var oidcTestEnvKeys = []string{
+	"DM_OIDC_ENABLED",
+	"DM_OIDC_PROVIDER_ID",
+	"DM_OIDC_PROVIDER_NAME",
+	"DM_OIDC_PROVIDER_ISSUER",
+	"DM_OIDC_PROVIDER_CLIENT_ID",
+	"DM_OIDC_PROVIDER_CLIENT_SECRET",
+	"DM_OIDC_PROVIDER_REDIRECT_URI",
+	"DM_OIDC_AEGIS_ISSUER",
+	"DM_OIDC_AEGIS_CLIENT_ID",
+	"DM_OIDC_AEGIS_CLIENT_SECRET",
+	"DM_OIDC_AEGIS_REDIRECT_URI",
+	"DM_OIDC_RT_ENC_KEY",
+	"DM_OIDC_ACCOUNT_URL",
+	"DM_OIDC_RESET_PASSWORD_URL",
+}
+
+func clearOIDCEnvForTest(t *testing.T) {
+	t.Helper()
+	for _, k := range oidcTestEnvKeys {
+		t.Setenv(k, "")
+	}
+}
+
 // enableFullOIDCForTest 调用 t.Setenv 把整张 fullOIDCTestEnv 写进当前测试
-// 的环境,Setenv 在 t.Cleanup 自动复原。先 unset alias(AEGIS_*)防止外部
-// 残留绑定到测试场景,影响断言。
+// 的环境,Setenv 在 t.Cleanup 自动复原。先清空全部 OIDC 相关 env,防止外部
+// 或前置测试残留绑定到测试场景,影响断言。
 func enableFullOIDCForTest(t *testing.T) {
 	t.Helper()
-	for _, alias := range []string{
-		"DM_OIDC_AEGIS_ISSUER",
-		"DM_OIDC_AEGIS_CLIENT_ID",
-		"DM_OIDC_AEGIS_CLIENT_SECRET",
-		"DM_OIDC_AEGIS_REDIRECT_URI",
-	} {
-		t.Setenv(alias, "")
-	}
+	clearOIDCEnvForTest(t)
 	for k, v := range fullOIDCTestEnv {
 		t.Setenv(k, v)
+	}
+}
+
+func clearExternalLoginConfig(cfg *config.Config) {
+	cfg.Github.ClientID = ""
+	cfg.Github.ClientSecret = ""
+	cfg.Gitee.ClientID = ""
+	cfg.Gitee.ClientSecret = ""
+}
+
+func disableThirdPartyLoginForTest(t *testing.T, ctxs ...*config.Context) {
+	t.Helper()
+	clearOIDCEnvForTest(t)
+	for _, ctx := range ctxs {
+		if ctx != nil {
+			clearExternalLoginConfig(ctx.GetConfig())
+		}
+	}
+	sharedMu.Lock()
+	shared := sharedSystemSettings
+	sharedMu.Unlock()
+	if shared != nil {
+		clearExternalLoginConfig(shared.ctx.GetConfig())
 	}
 }
 
@@ -55,6 +96,13 @@ func newTestSystemSettings(t *testing.T, apply func(s *SystemSettings)) *SystemS
 	// here so test order is irrelevant.
 	t.Setenv(masterKeyEnv, "0123456789abcdef0123456789abcdef")
 	_, ctx := testutil.NewTestServer()
+	cfg := ctx.GetConfig()
+	origGithub := cfg.Github
+	origGitee := cfg.Gitee
+	t.Cleanup(func() {
+		cfg.Github = origGithub
+		cfg.Gitee = origGitee
+	})
 	require.NoError(t, testutil.CleanAllTables(ctx))
 	db := newSystemSettingDB(ctx)
 	s := NewSystemSettings(ctx, db)
@@ -73,6 +121,158 @@ func TestSystemSettings_BoolFallsBackToYamlWhenUnset(t *testing.T) {
 
 	assert.True(t, s.RegisterEmailOn(), "DB empty -> fall back to yaml true")
 	assert.False(t, s.RegisterOff(), "DB empty -> fall back to yaml false")
+}
+
+// ----- incomingwebhook settings (总开关 + 核心阈值) -----
+
+func TestSystemSettings_IncomingWebhookEnabled_DefaultsTrue(t *testing.T) {
+	t.Setenv(envIncomingWebhookEnabled, "") // 证明开关纯由 DB / 默认驱动
+	s := newTestSystemSettings(t, nil)
+	assert.True(t, s.IncomingWebhookEnabled(), "DB+env 缺失时默认开启")
+}
+
+func TestSystemSettings_IncomingWebhookEnabled_DBOverridesToFalse(t *testing.T) {
+	t.Setenv(envIncomingWebhookEnabled, "")
+	s := newTestSystemSettings(t, nil)
+	require.NoError(t, s.db.upsert("incomingwebhook", "enabled", "0", settingTypeBool, ""))
+	require.NoError(t, s.Reload())
+	assert.False(t, s.IncomingWebhookEnabled(), "DB 0 必须压制默认 true")
+}
+
+func TestSystemSettings_IncomingWebhookEnabled_EnvFallbackWhenDBUnset(t *testing.T) {
+	t.Setenv(envIncomingWebhookEnabled, "false")
+	s := newTestSystemSettings(t, nil)
+	assert.False(t, s.IncomingWebhookEnabled(), "DB 未配置 → env=false 生效")
+}
+
+func TestSystemSettings_IncomingWebhookThresholds_DefaultsAndDBOverride(t *testing.T) {
+	t.Setenv(envIncomingWebhookPerWebhookRPS, "")
+	t.Setenv(envIncomingWebhookPerWebhookBurst, "")
+	t.Setenv(envIncomingWebhookMaxPerGroup, "")
+	t.Setenv(envIncomingWebhookMaxPerCreator, "")
+	s := newTestSystemSettings(t, nil)
+
+	// DB+env 缺失 → code default。
+	assert.Equal(t, defaultIncomingWebhookPerWebhookRPS, s.IncomingWebhookPerWebhookRPS())
+	assert.Equal(t, defaultIncomingWebhookPerWebhookBurst, s.IncomingWebhookPerWebhookBurst())
+	assert.Equal(t, defaultIncomingWebhookMaxPerGroup, s.IncomingWebhookMaxPerGroup())
+	assert.Equal(t, defaultIncomingWebhookMaxPerCreator, s.IncomingWebhookMaxPerCreator())
+
+	// DB 覆盖（含 float rps）。
+	require.NoError(t, s.db.upsert("incomingwebhook", "per_webhook_rps", "8.5", settingTypeFloat, ""))
+	require.NoError(t, s.db.upsert("incomingwebhook", "per_webhook_burst", "25", settingTypeInt, ""))
+	require.NoError(t, s.db.upsert("incomingwebhook", "max_per_group", "3", settingTypeInt, ""))
+	require.NoError(t, s.db.upsert("incomingwebhook", "max_per_creator", "2", settingTypeInt, ""))
+	require.NoError(t, s.Reload())
+	assert.Equal(t, 8.5, s.IncomingWebhookPerWebhookRPS())
+	assert.Equal(t, 25, s.IncomingWebhookPerWebhookBurst())
+	assert.Equal(t, 3, s.IncomingWebhookMaxPerGroup())
+	assert.Equal(t, 2, s.IncomingWebhookMaxPerCreator())
+}
+
+func TestSystemSettings_IncomingWebhookMaxPerCreator_EnvFallbackWhenDBUnset(t *testing.T) {
+	t.Setenv(envIncomingWebhookMaxPerCreator, "7")
+	s := newTestSystemSettings(t, nil)
+	assert.Equal(t, 7, s.IncomingWebhookMaxPerCreator(), "DB 未配置 → env 生效")
+}
+
+func TestSystemSettings_IncomingWebhookRPS_EnvFallbackWhenDBUnset(t *testing.T) {
+	t.Setenv(envIncomingWebhookPerWebhookRPS, "7")
+	s := newTestSystemSettings(t, nil)
+	assert.Equal(t, 7.0, s.IncomingWebhookPerWebhookRPS(), "DB 未配置 → env 生效")
+}
+
+// TestSystemSettings_IncomingWebhook_ReadSideClamp_NoInfra pins the read-side
+// defence (#292 review): a snapshot carrying NaN / ±Inf / ≤0 — which a direct DB
+// edit could introduce even though the admin write path now rejects them — must
+// clamp back to the env/code default so the rate limiter never sees a value that
+// would silently disable it. Drives the snapshot directly, no infra.
+func TestSystemSettings_IncomingWebhook_ReadSideClamp_NoInfra(t *testing.T) {
+	t.Setenv(envIncomingWebhookPerWebhookRPS, "")   // → default 5
+	t.Setenv(envIncomingWebhookPerWebhookBurst, "") // → default 10
+	t.Setenv(envIncomingWebhookMaxPerGroup, "")     // → default 10
+	t.Setenv(envIncomingWebhookMaxPerCreator, "")   // → default 5
+
+	for _, bad := range []string{"NaN", "+Inf", "-Inf", "0", "-1", "-3.5"} {
+		s := &SystemSettings{}
+		snap := map[string]string{
+			"incomingwebhook.per_webhook_rps":   bad,
+			"incomingwebhook.per_webhook_burst": bad,
+			"incomingwebhook.max_per_group":     bad,
+			"incomingwebhook.max_per_creator":   bad,
+		}
+		s.snapshot.Store(&snap)
+		assert.Equalf(t, defaultIncomingWebhookPerWebhookRPS, s.IncomingWebhookPerWebhookRPS(), "rps=%q must clamp to default", bad)
+		assert.Equalf(t, defaultIncomingWebhookPerWebhookBurst, s.IncomingWebhookPerWebhookBurst(), "burst=%q must clamp to default", bad)
+		assert.Equalf(t, defaultIncomingWebhookMaxPerGroup, s.IncomingWebhookMaxPerGroup(), "max_per_group=%q must clamp to default", bad)
+		assert.Equalf(t, defaultIncomingWebhookMaxPerCreator, s.IncomingWebhookMaxPerCreator(), "max_per_creator=%q must clamp to default", bad)
+	}
+
+	// env-derived fallback is sanitized too: DM_INCOMINGWEBHOOK_RPS=NaN (which
+	// ParseRPSFromEnv passes through) with no DB row must NOT reach the getter as
+	// NaN — it falls back to the code default (Jerry-Xin #292 review).
+	t.Setenv(envIncomingWebhookPerWebhookRPS, "NaN")
+	emptySnap := &SystemSettings{}
+	em := map[string]string{}
+	emptySnap.snapshot.Store(&em)
+	assert.Equal(t, defaultIncomingWebhookPerWebhookRPS, emptySnap.IncomingWebhookPerWebhookRPS(),
+		"env=NaN with no DB row must fall back to the code default, not NaN")
+	t.Setenv(envIncomingWebhookPerWebhookRPS, "")
+
+	// A valid positive value is served as-is (clamp only catches the bad cases).
+	s := &SystemSettings{}
+	snap := map[string]string{
+		"incomingwebhook.per_webhook_rps":   "8.5",
+		"incomingwebhook.per_webhook_burst": "25",
+		"incomingwebhook.max_per_group":     "3",
+	}
+	s.snapshot.Store(&snap)
+	assert.Equal(t, 8.5, s.IncomingWebhookPerWebhookRPS())
+	assert.Equal(t, 25, s.IncomingWebhookPerWebhookBurst())
+	assert.Equal(t, 3, s.IncomingWebhookMaxPerGroup())
+}
+
+// TestSystemSettings_IncomingWebhook_GetterChain_NoInfra exercises the full
+// snapshot(DB) → env → code-default fallback for the incomingwebhook getters
+// WITHOUT a test server: it drives the snapshot map directly. This lets the
+// core getter logic be verified even where MySQL is unavailable; the DB-backed
+// tests above additionally cover the real Load/Reload path in CI.
+func TestSystemSettings_IncomingWebhook_GetterChain_NoInfra(t *testing.T) {
+	// 1) 空快照 + 无 env → code default。
+	t.Setenv(envIncomingWebhookEnabled, "")
+	t.Setenv(envIncomingWebhookPerWebhookRPS, "")
+	t.Setenv(envIncomingWebhookPerWebhookBurst, "")
+	t.Setenv(envIncomingWebhookMaxPerGroup, "")
+	s := &SystemSettings{}
+	empty := map[string]string{}
+	s.snapshot.Store(&empty)
+	assert.True(t, s.IncomingWebhookEnabled())
+	assert.Equal(t, defaultIncomingWebhookPerWebhookRPS, s.IncomingWebhookPerWebhookRPS())
+	assert.Equal(t, defaultIncomingWebhookPerWebhookBurst, s.IncomingWebhookPerWebhookBurst())
+	assert.Equal(t, defaultIncomingWebhookMaxPerGroup, s.IncomingWebhookMaxPerGroup())
+
+	// 2) env override（snapshot 仍空）。
+	t.Setenv(envIncomingWebhookEnabled, "off")
+	t.Setenv(envIncomingWebhookPerWebhookRPS, "7")
+	t.Setenv(envIncomingWebhookPerWebhookBurst, "3")
+	t.Setenv(envIncomingWebhookMaxPerGroup, "2")
+	assert.False(t, s.IncomingWebhookEnabled())
+	assert.Equal(t, 7.0, s.IncomingWebhookPerWebhookRPS())
+	assert.Equal(t, 3, s.IncomingWebhookPerWebhookBurst())
+	assert.Equal(t, 2, s.IncomingWebhookMaxPerGroup())
+
+	// 3) snapshot(DB) 压制 env。
+	snap := map[string]string{
+		"incomingwebhook.enabled":           "1",
+		"incomingwebhook.per_webhook_rps":   "8.5",
+		"incomingwebhook.per_webhook_burst": "25",
+		"incomingwebhook.max_per_group":     "9",
+	}
+	s.snapshot.Store(&snap)
+	assert.True(t, s.IncomingWebhookEnabled())
+	assert.Equal(t, 8.5, s.IncomingWebhookPerWebhookRPS())
+	assert.Equal(t, 25, s.IncomingWebhookPerWebhookBurst())
+	assert.Equal(t, 9, s.IncomingWebhookMaxPerGroup())
 }
 
 func TestSystemSettings_BoolOverridesYamlWhenSet(t *testing.T) {
@@ -114,11 +314,7 @@ func TestSystemSettings_LocalLoginOff_DBValueWins(t *testing.T) {
 // 再修复 SSO 配置；管理面写入也按这个语义验证。
 func TestSystemSettings_LocalLoginOff_AutoFalseWhenNoThirdPartyConfigured(t *testing.T) {
 	s := newTestSystemSettings(t, nil)
-	t.Setenv("DM_OIDC_ENABLED", "")
-	s.ctx.GetConfig().Github.ClientID = ""
-	s.ctx.GetConfig().Github.ClientSecret = ""
-	s.ctx.GetConfig().Gitee.ClientID = ""
-	s.ctx.GetConfig().Gitee.ClientSecret = ""
+	disableThirdPartyLoginForTest(t, s.ctx)
 
 	require.NoError(t, s.db.upsert("login", "local_off", "1", settingTypeBool, ""))
 	require.NoError(t, s.Reload())
@@ -134,6 +330,7 @@ func TestSystemSettings_LocalLoginOff_AutoFalseWhenNoThirdPartyConfigured(t *tes
 // "OIDC 启用 但 config 残缺" 也算"无可用第三方登录"。
 func TestSystemSettings_LocalLoginOff_AutoFalseWhenOIDCEnabledButMisconfigured(t *testing.T) {
 	s := newTestSystemSettings(t, nil)
+	disableThirdPartyLoginForTest(t, s.ctx)
 	t.Setenv("DM_OIDC_ENABLED", "true")
 	// 故意只开 ENABLED,不配 issuer / client_id 等必填项。
 	t.Setenv("DM_OIDC_PROVIDER_ISSUER", "")
@@ -141,15 +338,6 @@ func TestSystemSettings_LocalLoginOff_AutoFalseWhenOIDCEnabledButMisconfigured(t
 	t.Setenv("DM_OIDC_PROVIDER_CLIENT_SECRET", "")
 	t.Setenv("DM_OIDC_PROVIDER_REDIRECT_URI", "")
 	t.Setenv("DM_OIDC_RT_ENC_KEY", "")
-	// aegis alias 也清掉,避免 alias 兜底。
-	t.Setenv("DM_OIDC_AEGIS_ISSUER", "")
-	t.Setenv("DM_OIDC_AEGIS_CLIENT_ID", "")
-	t.Setenv("DM_OIDC_AEGIS_CLIENT_SECRET", "")
-	t.Setenv("DM_OIDC_AEGIS_REDIRECT_URI", "")
-	s.ctx.GetConfig().Github.ClientID = ""
-	s.ctx.GetConfig().Github.ClientSecret = ""
-	s.ctx.GetConfig().Gitee.ClientID = ""
-	s.ctx.GetConfig().Gitee.ClientSecret = ""
 
 	require.NoError(t, s.db.upsert("login", "local_off", "1", settingTypeBool, ""))
 	require.NoError(t, s.Reload())
@@ -371,4 +559,54 @@ func TestSystemSettings_ConcurrentReadsAndReloads(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar recent-tab activity filter windows (issue #289)
+// ---------------------------------------------------------------------------
+
+// Defaults reproduce today's hard-coded behaviour: groups/threads = 3-day
+// window, DMs = unfiltered (0).
+func TestSystemSettings_SidebarRecentFilter_Defaults(t *testing.T) {
+	s := newTestSystemSettings(t, nil)
+	assert.Equal(t, 3, s.SidebarRecentFilterGroupDays(), "group window default 3 天")
+	assert.Equal(t, 3, s.SidebarRecentFilterThreadDays(), "thread window default 3 天")
+	assert.Equal(t, 0, s.SidebarRecentFilterPersonDays(), "DM 默认 0 = 不过滤")
+}
+
+// A configured DB value overrides the code default, including the 0 sentinel
+// that disables the filter for that channel type.
+func TestSystemSettings_SidebarRecentFilter_DBOverrides(t *testing.T) {
+	s := newTestSystemSettings(t, nil)
+	require.NoError(t, s.db.upsert("sidebar", "recent_filter_group_days", "0", settingTypeInt, ""))
+	require.NoError(t, s.db.upsert("sidebar", "recent_filter_thread_days", "7", settingTypeInt, ""))
+	require.NoError(t, s.db.upsert("sidebar", "recent_filter_person_days", "30", settingTypeInt, ""))
+	require.NoError(t, s.Reload())
+
+	assert.Equal(t, 0, s.SidebarRecentFilterGroupDays(), "DB 0 → 关闭群过滤（全量）")
+	assert.Equal(t, 7, s.SidebarRecentFilterThreadDays(), "DB 覆盖话题窗口")
+	assert.Equal(t, 30, s.SidebarRecentFilterPersonDays(), "DB 覆盖 DM 窗口")
+}
+
+// Out-of-range DB values (someone editing the table directly, bypassing the
+// admin API's range check) clamp back to the code default — defence in depth.
+func TestSystemSettings_SidebarRecentFilter_OutOfRangeClampsToDefault(t *testing.T) {
+	s := newTestSystemSettings(t, nil)
+	require.NoError(t, s.db.upsert("sidebar", "recent_filter_group_days", "-5", settingTypeInt, ""))
+	require.NoError(t, s.db.upsert("sidebar", "recent_filter_thread_days", "999999", settingTypeInt, ""))
+	require.NoError(t, s.Reload())
+
+	assert.Equal(t, 3, s.SidebarRecentFilterGroupDays(), "负值越界 → 回退默认 3")
+	assert.Equal(t, 3, s.SidebarRecentFilterThreadDays(), "超上限越界 → 回退默认 3")
+}
+
+// Boundary values exactly on [settingIntMin, settingIntMax] are accepted as-is.
+func TestSystemSettings_SidebarRecentFilter_BoundaryValuesAccepted(t *testing.T) {
+	s := newTestSystemSettings(t, nil)
+	require.NoError(t, s.db.upsert("sidebar", "recent_filter_group_days", "0", settingTypeInt, ""))
+	require.NoError(t, s.db.upsert("sidebar", "recent_filter_thread_days", "3650", settingTypeInt, ""))
+	require.NoError(t, s.Reload())
+
+	assert.Equal(t, 0, s.SidebarRecentFilterGroupDays(), "下界 0 接受")
+	assert.Equal(t, 3650, s.SidebarRecentFilterThreadDays(), "上界 3650 接受")
 }

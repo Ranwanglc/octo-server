@@ -3,6 +3,7 @@ package common
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 
@@ -67,11 +68,11 @@ type systemSettingGetResp struct {
 
 // listSystemSettings handles GET /v1/manager/common/system_setting.
 //
-// Read access uses CheckLoginRole — any authenticated admin can view the
-// effective config (encrypted columns are masked). Writes require
-// SuperAdmin (see updateSystemSettings).
+// Read access requires SuperAdmin — the system configuration surface is
+// SuperAdmin-only for both read and write (encrypted columns are masked
+// regardless). Writes also require SuperAdmin (see updateSystemSettings).
 func (m *Manager) listSystemSettings(c *wkhttp.Context) {
-	if err := c.CheckLoginRole(); err != nil {
+	if err := c.CheckLoginRoleIsSuperAdmin(); err != nil {
 		c.ResponseError(err)
 		return
 	}
@@ -201,10 +202,58 @@ func (m *Manager) updateSystemSettings(c *wkhttp.Context) {
 			}
 			p.value = normalised
 		case settingTypeInt:
+			// Empty value means "reset to default" (the getter treats an empty
+			// snapshot entry as not-configured), so only validate non-empty
+			// payloads. A Positive key (rate-limit / quota knob) must be a
+			// strictly-positive int and skips the shared day-window bound;
+			// otherwise bounds-check against [settingIntMin, settingIntMax] —
+			// previously this path only ran strconv.Atoi with no range guard,
+			// letting absurd windows (or negatives) reach the DB (issue #289).
 			if item.Value != "" {
-				if _, err := strconv.Atoi(item.Value); err != nil {
+				n, err := strconv.Atoi(item.Value)
+				if err != nil {
 					c.JSON(http.StatusBadRequest, jsonH{
 						"msg": fmt.Sprintf("%s.%s 必须是整数", item.Category, item.Key),
+					})
+					return
+				}
+				if def.Positive {
+					if n <= 0 {
+						c.JSON(http.StatusBadRequest, jsonH{
+							"msg": fmt.Sprintf("%s.%s 必须是正整数", item.Category, item.Key),
+						})
+						return
+					}
+				} else if n < settingIntMin || n > settingIntMax {
+					c.JSON(http.StatusBadRequest, jsonH{
+						"msg": fmt.Sprintf("%s.%s 必须在 [%d, %d] 范围内", item.Category, item.Key, settingIntMin, settingIntMax),
+					})
+					return
+				}
+			}
+		case settingTypeFloat:
+			// Reject non-finite (NaN / ±Inf — all of which strconv.ParseFloat
+			// happily accepts) so they can never reach a rate limiter: a NaN rps
+			// errors the Redis Lua script (fail-open) and ±Inf/≤0 short-circuit
+			// the bucket to "always allowed". A Positive key additionally rejects
+			// ≤0. Read side mirrors this (clamp → default) for direct DB edits.
+			if item.Value != "" {
+				f, err := strconv.ParseFloat(item.Value, 64)
+				if err != nil {
+					c.JSON(http.StatusBadRequest, jsonH{
+						"msg": fmt.Sprintf("%s.%s 必须是数字", item.Category, item.Key),
+					})
+					return
+				}
+				if math.IsNaN(f) || math.IsInf(f, 0) {
+					c.JSON(http.StatusBadRequest, jsonH{
+						"msg": fmt.Sprintf("%s.%s 必须是有限数字", item.Category, item.Key),
+					})
+					return
+				}
+				if def.Positive && f <= 0 {
+					c.JSON(http.StatusBadRequest, jsonH{
+						"msg": fmt.Sprintf("%s.%s 必须是正数", item.Category, item.Key),
 					})
 					return
 				}

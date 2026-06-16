@@ -12,7 +12,11 @@
 //  4. Apply tab-specific filtering:
 //     follow  – groups with category + not unfollowed; followed DMs; threads
 //     with ext row whose parent group is in the follow set.
-//     recent  – all DMs; groups/threads with timestamp > now-72h.
+//     recent  – per-channel-type activity window from system_settings
+//     (sidebar.recent_filter_{group,thread,person}_days); a window of 0
+//     disables filtering for that type. Defaults reproduce the historical
+//     behaviour for the types the recent tab carries (groups/threads = 3-day
+//     window, DMs unfiltered). See buildRecentItems / loadRecentCutoffs.
 //  5. Append standalone thread ext entries not already in the IM result.
 //  6. Sort:
 //     follow  – category_sort ASC → pinned DESC → follow_sort ASC →
@@ -43,6 +47,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
+	commonapi "github.com/Mininglamp-OSS/octo-server/modules/common"
 	convext "github.com/Mininglamp-OSS/octo-server/modules/conversation_ext"
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
 	"github.com/Mininglamp-OSS/octo-server/modules/space"
@@ -133,6 +138,11 @@ type SidebarItem struct {
 	intraCategorySort int
 	FollowSort        int    `json:"follow_sort,omitempty"`
 	ParentChannelID   string `json:"parent_channel_id,omitempty"` // thread only
+	// Status 仅对 thread 条目（target_type=5）有意义：1=active 2=archived
+	// 3=deleted，语义与 modules/thread/const.go 的 ThreadStatus* 枚举一致
+	// （GH octo-server#310）。客户端据此同步过滤已归档子区，无需等待 channelInfo。
+	// omitempty 让 DM / 群条目不带该字段，保持线上协议向后兼容。
+	Status int `json:"status,omitempty"`
 }
 
 // sidebarSyncResp is the JSON response for POST /v1/sidebar/sync.
@@ -271,6 +281,17 @@ func (sb *Sidebar) Sync(c *wkhttp.Context) {
 		conversations = FilterRawConversationsBySpace(rawConversations, spaceID, loginUID, sb.ctx, sb.groupService)
 		conversations = EnsureSystemBotsPresentRaw(conversations)
 	}
+	// YUJ-4185 P1-4：子区(CommunityTopic)条目必须按父群成员身份过滤（fail-closed）。
+	// FilterRawConversationsBySpace 只在 spaceID != "" 时跑，且历史上它只比 space
+	// 不校验成员；这里对所有路径（含无 X-Space-ID 的请求）显式补父群 ExistMembersActive
+	// （排除黑名单），避免被移除/拉黑者在 sidebar 仍看到子区入口（越权读）。DB-only
+	// thread ext 行另在下方 2a.6 单独过滤。
+	conversations = filterThreadConvsByParentMembership(
+		conversations,
+		func(c *config.SyncUserConversationResp) string { return c.ChannelID },
+		func(c *config.SyncUserConversationResp) uint8 { return c.ChannelType },
+		loginUID, sb.groupService,
+	)
 
 	// 2. Load ancillary data
 	//
@@ -320,6 +341,16 @@ func (sb *Sidebar) Sync(c *wkhttp.Context) {
 		var err error
 		threadExtRows, err = sb.filterThreadExtsBySpace(threadExtRows, spaceID, loginUID)
 		if failClosedForFollow("thread ext space filter", err) {
+			return
+		}
+	}
+	// 2a.6. YUJ-4185 P1-4：DB-only thread ext 行也必须按父群成员身份过滤（fail-closed）。
+	//       这些行不经 conversations 路径，mergeThreadEntries 只校验父群 category/follow，
+	//       不校验成员 → 被移除者的子区仍可能从 ext 表透出到 follow tab（越权读）。
+	if isFollowTab && len(threadExtRows) > 0 {
+		var err error
+		threadExtRows, err = sb.filterThreadExtsByParentMembership(threadExtRows, loginUID)
+		if failClosedForFollow("thread ext parent membership filter", err) {
 			return
 		}
 	}
@@ -457,11 +488,19 @@ func (sb *Sidebar) Sync(c *wkhttp.Context) {
 		// Append standalone thread ext entries not present in IM result.
 		// Pass categorySetting + unfollowedGroups so parent-follow filter applies
 		// to DB-only thread entries as well (PR review Round-3 Blocking #4).
-		lastMsgAtMap, err := sb.loadThreadLastMsgAt(threadExtRows)
+		lastMsgAtMap, threadStatusMap, err := sb.loadThreadLastMsgAt(threadExtRows)
 		if failClosedForFollow("thread last_message_at query", err) {
 			return
 		}
 		items = mergeThreadEntries(items, threadExtRows, lastMsgAtMap, categorySetting, unfollowedGroups, groupSpaceMap, externalGroupMap, defaultSpaceID)
+
+		// GH octo-server#310：把 thread 生命周期状态回填到 thread 条目。statusMap
+		// 来自 loadThreadLastMsgAt（复用 QueryActiveByGroupShortIDs 已 SELECT 的
+		// status，零额外查询），键为 "{groupNo}____{shortID}"，与 thread 条目的
+		// TargetID 同口径。同时覆盖 buildFollowItems（IM-present）与 mergeThreadEntries
+		// （DB-only）两条路径；mergeThreadEntries 已把不在 statusMap 中的 thread
+		// （deleted/missing）skip，所以幸存的 thread 条目必有 status。
+		backfillThreadStatus(items, threadStatusMap)
 
 		// Issue #151 symptom #2 — materialize ext rows for default-followed
 		// groups (categorized but never touched).  Without this, OnThreadCreated
@@ -521,7 +560,17 @@ func (sb *Sidebar) Sync(c *wkhttp.Context) {
 			}
 		}
 	case "recent":
-		items = buildRecentItems(conversations, pinnedSet, groupSpaceMap, externalGroupMap, defaultSpaceID)
+		cutoffs := loadRecentCutoffs(sb.ctx, time.Now())
+		items = buildRecentItems(conversations, cutoffs, pinnedSet, groupSpaceMap, externalGroupMap, defaultSpaceID)
+		// GH octo-server#310：recent tab 也要带 thread 生命周期状态。一次性批量
+		// 查询所有 thread 条目的 status（无 N+1），再 backfill。
+		// FAIL-OPEN：查询失败只记 warn 并把 Status 留空（omitempty -> 字段缺省），
+		// 与 recent tab 既有的降级行为一致，绝不 fail-closed。
+		if statusMap, qerr := sb.loadThreadStatuses(items); qerr != nil {
+			sb.Warn("sidebar sync: thread status query failed (recent tab non-fatal, status omitted)", zap.Error(qerr))
+		} else {
+			backfillThreadStatus(items, statusMap)
+		}
 	}
 
 	// 4. Enrich pinned flag (follow tab items also need it)
@@ -596,39 +645,160 @@ func (sb *Sidebar) loadPinnedSet(uid, spaceID string) (map[string]struct{}, erro
 // 在 follow tab 路径下吞掉错误并返回空 map 会让 mergeThreadEntries 把所有 DB-only
 // thread 当 "不活跃" skip，客户端 follow tab 残缺但仍带 follow_version，看上去 fresh —
 // 客户端长期缓存错误结果。所以接口契约改为：错误必须显式上报。
-func (sb *Sidebar) loadThreadLastMsgAt(extRows []*convext.Model) (map[string]*time.Time, error) {
+//
+// GH octo-server#310：QueryActiveByGroupShortIDs 同时 SELECT 了 status，这里把它
+// 一并 surface 出来（statusMap，键同为 "{groupNo}____{shortID}"），让 follow tab
+// 在 backfill 阶段把 thread 生命周期状态回填到 SidebarItem.Status，零额外查询。
+func (sb *Sidebar) loadThreadLastMsgAt(extRows []*convext.Model) (lastMsgAt map[string]*time.Time, statusMap map[string]int, err error) {
 	result := make(map[string]*time.Time, len(extRows))
+	statuses := make(map[string]int, len(extRows))
 	if len(extRows) == 0 {
-		return result, nil
+		return result, statuses, nil
 	}
 	refs := make([]thread.ShortRef, 0, len(extRows))
 	for _, m := range extRows {
-		gno, sid, err := parseThreadChannelIDSidebar(m.TargetID)
+		gno, sid, perr := parseThreadChannelIDSidebar(m.TargetID)
+		if perr != nil {
+			continue
+		}
+		refs = append(refs, thread.ShortRef{GroupNo: gno, ShortID: sid})
+	}
+	if len(refs) == 0 {
+		return result, statuses, nil
+	}
+	threadMap, qerr := sb.threadDB.QueryActiveByGroupShortIDs(refs)
+	if qerr != nil {
+		return nil, nil, fmt.Errorf("sidebar load thread last_message_at: %w", qerr)
+	}
+	// QueryActiveByGroupShortIDs 已经按 "{groupNo}____{shortID}" 做键，直接转写。
+	for key, lite := range threadMap {
+		result[key] = lite.LastMessageAt
+		statuses[key] = lite.Status
+	}
+	return result, statuses, nil
+}
+
+// loadThreadStatuses 批量查询给定 sidebar items 里 thread 条目（target_type=5）
+// 的生命周期 status，返回 map["{groupNo}____{shortID}"]status。供 recent tab 使用：
+// 那里没有现成的 thread DB 结果可复用，必须单独发一次 batched 查询（无 N+1）。
+//
+// 复用 thread.QueryActiveByGroupShortIDs：它已按 (group_no, short_id) 过滤、只返回
+// status != deleted 的行，且只 SELECT 最小列集。不修改它的过滤语义（鉴权路径依赖
+// 它过滤掉 deleted），仅消费它本就返回的 status。
+//
+// 无 thread 条目时返回空 map、不发查询。
+func (sb *Sidebar) loadThreadStatuses(items []*SidebarItem) (map[string]int, error) {
+	refs := make([]thread.ShortRef, 0)
+	for _, it := range items {
+		if it.TargetType != int(common.ChannelTypeCommunityTopic) {
+			continue
+		}
+		gno, sid, err := parseThreadChannelIDSidebar(it.TargetID)
 		if err != nil {
 			continue
 		}
 		refs = append(refs, thread.ShortRef{GroupNo: gno, ShortID: sid})
 	}
 	if len(refs) == 0 {
-		return result, nil
+		return map[string]int{}, nil
 	}
 	threadMap, err := sb.threadDB.QueryActiveByGroupShortIDs(refs)
 	if err != nil {
-		return nil, fmt.Errorf("sidebar load thread last_message_at: %w", err)
+		return nil, fmt.Errorf("sidebar load thread statuses: %w", err)
 	}
-	// QueryActiveByGroupShortIDs 已经按 "{groupNo}____{shortID}" 做键，直接转写。
+	statuses := make(map[string]int, len(threadMap))
 	for key, lite := range threadMap {
-		result[key] = lite.LastMessageAt
+		statuses[key] = lite.Status
 	}
-	return result, nil
+	return statuses, nil
+}
+
+// backfillThreadStatus 把 statusMap 里的 thread 生命周期 status 回填到 thread 条目
+// （target_type=5）的 SidebarItem.Status 上（GH octo-server#310）。statusMap 的键是
+// "{groupNo}____{shortID}"，与 thread 条目的 TargetID 一致。非 thread 条目跳过；
+// statusMap 中没有的 thread 条目保持 Status=0（omitempty -> 字段缺省），由调用方
+// 的 fail-open / fail-closed 语义决定这种情况是否会出现。
+func backfillThreadStatus(items []*SidebarItem, statusMap map[string]int) {
+	if len(statusMap) == 0 {
+		return
+	}
+	for _, it := range items {
+		if it.TargetType != int(common.ChannelTypeCommunityTopic) {
+			continue
+		}
+		if st, ok := statusMap[it.TargetID]; ok {
+			it.Status = st
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
 // Filter helpers
 // ---------------------------------------------------------------------------
 
-// threeDaysAgo returns the unix timestamp 72h ago.
-func threeDaysAgo() int64 { return time.Now().Add(-72 * time.Hour).Unix() }
+// recentCutoffs holds the per-channel-type activity cutoffs (unix seconds) for
+// the recent tab. A conversation is hidden when its timestamp <= the cutoff for
+// its channel type. A cutoff of 0 means "no time filter" — that type is
+// returned in full regardless of age (issue #289).
+type recentCutoffs struct {
+	group  int64
+	thread int64
+	person int64
+}
+
+// daysCutoff converts a day-count window to a unix-second cutoff relative to
+// now. A window of 0 (or negative, defensively) yields 0 = "no filter"; the
+// caller's `cutoff == 0` check then skips filtering entirely. Unifying the
+// "disabled" case as cutoff 0 lets buildRecentItems treat every channel type
+// the same way, including the DM exemption (person window default 0).
+func daysCutoff(now time.Time, days int) int64 {
+	if days <= 0 {
+		return 0
+	}
+	return now.Add(-time.Duration(days) * 24 * time.Hour).Unix()
+}
+
+// loadRecentCutoffs resolves the per-channel-type recent-tab windows from the
+// shared system_settings snapshot (admin-tunable, ~60s reload). For the channel
+// types the recent tab carries, the defaults reproduce the historical
+// hard-coded behaviour: groups/threads use a 3-day window, DMs are unfiltered.
+// (Unknown types are kept unconditionally — see cutoffFor.)
+//
+// Package-level (not a *Sidebar method) so /v1/conversation/sync can reuse the
+// exact same window resolution when a client opts in to recent filtering
+// (issue #294) — both handlers live in package message.
+//
+// NOTE: EnsureSystemSettings returns a process-wide singleton, so this reads a
+// snapshot shared across the process. Tests that mutate sidebar.* settings must
+// Reload() after wiping the table (see the recent-filter e2e setup), else a
+// stale snapshot from a prior test (within the ~60s auto-reload TTL) can leak
+// in.
+func loadRecentCutoffs(ctx *config.Context, now time.Time) recentCutoffs {
+	ss := commonapi.EnsureSystemSettings(ctx)
+	return recentCutoffs{
+		group:  daysCutoff(now, ss.SidebarRecentFilterGroupDays()),
+		thread: daysCutoff(now, ss.SidebarRecentFilterThreadDays()),
+		person: daysCutoff(now, ss.SidebarRecentFilterPersonDays()),
+	}
+}
+
+// cutoffFor returns the activity cutoff for a given channel type. Unknown
+// channel types (anything that is not group / thread / DM) return 0 = no
+// filter; the recent tab only ever carries those three types, but defaulting
+// unknown types to "kept" avoids silently dropping a future channel type on an
+// unrelated code path.
+func (c recentCutoffs) cutoffFor(channelType uint8) int64 {
+	switch channelType {
+	case common.ChannelTypeGroup.Uint8():
+		return c.group
+	case common.ChannelTypeCommunityTopic.Uint8():
+		return c.thread
+	case common.ChannelTypePerson.Uint8():
+		return c.person
+	default:
+		return 0
+	}
+}
 
 // channelKey returns a string key for (channelID, channelType).
 func channelKey(channelID string, channelType uint8) string {
@@ -699,6 +869,39 @@ func (sb *Sidebar) filterThreadExtsBySpace(rows []*convext.Model, spaceID, login
 		if sourceSpace, ok := externalMap[parentNo]; ok && sourceSpace == spaceID {
 			kept = append(kept, ext)
 		}
+	}
+	return kept, nil
+}
+
+// filterThreadExtsByParentMembership 剔除“调用者已不是父群成员”的 DB-only thread ext 行。
+// YUJ-4185 P1-4：子区无独立成员表，权威成员身份在父群；被踢/退群/拉黑后 thread ext 行
+// 仍可能残留，必须按父群 ExistMembersActive 校验，避免子区从 follow tab 越权透出。
+// CR 整改：用 ExistMembersActive（status=Normal 白名单）而非 ExistMembers，否则被拉黑
+// (status=Blacklist、is_deleted=0) 用户仍能从 follow tab 看到子区。
+// fail-closed：父群成员查询失败时返回 error，调用方 follow tab 整体退避。
+func (sb *Sidebar) filterThreadExtsByParentMembership(rows []*convext.Model, loginUID string) ([]*convext.Model, error) {
+	parentNos := uniqueThreadParentGroupNos(rows)
+	if len(parentNos) == 0 {
+		return rows, nil
+	}
+	memberNos, err := sb.groupService.ExistMembersActive(parentNos, loginUID)
+	if err != nil {
+		return nil, fmt.Errorf("filter thread ext by parent membership: %w", err)
+	}
+	memberSet := make(map[string]struct{}, len(memberNos))
+	for _, no := range memberNos {
+		memberSet[no] = struct{}{}
+	}
+	kept := make([]*convext.Model, 0, len(rows))
+	for _, ext := range rows {
+		parentNo, _, perr := parseThreadChannelIDSidebar(ext.TargetID)
+		if perr != nil {
+			continue // malformed; drop silently
+		}
+		if _, member := memberSet[parentNo]; !member {
+			continue // not a parent-group member → drop (fail-closed)
+		}
+		kept = append(kept, ext)
 	}
 	return kept, nil
 }
@@ -896,28 +1099,31 @@ func buildFollowItems(
 
 // buildRecentItems constructs the SidebarItem list for the recent tab.
 // Rules:
-//   - DM: always included (no time window).
-//   - Group / Thread: only included if timestamp > threeDaysAgo().
+//   - Each conversation is filtered against the cutoff for its channel type
+//     (cutoffs.cutoffFor): kept iff cutoff == 0 (window disabled) OR
+//     timestamp > cutoff. With the default cutoffs (groups/threads = 3-day
+//     window, DMs = 0) this reproduces the historical behaviour where DMs are
+//     always shown and groups/threads obey a 72h window — but every type is
+//     now operator-tunable via system_settings (issue #289).
 //   - The returned slice is not yet sorted.
 //
 // Intentional non-rule (PR review Important #6): unfollowed groups
 // (group_unfollowed=1 in user_conversation_ext) are NOT filtered out here.
 // Per PM decision on issue #337 — "取消关注就是移除关注列表，放到最近 tab" —
 // an unfollowed group still belongs in the recent tab as long as it has
-// activity within the 72 h window.  The unfollow blacklist only affects
+// activity within the configured window.  The unfollow blacklist only affects
 // the follow tab.
 func buildRecentItems(
 	convs []*config.SyncUserConversationResp,
+	cutoffs recentCutoffs,
 	pinnedSet map[string]struct{},
 	groupSpaceMap map[string]string,
 	externalGroupMap map[string]string,
 	defaultSpaceID string,
 ) []*SidebarItem {
-	cutoff := threeDaysAgo()
 	items := make([]*SidebarItem, 0, len(convs))
 	for _, conv := range convs {
-		isDM := conv.ChannelType == common.ChannelTypePerson.Uint8()
-		if !isDM && conv.Timestamp <= cutoff {
+		if cutoff := cutoffs.cutoffFor(conv.ChannelType); cutoff != 0 && conv.Timestamp <= cutoff {
 			continue
 		}
 		pinned := false

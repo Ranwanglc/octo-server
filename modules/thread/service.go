@@ -62,8 +62,6 @@ type IService interface {
 	GetMemberUIDs(groupNo, shortID string) ([]string, error)
 	// IsMember 检查是否是子区成员
 	IsMember(groupNo, shortID, uid string) (bool, error)
-	// RemoveUserFromGroupThreads 退群时移除用户在该群所有子区的成员身份和 IM 订阅
-	RemoveUserFromGroupThreads(groupNo, uid string) error
 	// GetThreadMd 获取子区 GROUP.md
 	GetThreadMd(groupNo, shortID string) (*ThreadMdResult, error)
 	// UpdateThreadMd 更新子区 GROUP.md（纯透传，不含权限检查）
@@ -157,8 +155,8 @@ func (s *Service) threadVersionGen() func() (int64, error) {
 
 // CreateThread 创建子区
 func (s *Service) CreateThread(req *CreateThreadReq) (*ThreadResp, error) {
-	// 验证是群成员
-	isMember, err := s.groupService.ExistMember(req.GroupNo, req.CreatorUID)
+	// 验证是活跃群成员（排除黑名单，被拉黑用户不应能创建子区）
+	isMember, err := s.groupService.ExistMemberActive(req.GroupNo, req.CreatorUID)
 	if err != nil {
 		return nil, fmt.Errorf("check group membership: %w", err)
 	}
@@ -382,8 +380,18 @@ func (s *Service) UpdateName(groupNo, shortID, operatorUID, name string) error {
 		return errors.New("thread has been deleted")
 	}
 
+	// 子区操作权来自「父群活跃成员」身份：被拉黑/移出父群的用户即使是子区创建者也
+	// 无权改名。必须在授予 creator/admin 特权之前先校验。fail-closed。
+	isActive, err := s.groupService.ExistMemberActive(thread.GroupNo, operatorUID)
+	if err != nil {
+		return fmt.Errorf("check active membership: %w", err)
+	}
+	if !isActive {
+		return errors.New("no permission to update")
+	}
+
 	if thread.CreatorUID != operatorUID {
-		isManager, err := s.groupService.IsCreatorOrManager(groupNo, operatorUID)
+		isManager, err := s.groupService.IsCreatorOrManager(thread.GroupNo, operatorUID)
 		if err != nil {
 			return fmt.Errorf("check permission: %w", err)
 		}
@@ -680,13 +688,25 @@ func (s *Service) canOperate(groupNo, shortID, uid string) (bool, error) {
 		return false, nil
 	}
 
+	// 子区操作权来自「父群活跃成员」身份：被拉黑/移出父群的用户即使是子区创建者或
+	// 群管理员也无权操作。必须在授予 creator/admin 特权之前先校验，否则被拉黑的
+	// 创建者仍能 rename/archive/delete 自己建的子区 + edit/delete 它的 GROUP.md。
+	// fail-closed：parentGroupNo 取自 thread 记录，查询出错或非活跃成员一律拒。
+	isActive, err := s.groupService.ExistMemberActive(thread.GroupNo, uid)
+	if err != nil {
+		return false, fmt.Errorf("check active membership: %w", err)
+	}
+	if !isActive {
+		return false, nil
+	}
+
 	// 创建者可以操作
 	if thread.CreatorUID == uid {
 		return true, nil
 	}
 
 	// 群管理员可以操作
-	isManager, err := s.groupService.IsCreatorOrManager(groupNo, uid)
+	isManager, err := s.groupService.IsCreatorOrManager(thread.GroupNo, uid)
 	if err != nil {
 		return false, fmt.Errorf("check manager permission: %w", err)
 	}
@@ -843,8 +863,8 @@ func IsValidGroupNo(groupNo string) bool {
 
 // JoinThread 加入子区
 func (s *Service) JoinThread(groupNo, shortID, uid string) error {
-	// 验证是父群成员
-	isMember, err := s.groupService.ExistMember(groupNo, uid)
+	// 验证是活跃父群成员（排除黑名单，被拉黑用户不应能加入子区）
+	isMember, err := s.groupService.ExistMemberActive(groupNo, uid)
 	if err != nil {
 		return fmt.Errorf("check group membership: %w", err)
 	}
@@ -983,9 +1003,9 @@ func (s *Service) IsMember(groupNo, shortID, uid string) (bool, error) {
 }
 
 // UpdateSetting 更新用户对某子区的个人设置(目前支持 mute)
-// 权限: 必须是父群成员; 无需是子区成员(与群聊 setting 行为保持一致)
+// 权限: 必须是活跃父群成员(排除黑名单); 无需是子区成员(与群聊 setting 行为保持一致)
 func (s *Service) UpdateSetting(groupNo, shortID, uid string, settings map[string]interface{}) error {
-	isGroupMember, err := s.groupService.ExistMember(groupNo, uid)
+	isGroupMember, err := s.groupService.ExistMemberActive(groupNo, uid)
 	if err != nil {
 		return fmt.Errorf("check group membership: %w", err)
 	}
@@ -1073,55 +1093,9 @@ func (s *Service) GetSettingsWithUIDs(groupNo, shortID string, uids []string) ([
 	return resp, nil
 }
 
-// RemoveUserFromGroupThreads 退群时清理用户在该群所有子区的成员身份、个人设置、IM 订阅
-// 注:即使用户未加入任何子区,也要清理 thread_setting(用户可能只设置了 mute 但未 join)
-func (s *Service) RemoveUserFromGroupThreads(groupNo, uid string) error {
-	// 查询用户在该群加入的所有子区(用于 IM 退订)
-	threads, err := s.db.QueryThreadsByGroupNoAndUID(groupNo, uid)
-	if err != nil {
-		return fmt.Errorf("query user threads in group: %w", err)
-	}
-
-	// 批量清理 thread_member + thread_setting(同一事务)
-	tx, err := s.db.session.Begin()
-	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	err = s.db.DeleteMembersByGroupNoAndUIDTx(groupNo, uid, tx)
-	if err != nil {
-		return fmt.Errorf("delete thread members: %w", err)
-	}
-
-	err = s.db.DeleteSettingsByGroupNoAndUIDTx(groupNo, uid, tx)
-	if err != nil {
-		return fmt.Errorf("delete thread settings: %w", err)
-	}
-
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("commit transaction: %w", err)
-	}
-
-	// 移除 IM 订阅（事务外，失败仅记日志）
-	for _, t := range threads {
-		channelID := BuildChannelID(groupNo, t.ShortID)
-		rmErr := s.ctx.IMRemoveSubscriber(&config.SubscriberRemoveReq{
-			ChannelID:   channelID,
-			ChannelType: common.ChannelTypeCommunityTopic.Uint8(),
-			Subscribers: []string{uid},
-		})
-		if rmErr != nil {
-			s.Error("移除子区IM订阅者失败", zap.Error(rmErr), zap.String("groupNo", groupNo), zap.String("shortID", t.ShortID), zap.String("uid", uid))
-		}
-	}
-
-	return nil
-}
+// 注:本模块不再提供 RemoveUserFromGroupThreads —— 旧实现的 IM 退订被 JOIN thread_member
+// 限定,接到群/Bot 移除路径会复活 Issue #27 的订阅泄漏。退群/踢人/删 Bot 的子区清理统一走
+// group 模块的 removeUserFromGroupThreadsCleanup(modules/group/thread_cleanup.go,Issue #331)。
 
 // sanitizeListStatuses 把入参里只保留 listThreads 允许列出的 status（active / archived），
 // 去重；若过滤后为空（nil、空切片、或全是非法值如 deleted/未知码），fallback 到

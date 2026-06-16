@@ -15,6 +15,7 @@ package message
 // =============================================================================
 
 import (
+	"encoding/json"
 	"sort"
 	"strings"
 	"testing"
@@ -23,6 +24,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	convext "github.com/Mininglamp-OSS/octo-server/modules/conversation_ext"
+	"github.com/Mininglamp-OSS/octo-server/modules/thread"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -45,6 +47,19 @@ func now3DaysAgo() int64 { return time.Now().Add(-73 * time.Hour).Unix() }
 
 // nowRecent returns a unix timestamp well within the 3-day window
 func nowRecent() int64 { return time.Now().Add(-1 * time.Hour).Unix() }
+
+// legacyRecentCutoffs reproduces the historical hard-coded recent-tab filter:
+// group/thread use a 72h window, DMs are unfiltered (cutoff 0). Used by the
+// buildRecentItems unit tests so their original assertions still hold under the
+// new per-channel-type cutoff signature (issue #289).
+func legacyRecentCutoffs() recentCutoffs {
+	now := time.Now()
+	return recentCutoffs{
+		group:  daysCutoff(now, 3),
+		thread: daysCutoff(now, 3),
+		person: daysCutoff(now, 0), // 0 → no filter
+	}
+}
 
 // ---------------------------------------------------------------------------
 // validateSidebarRequest
@@ -235,7 +250,7 @@ func TestBuildRecentItems_GroupWithinWindow_Included(t *testing.T) {
 	convs := []*config.SyncUserConversationResp{
 		makeIMConv("g1", common.ChannelTypeGroup.Uint8(), nowRecent()),
 	}
-	items := buildRecentItems(convs, nil, nil, nil, "")
+	items := buildRecentItems(convs, legacyRecentCutoffs(), nil, nil, nil, "")
 	require.Len(t, items, 1)
 	assert.Equal(t, "g1", items[0].TargetID)
 }
@@ -244,7 +259,7 @@ func TestBuildRecentItems_GroupOutsideWindow_Excluded(t *testing.T) {
 	convs := []*config.SyncUserConversationResp{
 		makeIMConv("g1", common.ChannelTypeGroup.Uint8(), now3DaysAgo()),
 	}
-	items := buildRecentItems(convs, nil, nil, nil, "")
+	items := buildRecentItems(convs, legacyRecentCutoffs(), nil, nil, nil, "")
 	assert.Len(t, items, 0)
 }
 
@@ -253,7 +268,7 @@ func TestBuildRecentItems_DMAlwaysIncluded(t *testing.T) {
 	convs := []*config.SyncUserConversationResp{
 		makeIMConv("peer1", common.ChannelTypePerson.Uint8(), now3DaysAgo()),
 	}
-	items := buildRecentItems(convs, nil, nil, nil, "")
+	items := buildRecentItems(convs, legacyRecentCutoffs(), nil, nil, nil, "")
 	require.Len(t, items, 1)
 	assert.Equal(t, "peer1", items[0].TargetID)
 }
@@ -262,7 +277,7 @@ func TestBuildRecentItems_ThreadWithinWindow_Included(t *testing.T) {
 	convs := []*config.SyncUserConversationResp{
 		makeIMConv("g1____th1", common.ChannelTypeCommunityTopic.Uint8(), nowRecent()),
 	}
-	items := buildRecentItems(convs, nil, nil, nil, "")
+	items := buildRecentItems(convs, legacyRecentCutoffs(), nil, nil, nil, "")
 	require.Len(t, items, 1)
 	assert.Equal(t, "g1____th1", items[0].TargetID)
 }
@@ -271,7 +286,7 @@ func TestBuildRecentItems_ThreadOutsideWindow_Excluded(t *testing.T) {
 	convs := []*config.SyncUserConversationResp{
 		makeIMConv("g1____th1", common.ChannelTypeCommunityTopic.Uint8(), now3DaysAgo()),
 	}
-	items := buildRecentItems(convs, nil, nil, nil, "")
+	items := buildRecentItems(convs, legacyRecentCutoffs(), nil, nil, nil, "")
 	assert.Len(t, items, 0)
 }
 
@@ -283,7 +298,7 @@ func TestBuildRecentItems_PinnedFirst(t *testing.T) {
 		makeIMConv("g1", common.ChannelTypeGroup.Uint8(), nowRecent()),
 		makeIMConv("g2", common.ChannelTypeGroup.Uint8(), nowRecent()-10),
 	}
-	items := buildRecentItems(convs, pinnedSet, nil, nil, "")
+	items := buildRecentItems(convs, legacyRecentCutoffs(), pinnedSet, nil, nil, "")
 	require.Len(t, items, 2)
 
 	// buildRecentItems sets IsPinned flag; sorting is done separately
@@ -300,6 +315,96 @@ func TestBuildRecentItems_PinnedFirst(t *testing.T) {
 	// After sort, pinned item is first
 	sortRecentItems(items)
 	assert.Equal(t, "g2", items[0].TargetID)
+}
+
+// ---------------------------------------------------------------------------
+// buildRecentItems — configurable per-channel-type windows (issue #289)
+// ---------------------------------------------------------------------------
+
+// daysCutoff: 0/negative → 0 (no filter), positive → now - days*24h.
+func TestDaysCutoff(t *testing.T) {
+	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	assert.Equal(t, int64(0), daysCutoff(now, 0), "0 天 = 不过滤")
+	assert.Equal(t, int64(0), daysCutoff(now, -1), "负数 = 不过滤")
+	assert.Equal(t, now.Add(-24*time.Hour).Unix(), daysCutoff(now, 1))
+	assert.Equal(t, now.Add(-72*time.Hour).Unix(), daysCutoff(now, 3))
+}
+
+// cutoff == 0 disables the window for that type: an ancient group conversation
+// is kept when group days = 0 (the "all groups, no time limit" operator ask).
+func TestBuildRecentItems_GroupCutoffZero_AllGroupsKept(t *testing.T) {
+	cutoffs := recentCutoffs{group: 0, thread: daysCutoff(time.Now(), 3), person: 0}
+	convs := []*config.SyncUserConversationResp{
+		makeIMConv("g-old", common.ChannelTypeGroup.Uint8(), now3DaysAgo()),
+		makeIMConv("g-new", common.ChannelTypeGroup.Uint8(), nowRecent()),
+	}
+	items := buildRecentItems(convs, cutoffs, nil, nil, nil, "")
+	assert.Len(t, items, 2, "group 窗口关闭时，超期群也保留")
+}
+
+// Each channel type honours its own window independently: groups unfiltered
+// but threads keep a 3-day window in the same response.
+func TestBuildRecentItems_PerTypeWindowsIndependent(t *testing.T) {
+	cutoffs := recentCutoffs{group: 0, thread: daysCutoff(time.Now(), 3), person: 0}
+	convs := []*config.SyncUserConversationResp{
+		makeIMConv("g-old", common.ChannelTypeGroup.Uint8(), now3DaysAgo()),                // kept (group window off)
+		makeIMConv("g1____t-old", common.ChannelTypeCommunityTopic.Uint8(), now3DaysAgo()), // dropped (thread window on)
+		makeIMConv("g1____t-new", common.ChannelTypeCommunityTopic.Uint8(), nowRecent()),   // kept
+	}
+	items := buildRecentItems(convs, cutoffs, nil, nil, nil, "")
+	ids := map[string]bool{}
+	for _, it := range items {
+		ids[it.TargetID] = true
+	}
+	assert.True(t, ids["g-old"], "群窗口关闭 → 超期群保留")
+	assert.False(t, ids["g1____t-old"], "话题窗口仍生效 → 超期话题剔除")
+	assert.True(t, ids["g1____t-new"], "窗口内话题保留")
+	assert.Len(t, items, 2)
+}
+
+// person window is data-driven: a non-zero DM window now actually filters DMs,
+// replacing the old hard-coded "DMs always shown" exemption.
+func TestBuildRecentItems_PersonWindowFiltersDMs(t *testing.T) {
+	cutoffs := recentCutoffs{group: daysCutoff(time.Now(), 3), thread: daysCutoff(time.Now(), 3), person: daysCutoff(time.Now(), 3)}
+	convs := []*config.SyncUserConversationResp{
+		makeIMConv("dm-old", common.ChannelTypePerson.Uint8(), now3DaysAgo()),
+		makeIMConv("dm-new", common.ChannelTypePerson.Uint8(), nowRecent()),
+	}
+	items := buildRecentItems(convs, cutoffs, nil, nil, nil, "")
+	require.Len(t, items, 1, "person 窗口=3天时，超期 DM 被剔除")
+	assert.Equal(t, "dm-new", items[0].TargetID)
+}
+
+// Unknown channel types (anything that is not group/thread/DM) are kept
+// unconditionally, even with group/thread/person windows all enabled and an
+// ancient timestamp. This locks the deliberate `cutoffFor` default = 0 (no
+// filter) — a documented divergence from the old "filter every non-DM type by
+// 72h" behaviour (PR #291 review P2). The recent tab does not meaningfully
+// carry these types today; the test guards against silently re-filtering them.
+func TestBuildRecentItems_UnknownChannelType_KeptUnconditionally(t *testing.T) {
+	const unknownChannelType uint8 = 99 // not group(2)/person(1)/communityTopic(5)
+	cutoffs := recentCutoffs{
+		group:  daysCutoff(time.Now(), 3),
+		thread: daysCutoff(time.Now(), 3),
+		person: daysCutoff(time.Now(), 3),
+	}
+	convs := []*config.SyncUserConversationResp{
+		makeIMConv("x-ancient", unknownChannelType, time.Now().Add(-10000*time.Hour).Unix()),
+	}
+	items := buildRecentItems(convs, cutoffs, nil, nil, nil, "")
+	require.Len(t, items, 1, "未知频道类型不应被时间窗口过滤（cutoffFor 默认 0=不过滤）")
+	assert.Equal(t, "x-ancient", items[0].TargetID)
+}
+
+// person cutoff 0 (the default) keeps every DM regardless of age — today's
+// behaviour, now expressed as data rather than an `!isDM` branch.
+func TestBuildRecentItems_PersonCutoffZero_AllDMsKept(t *testing.T) {
+	cutoffs := recentCutoffs{group: daysCutoff(time.Now(), 3), thread: daysCutoff(time.Now(), 3), person: 0}
+	convs := []*config.SyncUserConversationResp{
+		makeIMConv("dm-ancient", common.ChannelTypePerson.Uint8(), time.Now().Add(-1000*time.Hour).Unix()),
+	}
+	items := buildRecentItems(convs, cutoffs, nil, nil, nil, "")
+	require.Len(t, items, 1, "person 默认 0 → DM 永远保留")
 }
 
 // ---------------------------------------------------------------------------
@@ -729,7 +834,7 @@ func TestBuildFollowItems_EmptyConversations(t *testing.T) {
 }
 
 func TestBuildRecentItems_EmptyConversations(t *testing.T) {
-	items := buildRecentItems(nil, nil, nil, nil, "")
+	items := buildRecentItems(nil, legacyRecentCutoffs(), nil, nil, nil, "")
 	assert.Len(t, items, 0)
 }
 
@@ -1003,3 +1108,123 @@ func TestParseThreadChannelIDSidebar_Invalid(t *testing.T) {
 
 func strPtr(s string) *string        { return &s }
 func timePtr(t time.Time) *time.Time { return &t }
+
+// ---------------------------------------------------------------------------
+// SidebarItem.Status — thread-only lifecycle status (GH octo-server#310)
+// ---------------------------------------------------------------------------
+
+// Non-thread items (DM / group) must serialize WITHOUT a "status" key so the
+// wire format stays backward compatible (Status=0 + omitempty → absent).
+func TestSidebarItem_JSON_NonThreadOmitsStatus(t *testing.T) {
+	cases := []struct {
+		name string
+		item *SidebarItem
+	}{
+		{
+			name: "DM",
+			item: &SidebarItem{TargetType: int(common.ChannelTypePerson), TargetID: "peer1"},
+		},
+		{
+			name: "group",
+			item: &SidebarItem{TargetType: int(common.ChannelTypeGroup), TargetID: "g1"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := json.Marshal(tc.item)
+			require.NoError(t, err)
+			assert.NotContains(t, string(b), "\"status\"",
+				"non-thread item must not carry a status key (omitempty)")
+		})
+	}
+}
+
+// Thread items must include the status field with the thread lifecycle value.
+func TestSidebarItem_JSON_ThreadIncludesStatus(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		want   string
+	}{
+		{name: "active", status: thread.ThreadStatusActive, want: "\"status\":1"},
+		{name: "archived", status: thread.ThreadStatusArchived, want: "\"status\":2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			item := &SidebarItem{
+				TargetType: int(common.ChannelTypeCommunityTopic),
+				TargetID:   "g1____th1",
+				Status:     tc.status,
+			}
+			b, err := json.Marshal(item)
+			require.NoError(t, err)
+			assert.Contains(t, string(b), tc.want)
+		})
+	}
+}
+
+// Status semantics must match the thread package enum exactly (GH octo-server#310).
+func TestSidebarItem_StatusEnumMatchesThreadConst(t *testing.T) {
+	assert.Equal(t, 1, thread.ThreadStatusActive)
+	assert.Equal(t, 2, thread.ThreadStatusArchived)
+	assert.Equal(t, 3, thread.ThreadStatusDeleted)
+}
+
+// ---------------------------------------------------------------------------
+// backfillThreadStatus — pure backfill of thread lifecycle status
+// ---------------------------------------------------------------------------
+
+// backfillThreadStatus must set Status on thread items keyed by TargetID, leave
+// non-thread items untouched, and skip thread items absent from the status map.
+func TestBackfillThreadStatus(t *testing.T) {
+	items := []*SidebarItem{
+		{TargetType: int(common.ChannelTypePerson), TargetID: "peer1"},
+		{TargetType: int(common.ChannelTypeGroup), TargetID: "g1"},
+		{TargetType: int(common.ChannelTypeCommunityTopic), TargetID: "g1____active"},
+		{TargetType: int(common.ChannelTypeCommunityTopic), TargetID: "g1____archived"},
+		{TargetType: int(common.ChannelTypeCommunityTopic), TargetID: "g1____unknown"},
+	}
+	statusMap := map[string]int{
+		"g1____active":   thread.ThreadStatusActive,
+		"g1____archived": thread.ThreadStatusArchived,
+	}
+	backfillThreadStatus(items, statusMap)
+
+	got := map[string]int{}
+	for _, it := range items {
+		got[it.TargetID] = it.Status
+	}
+	assert.Equal(t, 0, got["peer1"], "DM must keep Status=0")
+	assert.Equal(t, 0, got["g1"], "group must keep Status=0")
+	assert.Equal(t, thread.ThreadStatusActive, got["g1____active"])
+	assert.Equal(t, thread.ThreadStatusArchived, got["g1____archived"])
+	assert.Equal(t, 0, got["g1____unknown"],
+		"thread absent from status map must keep Status=0 (omitempty)")
+}
+
+// A nil / empty status map must be a no-op (fail-open: recent tab leaves Status unset).
+func TestBackfillThreadStatus_EmptyMapNoOp(t *testing.T) {
+	items := []*SidebarItem{
+		{TargetType: int(common.ChannelTypeCommunityTopic), TargetID: "g1____th1"},
+	}
+	backfillThreadStatus(items, nil)
+	assert.Equal(t, 0, items[0].Status)
+	backfillThreadStatus(items, map[string]int{})
+	assert.Equal(t, 0, items[0].Status)
+}
+
+// Same short_id under two different parent groups must not cross-contaminate:
+// the composite "{groupNo}____{shortID}" key keeps them distinct.
+func TestBackfillThreadStatus_NoCrossGroupMismatch(t *testing.T) {
+	items := []*SidebarItem{
+		{TargetType: int(common.ChannelTypeCommunityTopic), TargetID: "gA____dup"},
+		{TargetType: int(common.ChannelTypeCommunityTopic), TargetID: "gB____dup"},
+	}
+	statusMap := map[string]int{
+		"gA____dup": thread.ThreadStatusActive,
+		"gB____dup": thread.ThreadStatusArchived,
+	}
+	backfillThreadStatus(items, statusMap)
+	assert.Equal(t, thread.ThreadStatusActive, items[0].Status, "gA____dup must be active")
+	assert.Equal(t, thread.ThreadStatusArchived, items[1].Status, "gB____dup must be archived")
+}

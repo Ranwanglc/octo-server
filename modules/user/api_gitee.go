@@ -3,7 +3,6 @@ package user
 import (
 	"context"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"net/http"
 	"net/url"
@@ -17,6 +16,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	common "github.com/Mininglamp-OSS/octo-server/modules/common"
+	"github.com/Mininglamp-OSS/octo-server/pkg/avatarversion"
 	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
 	"github.com/gin-gonic/gin"
 	"github.com/opentracing/opentracing-go"
@@ -185,14 +185,15 @@ func (u *User) giteeOAuth(c *wkhttp.Context) {
 			imgReader, _ := u.fileService.DownloadImage(userInfo.AvatarURL, timeoutCtx)
 			cancel()
 			if imgReader != nil {
-				avatarID := crc32.ChecksumIEEE([]byte(uid)) % uint32(u.ctx.GetConfig().Avatar.Partition)
-				_, err = u.fileService.UploadFile(fmt.Sprintf("avatar/%d/%s.png", avatarID, uid), "image/png", "", func(w io.Writer) error {
+				avatarVersion := avatarversion.New()
+				_, err = u.fileService.UploadFile(userAvatarFilePath(uid, u.ctx.GetConfig().Avatar.Partition, avatarVersion), "image/png", "", func(w io.Writer) error {
 					_, err := io.Copy(w, imgReader)
 					return err
 				})
 				defer imgReader.Close()
 				if err == nil {
 					model.IsUploadAvatar = 1
+					model.AvatarVersion = avatarVersion
 				}
 			}
 		}

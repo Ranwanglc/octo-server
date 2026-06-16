@@ -1,0 +1,791 @@
+swagger: "2.0"
+info:
+  description: "Octo API"
+  version: "1.0.0"
+  title: "Octo API"
+host: "api.botgate.cn"
+tags:
+  - name: "opanalyticsManager"
+    description: "运营分析看板（后台管理，仅 superAdmin）"
+schemes:
+  - "https"
+basePath: "/v1"
+
+paths:
+  /manager/dashboard/overview:
+    get:
+      tags:
+        - "opanalyticsManager"
+      summary: "概览卡片（模块A）"
+      description: >
+        运营看板概览。总数(space/group/member)与活跃/消息量随时间范围与可选 space 筛选收敛；
+        活跃成员只算当前在册者(active ⊆ total，率≤100%)；
+        private_active_count 为全局活跃私聊数，选中 space 时返回 0（私聊无 space 归属）。
+        消息量按 event-time 统计（含撤回，全量含通话），与成员"当前在册"口径有意不同。
+      operationId: "m dashboard overview"
+      produces:
+        - "application/json"
+      parameters:
+        - in: "query"
+          name: "start_date"
+          type: string
+          format: date
+          description: "起始统计日 YYYY-MM-DD（报告时区）。缺省=近 30 天；含两端最多 366 天"
+          required: false
+        - in: "query"
+          name: "end_date"
+          type: string
+          format: date
+          description: "结束统计日 YYYY-MM-DD（含）。缺省=今天"
+          required: false
+        - in: "query"
+          name: "space_ids"
+          type: array
+          items:
+            type: string
+          collectionFormat: multi
+          description: "可选空间筛选；多值用 space_ids=a&space_ids=b。为空=全局"
+          required: false
+      responses:
+        200:
+          description: "概览数据"
+          schema:
+            $ref: "#/definitions/overviewResp"
+        400:
+          description: "错误（error.http_status 含真实状态码：403 越权 / 400 参数无效 / 500 查询失败）"
+          schema:
+            $ref: "#/definitions/dashboardError"
+      security:
+        - token: []
+
+  /manager/dashboard/trend:
+    get:
+      tags:
+        - "opanalyticsManager"
+      summary: "趋势图（模块C）"
+      description: >
+        按 day/week 返回消息量、活跃成员、活跃群、活跃私聊和会话类型消息分布。
+        week 以报告时区周一作为 bucket；部分周的 bucket 仍是周一，前端展示范围请使用
+        start_date/end_date。缺失日期/周补 0。选中 space 时私聊指标返回 0。
+      operationId: "m dashboard trend"
+      produces:
+        - "application/json"
+      parameters:
+        - in: "query"
+          name: "start_date"
+          type: string
+          format: date
+          description: "起始统计日 YYYY-MM-DD（报告时区）。缺省=近 30 天；含两端最多 366 天"
+          required: false
+        - in: "query"
+          name: "end_date"
+          type: string
+          format: date
+          description: "结束统计日 YYYY-MM-DD（含）。缺省=今天"
+          required: false
+        - in: "query"
+          name: "space_ids"
+          type: array
+          items:
+            type: string
+          collectionFormat: multi
+          description: "可选空间筛选；多值用 space_ids=a&space_ids=b。为空=全局"
+          required: false
+        - in: "query"
+          name: "granularity"
+          type: string
+          enum: ["day", "week"]
+          default: "day"
+          description: "趋势粒度"
+          required: false
+      responses:
+        200:
+          description: "趋势数据"
+          schema:
+            $ref: "#/definitions/trendResp"
+        400:
+          description: "错误（error.http_status 含真实状态码）"
+          schema:
+            $ref: "#/definitions/dashboardError"
+      security:
+        - token: []
+
+  /manager/dashboard/spaces:
+    get:
+      tags:
+        - "opanalyticsManager"
+      summary: "空间列表（表一）"
+      description: "按空间汇总：群数、在册人数、消息量、最后活跃、是否活跃。支持名称筛选/活跃状态/排序/分页。"
+      operationId: "m dashboard spaces"
+      produces:
+        - "application/json"
+      parameters:
+        - in: "query"
+          name: "start_date"
+          type: string
+          format: date
+          description: "起始统计日 YYYY-MM-DD。缺省=近 30 天"
+          required: false
+        - in: "query"
+          name: "end_date"
+          type: string
+          format: date
+          description: "结束统计日 YYYY-MM-DD（含）"
+          required: false
+        - in: "query"
+          name: "name"
+          type: string
+          description: "空间名称模糊匹配（% _ 作字面量处理）"
+          required: false
+        - in: "query"
+          name: "active_status"
+          type: string
+          enum: ["all", "active", "inactive"]
+          default: "all"
+          description: "活跃状态筛选"
+          required: false
+        - in: "query"
+          name: "sort_by"
+          type: string
+          enum: ["last_active", "human_msg_count", "agent_msg_count", "total_msg", "group_total", "human_member_total"]
+          default: "last_active"
+          description: "排序字段（白名单）"
+          required: false
+        - in: "query"
+          name: "order"
+          type: string
+          enum: ["asc", "desc"]
+          default: "desc"
+          description: "排序方向"
+          required: false
+        - in: "query"
+          name: "page_index"
+          type: integer
+          default: 1
+          description: "页码（从 1 起，上限 1000000）"
+          required: false
+        - in: "query"
+          name: "page_size"
+          type: integer
+          default: 20
+          description: "每页条数（上限 200）"
+          required: false
+      responses:
+        200:
+          description: "空间列表"
+          schema:
+            $ref: "#/definitions/spaceListResp"
+        400:
+          description: "错误（error.http_status 含真实状态码）"
+          schema:
+            $ref: "#/definitions/dashboardError"
+      security:
+        - token: []
+
+  /manager/dashboard/spaces/{space_id}/channels:
+    get:
+      tags:
+        - "opanalyticsManager"
+      summary: "群组列表（表二，仅群组）"
+      description: "某空间下的群组明细（仅 channel_type=2；私聊不进此表）。已解散/已删除群不展示。空间不存在或已停用返回 not_found。"
+      operationId: "m dashboard space channels"
+      produces:
+        - "application/json"
+      parameters:
+        - in: "path"
+          name: "space_id"
+          type: string
+          description: "空间 ID"
+          required: true
+        - in: "query"
+          name: "start_date"
+          type: string
+          format: date
+          description: "起始统计日 YYYY-MM-DD。缺省=近 30 天"
+          required: false
+        - in: "query"
+          name: "end_date"
+          type: string
+          format: date
+          description: "结束统计日 YYYY-MM-DD（含）"
+          required: false
+        - in: "query"
+          name: "active_status"
+          type: string
+          enum: ["all", "active", "inactive"]
+          default: "all"
+          description: "活跃状态筛选"
+          required: false
+        - in: "query"
+          name: "conv_types"
+          type: array
+          items:
+            type: integer
+            enum: [1, 2, 3, 4]
+          collectionFormat: multi
+          description: "会话类型筛选；多值用 conv_types=1&conv_types=2，也兼容 conv_types[]=1 和 conv_types=1,2。表二仅展示群组，3/4 会返回空集合"
+          required: false
+        - in: "query"
+          name: "member_keyword"
+          type: string
+          description: "成员名称/邮箱模糊匹配（% _ 作字面量处理）；P1 不含手机号搜索"
+          required: false
+        - in: "query"
+          name: "sort_by"
+          type: string
+          enum: ["last_active", "human_msg_count", "agent_msg_count", "total_msg", "member_count"]
+          default: "last_active"
+          description: "排序字段（白名单）"
+          required: false
+        - in: "query"
+          name: "order"
+          type: string
+          enum: ["asc", "desc"]
+          default: "desc"
+          description: "排序方向"
+          required: false
+        - in: "query"
+          name: "page_index"
+          type: integer
+          default: 1
+          description: "页码（从 1 起，上限 1000000）"
+          required: false
+        - in: "query"
+          name: "page_size"
+          type: integer
+          default: 20
+          description: "每页条数（上限 200）"
+          required: false
+      responses:
+        200:
+          description: "群组列表"
+          schema:
+            $ref: "#/definitions/channelListResp"
+        400:
+          description: "错误（error.http_status：404 空间不存在 / 403 越权 / 400 参数无效 / 500）"
+          schema:
+            $ref: "#/definitions/dashboardError"
+      security:
+        - token: []
+
+  /manager/dashboard/channels/{channel_id}/members:
+    get:
+      tags:
+        - "opanalyticsManager"
+      summary: "会话成员消息统计（表三子表A汇总）"
+      description: >
+        指定正常群组的成员消息统计汇总视图。列表只包含所选时间范围内发过消息的成员；
+        percentage = 该成员 total_msg_count / 本会话 total_msg_count，取值范围 0..1。
+        消息量沿用 event-time 口径，保留禁用/注销用户历史消息；成员类型优先按当前 octo_dim_member，缺失时回退事实表 sender_type。
+        成员搜索仅匹配当前维表 name/email，手机号搜索属于 P2。
+        响应不返回 phone/zone，避免在运营分析接口新增手机号/区号暴露面。
+      operationId: "m dashboard channel members"
+      produces:
+        - "application/json"
+      parameters:
+        - in: "path"
+          name: "channel_id"
+          type: string
+          description: "群组 channel_id（group_no）；私聊不支持此接口"
+          required: true
+        - in: "query"
+          name: "start_date"
+          type: string
+          format: date
+          description: "起始统计日 YYYY-MM-DD。缺省=近 30 天"
+          required: false
+        - in: "query"
+          name: "end_date"
+          type: string
+          format: date
+          description: "结束统计日 YYYY-MM-DD（含）"
+          required: false
+        - in: "query"
+          name: "member_types"
+          type: array
+          items:
+            type: string
+            enum: ["human", "agent", "1", "2"]
+          collectionFormat: multi
+          description: "成员类型筛选；支持 human/agent 或 1/2，多值用 member_types=human&member_types=agent，也兼容 member_types=human,agent"
+          required: false
+        - in: "query"
+          name: "member_keyword"
+          type: string
+          description: "成员名称/邮箱模糊匹配（% _ 作字面量处理）；P1 不含手机号搜索"
+          required: false
+        - in: "query"
+          name: "keyword"
+          type: string
+          description: "兼容别名；新调用请使用 member_keyword"
+          required: false
+        - in: "query"
+          name: "sort_by"
+          type: string
+          enum: ["total_msg_count", "percentage"]
+          default: "total_msg_count"
+          description: "排序字段（白名单）；percentage 与 total_msg_count 分母相同，排序等价"
+          required: false
+        - in: "query"
+          name: "order"
+          type: string
+          enum: ["asc", "desc"]
+          default: "desc"
+          description: "排序方向"
+          required: false
+        - in: "query"
+          name: "page_index"
+          type: integer
+          default: 1
+          description: "页码（从 1 起，上限 1000000）"
+          required: false
+        - in: "query"
+          name: "page_size"
+          type: integer
+          default: 20
+          description: "每页条数（上限 200）"
+          required: false
+      responses:
+        200:
+          description: "成员消息统计"
+          schema:
+            $ref: "#/definitions/channelMemberListResp"
+        400:
+          description: "错误（error.http_status：404 会话不存在/不是正常群组 / 403 越权 / 400 参数无效 / 500）"
+          schema:
+            $ref: "#/definitions/dashboardError"
+      security:
+        - token: []
+
+  /manager/dashboard/global/direct-chats:
+    get:
+      tags:
+        - "opanalyticsManager"
+      summary: "全局私聊活跃列表"
+      description: "跨空间的活跃 1:1 私聊（无活跃状态筛选）。展示双方 uid/名称、消息量、最后活跃。"
+      operationId: "m dashboard direct chats"
+      produces:
+        - "application/json"
+      parameters:
+        - in: "query"
+          name: "start_date"
+          type: string
+          format: date
+          description: "起始统计日 YYYY-MM-DD。缺省=近 30 天"
+          required: false
+        - in: "query"
+          name: "end_date"
+          type: string
+          format: date
+          description: "结束统计日 YYYY-MM-DD（含）"
+          required: false
+        - in: "query"
+          name: "member_keyword"
+          type: string
+          description: "私聊双方成员名称/邮箱模糊匹配（% _ 作字面量处理）；P1 不含手机号搜索"
+          required: false
+        - in: "query"
+          name: "sort_by"
+          type: string
+          enum: ["last_active", "msg_count"]
+          default: "last_active"
+          description: "排序字段（白名单）"
+          required: false
+        - in: "query"
+          name: "order"
+          type: string
+          enum: ["asc", "desc"]
+          default: "desc"
+          description: "排序方向"
+          required: false
+        - in: "query"
+          name: "page_index"
+          type: integer
+          default: 1
+          description: "页码（从 1 起，上限 1000000）"
+          required: false
+        - in: "query"
+          name: "page_size"
+          type: integer
+          default: 20
+          description: "每页条数（上限 200）"
+          required: false
+      responses:
+        200:
+          description: "私聊列表"
+          schema:
+            $ref: "#/definitions/directChatListResp"
+        400:
+          description: "错误（error.http_status 含真实状态码）"
+          schema:
+            $ref: "#/definitions/dashboardError"
+      security:
+        - token: []
+
+  /manager/dashboard/etl/run:
+    post:
+      tags:
+        - "opanalyticsManager"
+      summary: "手动触发增量 ETL"
+      description: >
+        superAdmin 手动触发一轮运营看板增量 ETL。接口只负责抢占与每日调度相同的
+        Redis 锁并异步启动 RunIncremental；首轮全历史回填可能较长，成功时立即返回 202。
+        若 cron 或上一轮手动任务仍在运行，返回 already_running 错误，不会启动第二轮。
+      operationId: "m dashboard etl run"
+      produces:
+        - "application/json"
+      responses:
+        202:
+          description: "已接受，ETL 在后台异步执行"
+          schema:
+            $ref: "#/definitions/etlRunAcceptedResp"
+        400:
+          description: "错误（error.http_status 含真实状态码：403 越权 / 409 已在运行 / 500 触发失败）"
+          schema:
+            $ref: "#/definitions/dashboardError"
+      security:
+        - token: []
+
+securityDefinitions:
+  token:
+    type: "apiKey"
+    in: "header"
+    name: "token"
+    description: "用户 token（看板接口要求 superAdmin 角色）"
+
+definitions:
+  overviewResp:
+    type: object
+    properties:
+      space_total:
+        type: integer
+        format: int64
+        description: "空间总数（随 space 筛选收敛）"
+      group_total:
+        type: integer
+        format: int64
+        description: "群组总数"
+      human_member_total:
+        type: integer
+        format: int64
+        description: "human 成员总数（当前在册，剔除系统/测试/禁用）"
+      agent_total:
+        type: integer
+        format: int64
+        description: "agent 成员总数"
+      active_groups:
+        type: integer
+        format: int64
+        description: "范围内活跃群数"
+      active_human_members:
+        type: integer
+        format: int64
+        description: "范围内活跃 human 成员去重数（当前在册口径，⊆ human_member_total）"
+      active_agent_members:
+        type: integer
+        format: int64
+        description: "范围内活跃 agent 成员去重数（⊆ agent_total）"
+      human_msg_count:
+        type: integer
+        format: int64
+        description: "范围内 human 消息量（event-time，含撤回/通话）"
+      agent_msg_count:
+        type: integer
+        format: int64
+        description: "范围内 agent 消息量"
+      private_active_count:
+        type: integer
+        format: int64
+        description: "范围内活跃私聊数（全局；选中 space 时为 0）"
+      message_composition:
+        type: array
+        description: "会话类型分布，固定返回 conv_type 1..4；选中 space 时私聊类型为 0"
+        items:
+          $ref: "#/definitions/messageCompositionItem"
+
+  messageCompositionItem:
+    type: object
+    properties:
+      conv_type:
+        type: integer
+        description: "会话类型 1.HH群 2.HA群 3.HH私聊 4.HA私聊"
+      human_msg_count:
+        type: integer
+        format: int64
+      agent_msg_count:
+        type: integer
+        format: int64
+      total_msg_count:
+        type: integer
+        format: int64
+      active_channel_count:
+        type: integer
+        format: int64
+        description: "范围内该类型活跃会话数"
+
+  trendResp:
+    type: object
+    properties:
+      granularity:
+        type: string
+        enum: ["day", "week"]
+      list:
+        type: array
+        items:
+          $ref: "#/definitions/trendItem"
+
+  trendItem:
+    type: object
+    properties:
+      bucket:
+        type: string
+        format: date
+        description: "bucket 起点；day=当天，week=报告时区周一。部分周展示请使用 start_date/end_date"
+      start_date:
+        type: string
+        format: date
+        description: "该 bucket 在请求范围内的起始日期；部分周会裁剪到请求 start_date"
+      end_date:
+        type: string
+        format: date
+        description: "该 bucket 在请求范围内的结束日期；部分周会裁剪到请求 end_date"
+      human_msg_count:
+        type: integer
+        format: int64
+      agent_msg_count:
+        type: integer
+        format: int64
+      total_msg_count:
+        type: integer
+        format: int64
+      active_human_members:
+        type: integer
+        format: int64
+        description: "bucket 内活跃 human 成员去重数"
+      active_agent_members:
+        type: integer
+        format: int64
+        description: "bucket 内活跃 agent 成员去重数"
+      active_groups:
+        type: integer
+        format: int64
+        description: "bucket 内活跃群去重数"
+      private_active_count:
+        type: integer
+        format: int64
+        description: "bucket 内活跃私聊去重数；选中 space 时为 0"
+      conv_type_msg_counts:
+        type: array
+        description: "固定返回 conv_type 1..4 的消息量"
+        items:
+          $ref: "#/definitions/trendConvTypeMsgItem"
+
+  trendConvTypeMsgItem:
+    type: object
+    properties:
+      conv_type:
+        type: integer
+        description: "会话类型 1.HH群 2.HA群 3.HH私聊 4.HA私聊"
+      human_msg_count:
+        type: integer
+        format: int64
+      agent_msg_count:
+        type: integer
+        format: int64
+      total_msg_count:
+        type: integer
+        format: int64
+
+  spaceListResp:
+    type: object
+    properties:
+      count:
+        type: integer
+        format: int64
+        description: "总条数"
+      list:
+        type: array
+        items:
+          $ref: "#/definitions/spaceListItem"
+
+  spaceListItem:
+    type: object
+    properties:
+      space_id:
+        type: string
+      name:
+        type: string
+      group_total:
+        type: integer
+        format: int64
+      human_member_total:
+        type: integer
+        format: int64
+      agent_total:
+        type: integer
+        format: int64
+      human_msg_count:
+        type: integer
+        format: int64
+      agent_msg_count:
+        type: integer
+        format: int64
+      last_active:
+        type: integer
+        format: int64
+        description: "最后活跃时间戳（纪元秒）；0=范围内无消息"
+      is_active:
+        type: boolean
+        description: "范围内是否有群活跃"
+
+  channelListResp:
+    type: object
+    properties:
+      count:
+        type: integer
+        format: int64
+      list:
+        type: array
+        items:
+          $ref: "#/definitions/channelListItem"
+
+  channelListItem:
+    type: object
+    properties:
+      channel_id:
+        type: string
+        description: "群编号 group_no"
+      name:
+        type: string
+      conv_type:
+        type: integer
+        description: "会话类型 1.HH群 2.HA群 3.HH私聊 4.HA私聊"
+      member_count:
+        type: integer
+        description: "在册成员数（剔除系统/测试，且已退群 is_deleted=1 不计）"
+      human_member_count:
+        type: integer
+      agent_member_count:
+        type: integer
+      human_msg_count:
+        type: integer
+        format: int64
+      agent_msg_count:
+        type: integer
+        format: int64
+      last_active_at:
+        type: integer
+        format: int64
+        description: "最后活跃时间戳（纪元秒）"
+      status:
+        type: integer
+        description: "群状态 1.正常 2.解散"
+      is_active:
+        type: boolean
+        description: "范围内是否活跃"
+
+  channelMemberListResp:
+    type: object
+    properties:
+      count:
+        type: integer
+        format: int64
+        description: "筛选后的成员统计行数"
+      total_msg_count:
+        type: integer
+        format: int64
+        description: "该会话所选时间范围内总消息数（不受 member_types/member_keyword 筛选影响）"
+      list:
+        type: array
+        items:
+          $ref: "#/definitions/channelMemberListItem"
+
+  channelMemberListItem:
+    type: object
+    properties:
+      member_uid:
+        type: string
+      name:
+        type: string
+      email:
+        type: string
+      member_type:
+        type: integer
+        description: "1=human 2=agent"
+      total_msg_count:
+        type: integer
+        format: int64
+        description: "成员在该会话、该时间范围内发送的消息数"
+      percentage:
+        type: number
+        format: double
+        description: "成员消息占比，0..1"
+
+  directChatListResp:
+    type: object
+    properties:
+      count:
+        type: integer
+        format: int64
+      list:
+        type: array
+        items:
+          $ref: "#/definitions/directChatItem"
+
+  directChatItem:
+    type: object
+    properties:
+      channel_id:
+        type: string
+        description: "私聊 fakeChannelID"
+      member_a_uid:
+        type: string
+      member_a_name:
+        type: string
+      member_b_uid:
+        type: string
+      member_b_name:
+        type: string
+      conv_type:
+        type: integer
+        description: "会话类型 3.HH私聊 4.HA私聊"
+      msg_count:
+        type: integer
+        format: int64
+        description: "范围内消息量"
+      last_active:
+        type: integer
+        format: int64
+        description: "最后活跃时间戳（纪元秒）"
+
+  etlRunAcceptedResp:
+    type: object
+    properties:
+      status:
+        type: integer
+        example: 202
+        description: "HTTP 202 Accepted"
+      state:
+        type: string
+        example: "accepted"
+        description: "已接受后台执行"
+
+  dashboardError:
+    type: object
+    description: "i18n 错误信封。传输层 HTTP 状态恒为 400（D14 兼容），真实状态在 error.http_status。"
+    properties:
+      status:
+        type: integer
+        description: "传输层状态（恒 400）"
+      error:
+        type: object
+        properties:
+          code:
+            type: string
+            description: "错误码，如 err.server.opanalytics.not_found / forbidden / request_invalid / query_failed / etl_already_running / etl_trigger_failed"
+          http_status:
+            type: integer
+            description: "真实 HTTP 语义状态码（400/403/404/409/500）"
+          message:
+            type: string
+            description: "本地化文案（5xx 内部错误隐藏）"

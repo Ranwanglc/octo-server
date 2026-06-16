@@ -1,0 +1,555 @@
+swagger: "2.0"
+info:
+  description: |
+    Octo Messages Search API — direct OpenSearch-backed full-text search over
+    historical IM messages, scoped to a single channel. Four endpoints share
+    the request envelope (channel_type / channel_id / filters / sort / cursor)
+    and the cursor-paginated response envelope (data + pagination).
+  version: "1.0.0"
+  title: "Octo Messages Search API"
+host: "api.botgate.cn"
+tags:
+  - name: "messages_search"
+    description: "Messages search (OpenSearch direct)"
+schemes:
+  - "https"
+basePath: "/v1"
+
+securityDefinitions:
+  BearerAuth:
+    type: apiKey
+    name: Authorization
+    in: header
+    description: "Octo session token (`Bearer <token>`)."
+
+paths:
+  /messages/_search:
+    post:
+      tags:
+        - "messages_search"
+      operationId: "message.search"
+      summary: "Search text + forward messages"
+      description: "Full-text search across text/forward/image/file payload fields scoped to a single channel. Required keyword."
+      consumes:
+        - "application/json"
+      produces:
+        - "application/json"
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            $ref: "#/definitions/SearchMessagesReq"
+      responses:
+        "200":
+          description: "OK"
+          schema:
+            $ref: "#/definitions/CursorList_MessageHit"
+        "400":
+          description: "Validation error"
+          schema:
+            $ref: "#/definitions/Error"
+        "401":
+          description: "Unauthenticated"
+          schema:
+            $ref: "#/definitions/Error"
+        "403":
+          description: "Forbidden"
+          schema:
+            $ref: "#/definitions/Error"
+        "404":
+          description: "Channel not visible / Space rejection"
+          schema:
+            $ref: "#/definitions/Error"
+        "429":
+          description: "Rate limited"
+          schema:
+            $ref: "#/definitions/Error"
+        "500":
+          description: "Internal error"
+          schema:
+            $ref: "#/definitions/Error"
+        "503":
+          description: "Search backend unavailable"
+          schema:
+            $ref: "#/definitions/Error"
+
+  /messages/_search_media:
+    post:
+      tags:
+        - "messages_search"
+      operationId: "message.search_media"
+      summary: "Search media (image + video)"
+      description: "Filter image and video messages in a channel; keyword must be empty."
+      consumes:
+        - "application/json"
+      produces:
+        - "application/json"
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            $ref: "#/definitions/SearchMediaReq"
+      responses:
+        "200":
+          description: "OK"
+          schema:
+            $ref: "#/definitions/CursorList_MediaHit"
+        "400":
+          description: "Validation error"
+          schema:
+            $ref: "#/definitions/Error"
+        "401":
+          description: "Unauthenticated"
+          schema:
+            $ref: "#/definitions/Error"
+        "403":
+          description: "Forbidden"
+          schema:
+            $ref: "#/definitions/Error"
+        "404":
+          description: "Channel not visible / Space rejection"
+          schema:
+            $ref: "#/definitions/Error"
+        "429":
+          description: "Rate limited"
+          schema:
+            $ref: "#/definitions/Error"
+        "500":
+          description: "Internal error"
+          schema:
+            $ref: "#/definitions/Error"
+        "503":
+          description: "Search backend unavailable"
+          schema:
+            $ref: "#/definitions/Error"
+
+  /messages/_search_files:
+    post:
+      tags:
+        - "messages_search"
+      operationId: "message.search_files"
+      summary: "Search files"
+      description: "Filter file messages by optional keyword on file name / caption."
+      consumes:
+        - "application/json"
+      produces:
+        - "application/json"
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            $ref: "#/definitions/SearchFilesReq"
+      responses:
+        "200":
+          description: "OK"
+          schema:
+            $ref: "#/definitions/CursorList_FileHit"
+        "400":
+          description: "Validation error"
+          schema:
+            $ref: "#/definitions/Error"
+        "401":
+          description: "Unauthenticated"
+          schema:
+            $ref: "#/definitions/Error"
+        "403":
+          description: "Forbidden"
+          schema:
+            $ref: "#/definitions/Error"
+        "404":
+          description: "Channel not visible / Space rejection"
+          schema:
+            $ref: "#/definitions/Error"
+        "429":
+          description: "Rate limited"
+          schema:
+            $ref: "#/definitions/Error"
+        "500":
+          description: "Internal error"
+          schema:
+            $ref: "#/definitions/Error"
+        "503":
+          description: "Search backend unavailable"
+          schema:
+            $ref: "#/definitions/Error"
+
+  /messages/_search_all:
+    post:
+      tags:
+        - "messages_search"
+      operationId: "message.search_all"
+      summary: "Search across messages and files"
+      description: "Combined search across text/forward and files in a single channel; required keyword."
+      consumes:
+        - "application/json"
+      produces:
+        - "application/json"
+      security:
+        - BearerAuth: []
+      parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            $ref: "#/definitions/SearchMessagesReq"
+      responses:
+        "200":
+          description: "OK"
+          schema:
+            $ref: "#/definitions/CursorList_SearchAllHit"
+        "400":
+          description: "Validation error"
+          schema:
+            $ref: "#/definitions/Error"
+        "401":
+          description: "Unauthenticated"
+          schema:
+            $ref: "#/definitions/Error"
+        "403":
+          description: "Forbidden"
+          schema:
+            $ref: "#/definitions/Error"
+        "404":
+          description: "Channel not visible / Space rejection"
+          schema:
+            $ref: "#/definitions/Error"
+        "429":
+          description: "Rate limited"
+          schema:
+            $ref: "#/definitions/Error"
+        "500":
+          description: "Internal error"
+          schema:
+            $ref: "#/definitions/Error"
+        "503":
+          description: "Search backend unavailable"
+          schema:
+            $ref: "#/definitions/Error"
+
+definitions:
+  SearchFilters:
+    type: object
+    properties:
+      sender_ids:
+        type: array
+        items:
+          type: string
+        maxItems: 50
+      sent_at_from:
+        type: string
+        description: "RFC3339 or YYYY-MM-DD; lower bound (inclusive)."
+      sent_at_to:
+        type: string
+        description: "RFC3339 or YYYY-MM-DD; upper bound (inclusive)."
+
+  SearchMessagesReq:
+    type: object
+    required:
+      - channel_type
+      - channel_id
+      - keyword
+    properties:
+      channel_type:
+        type: integer
+        enum: [1, 2, 5]
+        description: "1 = DM, 2 = group, 5 = thread."
+      channel_id:
+        type: string
+      keyword:
+        type: string
+        maxLength: 64
+      filters:
+        $ref: "#/definitions/SearchFilters"
+      sort:
+        type: string
+        enum: ["time_desc", "time_asc", "relevance"]
+      page_size:
+        type: integer
+        minimum: 1
+        maximum: 100
+      cursor:
+        type: string
+
+  SearchMediaReq:
+    type: object
+    required:
+      - channel_type
+      - channel_id
+    properties:
+      channel_type:
+        type: integer
+        enum: [1, 2, 5]
+      channel_id:
+        type: string
+      filters:
+        $ref: "#/definitions/SearchFilters"
+      sort:
+        type: string
+        enum: ["time_desc", "time_asc"]
+      page_size:
+        type: integer
+        minimum: 1
+        maximum: 100
+      cursor:
+        type: string
+
+  SearchFilesReq:
+    type: object
+    required:
+      - channel_type
+      - channel_id
+    properties:
+      channel_type:
+        type: integer
+        enum: [1, 2, 5]
+      channel_id:
+        type: string
+      keyword:
+        type: string
+        maxLength: 64
+      filters:
+        $ref: "#/definitions/SearchFilters"
+      sort:
+        type: string
+        enum: ["time_desc", "time_asc", "relevance"]
+      page_size:
+        type: integer
+        minimum: 1
+        maximum: 100
+      cursor:
+        type: string
+
+  Pagination:
+    type: object
+    required:
+      - has_more
+      - next_cursor
+    properties:
+      has_more:
+        type: boolean
+      next_cursor:
+        type: string
+
+  OuterPreview:
+    type: object
+    properties:
+      child_count:
+        type: integer
+
+  MessageHit:
+    type: object
+    required:
+      - message_id
+      - message_seq
+      - message_kind
+      - sender_id
+      - sent_at
+      - channel_id
+    properties:
+      message_id:
+        type: string
+      message_seq:
+        type: integer
+        format: int64
+      message_kind:
+        type: string
+        enum: ["text", "forward"]
+      snippet:
+        type: string
+      sender_id:
+        type: string
+      sender_name:
+        type: string
+      sender_avatar_url:
+        type: string
+        format: uri
+      sent_at:
+        type: string
+        format: date-time
+      outer_preview:
+        $ref: "#/definitions/OuterPreview"
+      channel_id:
+        type: string
+
+  MediaHit:
+    type: object
+    required:
+      - message_id
+      - message_seq
+      - media_kind
+      - sender_id
+      - sent_at
+      - month_bucket
+    properties:
+      message_id:
+        type: string
+      message_seq:
+        type: integer
+        format: int64
+      media_kind:
+        type: string
+        enum: ["image", "video"]
+      thumb_url:
+        type: string
+        format: uri
+      width:
+        type: integer
+      height:
+        type: integer
+      duration_ms:
+        type: integer
+        format: int64
+      sender_id:
+        type: string
+      sender_name:
+        type: string
+      sent_at:
+        type: string
+        format: date-time
+      month_bucket:
+        type: string
+
+  FileHit:
+    type: object
+    required:
+      - message_id
+      - message_seq
+      - file_name
+      - preview_url
+      - sender_id
+      - sent_at
+    properties:
+      message_id:
+        type: string
+      message_seq:
+        type: integer
+        format: int64
+      file_name:
+        type: string
+      file_size_bytes:
+        type: integer
+        format: int64
+      file_ext:
+        type: string
+      download_url:
+        type: string
+        format: uri
+      preview_url:
+        type: string
+        format: uri
+        x-nullable: true
+      sender_id:
+        type: string
+      sender_name:
+        type: string
+      sender_avatar_url:
+        type: string
+        format: uri
+      sent_at:
+        type: string
+        format: date-time
+
+  SearchAllHit:
+    type: object
+    required:
+      - result_type
+      - sorted_at
+    properties:
+      result_type:
+        type: string
+        enum: ["message", "file"]
+      sorted_at:
+        type: string
+        format: date-time
+      message:
+        $ref: "#/definitions/MessageHit"
+      file:
+        $ref: "#/definitions/FileHit"
+
+  CursorList_MessageHit:
+    type: object
+    required:
+      - data
+      - pagination
+    properties:
+      data:
+        type: array
+        items:
+          $ref: "#/definitions/MessageHit"
+      pagination:
+        $ref: "#/definitions/Pagination"
+
+  CursorList_MediaHit:
+    type: object
+    required:
+      - data
+      - pagination
+    properties:
+      data:
+        type: array
+        items:
+          $ref: "#/definitions/MediaHit"
+      pagination:
+        $ref: "#/definitions/Pagination"
+
+  CursorList_FileHit:
+    type: object
+    required:
+      - data
+      - pagination
+    properties:
+      data:
+        type: array
+        items:
+          $ref: "#/definitions/FileHit"
+      pagination:
+        $ref: "#/definitions/Pagination"
+
+  CursorList_SearchAllHit:
+    type: object
+    required:
+      - data
+      - pagination
+    properties:
+      data:
+        type: array
+        items:
+          $ref: "#/definitions/SearchAllHit"
+      pagination:
+        $ref: "#/definitions/Pagination"
+
+  ErrorBody:
+    type: object
+    required:
+      - code
+      - message
+    properties:
+      code:
+        type: string
+        description: "i18n code id (e.g. err.server.messages_search.validation_failed)."
+      message:
+        type: string
+      details:
+        type: object
+        additionalProperties: true
+      hint:
+        type: string
+      http_status:
+        type: integer
+
+  Error:
+    type: object
+    required:
+      - error
+    properties:
+      error:
+        $ref: "#/definitions/ErrorBody"

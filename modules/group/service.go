@@ -66,6 +66,10 @@ type IService interface {
 	GetMember(groupNo, uid string) (*MemberResp, error)
 	// 获取黑名单成员uid集合
 	GetBlacklistMemberUIDs(groupNo string) ([]string, error)
+	// GetSubscribableMemberUIDs 返回可订阅成员 uid 集合（status=normal AND is_deleted=0，
+	// 即排除被拉黑成员），供子区/父群的 IM Subscribers 数据源使用。与 GetMembers
+	// （“所有非删除成员”）语义不同，不可互换。
+	GetSubscribableMemberUIDs(groupNo string) ([]string, error)
 	// 查询管理员成员uid列表（包括创建者）
 	GetMemberUIDsOfManager(groupNo string) ([]string, error)
 	// 是否是创建者或管理者
@@ -76,8 +80,15 @@ type IService interface {
 	GetMemberTotalAndOnlineCount(groupNo string) (int, int, error)
 	// 是否存在群成员
 	ExistMember(groupNo string, uid string) (bool, error)
+	// ExistMemberActive 是否存在「活跃」群成员（is_deleted=0 AND status=Normal，
+	// 白名单语义、fail-closed），排除被拉黑成员。供绕过 IM 直查本地分表的读/发门禁，
+	// 以及子区(CommunityTopic)解析父群后的读/写门禁使用，防止被拉黑用户越权读子区内容。
+	ExistMemberActive(groupNo string, uid string) (bool, error)
 	// 成员是否在某群里存在 返回对应在群里的群编号
 	ExistMembers(groupNos []string, uid string) ([]string, error)
+	// ExistMembersActive 批量版 ExistMemberActive：返回 uid 处于「活跃」状态
+	// （is_deleted=0 AND status=Normal）的群编号集合，排除被拉黑成员
+	ExistMembersActive(groupNos []string, uid string) ([]string, error)
 	// GetGroupsWithMemberUID 获取某个用户的所有群
 	GetGroupsWithMemberUID(uid string) ([]*InfoResp, error)
 	// 获取指定群的群成员的最大数据版本
@@ -107,6 +118,9 @@ type IService interface {
 	AddGroupMembers(req *AddGroupMembersServiceReq) (*AddGroupMembersServiceResp, error)
 	// RemoveGroupMembers 移除群成员
 	RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*RemoveGroupMembersServiceResp, error)
+	// RemoveUserFromGroupThreads 清理某用户在某群所有子区的 thread_member 记录、IM 订阅和置顶。
+	// 供 botfather 删除 Bot 等“父群成员已移除、需对齐摘除子区订阅”的外部路径调用（Issue #27）。
+	RemoveUserFromGroupThreads(groupNo, uid, spaceID string)
 	// UpdateGroupInfo 更新群信息
 	UpdateGroupInfo(req *UpdateGroupInfoServiceReq) error
 }
@@ -170,9 +184,10 @@ func (s *Service) GetCreatedCountWithDate(date string) (int64, error) {
 // AddGroup 添加一个群
 func (s *Service) AddGroup(model *AddGroupReq) error {
 	err := s.db.Insert(&Model{
-		GroupNo:       model.GroupNo,
-		Name:          model.Name,
-		AllowExternal: 1, // 向后兼容：默认允许外部成员
+		GroupNo:        model.GroupNo,
+		Name:           model.Name,
+		AllowExternal:  1, // 向后兼容：默认允许外部成员
+		AllowNoMention: 1, // 向后兼容：默认允许群级免@
 	})
 	return err
 }
@@ -514,6 +529,17 @@ func (s *Service) GetBlacklistMemberUIDs(groupNo string) ([]string, error) {
 	return uids, nil
 }
 
+// GetSubscribableMemberUIDs 返回可订阅成员 uid（status=normal AND is_deleted=0）。
+// 子区/父群 IM Subscribers 数据源专用：排除被拉黑成员，避免 WuKongIM 重载订阅时
+// 把黑名单用户加回订阅列表（YUJ-4185 P0-2）。
+func (s *Service) GetSubscribableMemberUIDs(groupNo string) ([]string, error) {
+	uids, err := s.db.querySubscribableMemberUIDsWithGroupNo(groupNo)
+	if err != nil {
+		return nil, err
+	}
+	return uids, nil
+}
+
 func (s *Service) GetMemberUIDsOfManager(groupNo string) ([]string, error) {
 	return s.db.QueryGroupManagerOrCreatorUIDS(groupNo)
 }
@@ -540,8 +566,22 @@ func (s *Service) ExistMember(groupNo string, uid string) (bool, error) {
 	return s.db.ExistMember(uid, groupNo)
 }
 
+// ExistMemberActive 是 ExistMember 的白名单（fail closed）变体：除 is_deleted=0 外还
+// 要求 status=GroupMemberStatusNormal，明确排除被拉黑及未来新增的非正常状态成员。
+// 子区(CommunityTopic)读/发门禁用它替代 ExistMember，避免被拉黑用户越权读/发（YUJ-4185 CR 整改）。
+func (s *Service) ExistMemberActive(groupNo string, uid string) (bool, error) {
+	return s.db.ExistMemberActive(uid, groupNo)
+}
+
 func (s *Service) ExistMembers(groupNos []string, uid string) ([]string, error) {
 	return s.db.existMembers(groupNos, uid)
+}
+
+// ExistMembersActive 是 ExistMembers 的白名单（fail closed）批量变体：在 is_deleted=0
+// 之外额外要求 status=GroupMemberStatusNormal，把被拉黑成员从“仍是成员”的集合里排除。
+// 子区(CommunityTopic)批量读门禁用它替代 ExistMembers（YUJ-4185 CR 整改）。
+func (s *Service) ExistMembersActive(groupNos []string, uid string) ([]string, error) {
+	return s.db.existMembersActive(groupNos, uid)
 }
 
 func (s *Service) GetSettings(groupNos []string, uid string) ([]*SettingResp, error) {
@@ -644,6 +684,7 @@ type InfoResp struct {
 	SpaceID             string    `json:"space_id"`          // Space ID
 	IsExternalGroup     int       `json:"is_external_group"` // 是否外部群
 	AllowExternal       int       `json:"allow_external"`    // 是否允许外部成员 1.允许(默认) 0.禁止
+	AllowNoMention      int       `json:"allow_no_mention"`  // 群级是否允许免@生效 1.允许(默认) 0.禁止
 }
 
 func toInfoResp(m *Model) *InfoResp {
@@ -664,6 +705,7 @@ func toInfoResp(m *Model) *InfoResp {
 		SpaceID:             m.SpaceID,
 		IsExternalGroup:     m.IsExternalGroup,
 		AllowExternal:       m.AllowExternal,
+		AllowNoMention:      m.AllowNoMention,
 	}
 }
 
@@ -771,6 +813,7 @@ type GroupResp struct {
 	SpaceID                  string    `json:"space_id"`                    // Space ID
 	IsExternalGroup          int       `json:"is_external_group"`           // 是否外部群 0.否 1.是
 	AllowExternal            int       `json:"allow_external"`              // 是否允许外部成员 1.允许(默认) 0.禁止
+	AllowNoMention           int       `json:"allow_no_mention"`            // 群级是否允许免@生效 1.允许(默认) 0.禁止
 	CreatedAt                string    `json:"created_at"`
 	UpdatedAt                string    `json:"updated_at"`
 	Version                  int64     `json:"version"` // 群数据版本
@@ -805,6 +848,7 @@ func (g *GroupResp) from(model *DetailModel) *GroupResp {
 		SpaceID:                  model.SpaceID,
 		IsExternalGroup:          model.IsExternalGroup,
 		AllowExternal:            model.AllowExternal,
+		AllowNoMention:           model.AllowNoMention,
 		HasGroupMd:               model.GroupMd != nil && *model.GroupMd != "",
 		GroupMdVersion:           model.GroupMdVersion,
 		CreatedAt:                model.CreatedAt.String(),
@@ -833,6 +877,7 @@ func (g *GroupResp) fromModel(model *Model) *GroupResp {
 		SpaceID:                  model.SpaceID,
 		IsExternalGroup:          model.IsExternalGroup,
 		AllowExternal:            model.AllowExternal,
+		AllowNoMention:           model.AllowNoMention,
 		HasGroupMd:               model.GroupMd != nil && *model.GroupMd != "",
 		GroupMdVersion:           model.GroupMdVersion,
 		CreatedAt:                model.CreatedAt.String(),
@@ -1082,6 +1127,7 @@ func (s *Service) CreateGroup(req *CreateGroupServiceReq) (*CreateGroupServiceRe
 		AllowViewHistoryMsg: int(common.GroupAllowViewHistoryMsgEnabled),
 		SpaceID:             req.SpaceID,
 		AllowExternal:       1, // 向后兼容：默认允许外部成员
+		AllowNoMention:      1, // 向后兼容：默认允许群级免@
 		IsExternalGroup:     isExternalGroup,
 	}, tx)
 	if err != nil {
@@ -1234,7 +1280,17 @@ func (s *Service) CreateGroup(req *CreateGroupServiceReq) (*CreateGroupServiceRe
 		Subscribers: realMemberUIDs,
 	})
 	if err != nil {
-		s.Error("create IM channel failed", zap.Error(err))
+		s.Error("create IM channel failed, performing compensating rollback", zap.Error(err), zap.String("groupNo", groupNo))
+		// Compensating delete: remove group_member and group records that were
+		// already committed. Use s.ctx.DB() (not tx) because the transaction
+		// has already been committed.
+		if _, delErr := s.ctx.DB().DeleteFrom("group_member").Where("group_no=?", groupNo).Exec(); delErr != nil {
+			s.Error("compensating delete group_member failed", zap.Error(delErr), zap.String("groupNo", groupNo))
+		}
+		if _, delErr := s.ctx.DB().DeleteFrom("group").Where("group_no=?", groupNo).Exec(); delErr != nil {
+			s.Error("compensating delete group failed", zap.Error(delErr), zap.String("groupNo", groupNo))
+		}
+		return nil, errors.New("failed to create IM channel, group has been rolled back")
 	}
 
 	// 发送群创建通知
@@ -1508,10 +1564,13 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 		return nil, errors.New("none of the members are in this group")
 	}
 
-	// 过滤：跳过群主、管理员、已删除的成员
+	// 过滤：跳过群主、已删除的成员。
+	// #354 产品决策：bot 永远跟随其主人，无角色例外——manager 不再豁免，
+	// 被踢的管理员连同其拉入的 bot 一并带走（API 层 memberRemove 已限制
+	// 只有群主能踢管理员；creator 仍不可被踢）。
 	var removableMembers []*MemberModel
 	for _, m := range targetMembers {
-		if m.IsDeleted == 1 || m.Role == MemberRoleCreator || m.Role == MemberRoleManager {
+		if m.IsDeleted == 1 || m.Role == MemberRoleCreator {
 			continue
 		}
 		removableMembers = append(removableMembers, m)
@@ -1563,8 +1622,8 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 		removedVos = append(removedVos, &config.UserBaseVo{UID: m.UID, Name: name})
 
 		// D-2 · 级联带走该成员拉入的 bot（#1186 / YUJ-49）。
-		// 只对非群主 / 非管理员成员触发；上层 filter 已排除 creator/manager，这里保底再判一次。
-		if m.Role == MemberRoleCreator || m.Role == MemberRoleManager {
+		// #354：manager 被踢时 bot 一并带走，仅 creator 保底豁免（上层 filter 已排除）。
+		if m.Role == MemberRoleCreator {
 			continue
 		}
 		cascadedUIDs, cerr := cascadeRemoveBotsInvitedByUIDTx(s.db, s.ctx, req.GroupNo, m.UID, tx)
@@ -1830,48 +1889,15 @@ func beginAvatarUpdateEvent(ctx *config.Context, db *DB, groupNo string, memberU
 	return eventID, nil
 }
 
-// removeUserFromGroupThreads 移除用户在某群下所有子区的成员记录、IM 订阅和置顶（直接 SQL）
+// removeUserFromGroupThreads 移除用户在某群下所有子区的成员记录、IM 订阅和置顶。
+// 委托给包级 removeUserFromGroupThreadsCleanup（见 thread_cleanup.go，Issue #27）。
 func (s *Service) removeUserFromGroupThreads(groupNo, uid, spaceID string) {
-	type threadInfo struct {
-		ShortID string `db:"short_id"`
-	}
-	var threads []threadInfo
-	_, err := s.ctx.DB().Select("thread.short_id").
-		From("thread").
-		Join("thread_member", "thread.id = thread_member.thread_id").
-		Where("thread.group_no=? AND thread_member.uid=? AND thread.status!=3", groupNo, uid).
-		Load(&threads)
-	if err != nil {
-		s.Error("query user threads failed", zap.Error(err), zap.String("groupNo", groupNo), zap.String("uid", uid))
-		return
-	}
-	if len(threads) == 0 {
-		return
-	}
+	removeUserFromGroupThreadsCleanup(s.ctx, s.Log, groupNo, uid, spaceID)
+}
 
-	// 删除成员记录
-	_, err = s.ctx.DB().DeleteFrom("thread_member").
-		Where("uid=? AND thread_id IN (SELECT id FROM thread WHERE group_no=?)", uid, groupNo).
-		Exec()
-	if err != nil {
-		s.Error("delete thread member failed", zap.Error(err), zap.String("groupNo", groupNo), zap.String("uid", uid))
-		return
-	}
-
-	// 移除 IM 订阅和置顶
-	for _, t := range threads {
-		channelID := groupNo + "____" + t.ShortID
-		if rmErr := s.ctx.IMRemoveSubscriber(&config.SubscriberRemoveReq{
-			ChannelID:   channelID,
-			ChannelType: common.ChannelTypeCommunityTopic.Uint8(),
-			Subscribers: []string{uid},
-		}); rmErr != nil {
-			s.Error("remove thread IM subscriber failed", zap.Error(rmErr), zap.String("channelID", channelID), zap.String("uid", uid))
-		}
-		// 清理用户在该子区的置顶
-		user.RemovePinnedForUserInSpace(uid, spaceID, channelID, common.ChannelTypeCommunityTopic.Uint8())
-		conversation_ext.RemoveConvExtForUserInSpace(uid, spaceID, channelID, common.ChannelTypeCommunityTopic.Uint8())
-	}
+// RemoveUserFromGroupThreads 导出版，供其他模块（botfather）对齐摘除子区订阅，见接口注释。
+func (s *Service) RemoveUserFromGroupThreads(groupNo, uid, spaceID string) {
+	s.removeUserFromGroupThreads(groupNo, uid, spaceID)
 }
 
 // addUsersToGroupThreads 新成员入群时，将其加入该群所有子区的 IM 订阅（直接 SQL）

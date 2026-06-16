@@ -29,6 +29,7 @@ import (
 	spacemod "github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-server/pkg/auth"
+	"github.com/Mininglamp-OSS/octo-server/pkg/avatarversion"
 	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
 	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
 	octoredis "github.com/Mininglamp-OSS/octo-server/pkg/redis"
@@ -388,7 +389,17 @@ func (g *Group) avatarGet(c *wkhttp.Context) {
 		c.Writer.Write(avatarBytes)
 		return
 	}
-	path := g.ctx.GetConfig().GetGroupAvatarFilePath(groupNo)
+	var avatarVersion int64
+	groupInfo, err := g.db.QueryWithGroupNo(groupNo)
+	if err != nil {
+		g.Error("查询群资料错误", zap.String("group_no", groupNo), zap.Error(err))
+		c.Writer.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if groupInfo != nil {
+		avatarVersion = groupInfo.AvatarVersion
+	}
+	path := g.ctx.GetConfig().GetGroupAvatarFilePath(groupNo, avatarVersion)
 	downloadUrl, err := g.fileService.DownloadURL(path, "")
 	if err != nil {
 		g.Error("获取下载路径失败！", zap.Error(err))
@@ -444,7 +455,8 @@ func (g *Group) avatarUpload(c *wkhttp.Context) {
 		return
 	}
 
-	groupAvatarPath := g.ctx.GetConfig().GetGroupAvatarFilePath(groupNo)
+	avatarVersion := avatarversion.New()
+	groupAvatarPath := g.ctx.GetConfig().GetGroupAvatarFilePath(groupNo, avatarVersion)
 	_, err = g.fileService.UploadFile(groupAvatarPath, "image/png", "", func(w io.Writer) error {
 		_, err := io.Copy(w, file)
 		return err
@@ -454,7 +466,7 @@ func (g *Group) avatarUpload(c *wkhttp.Context) {
 		httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
 		return
 	}
-	err = g.db.updateAvatar(groupAvatarPath, groupNo)
+	err = g.db.updateAvatar(groupAvatarPath, avatarVersion, groupNo)
 	if err != nil {
 		g.Error("头像修改失败！", zap.String("group_no", groupNo), zap.Error(err))
 		httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
@@ -471,7 +483,9 @@ func (g *Group) avatarUpload(c *wkhttp.Context) {
 	})
 	if err != nil {
 		g.Error("发送群头像更新命令失败！", zap.String("groupNo", groupNo), zap.Error(err))
-		httperr.ResponseErrorL(c, errcode.ErrGroupNotifyFailed, nil, nil)
+		// The avatar object and DB version are already committed; the IM
+		// notification is best-effort so clients do not retry a successful upload.
+		c.ResponseOK()
 		return
 	}
 	c.ResponseOK()
@@ -2751,7 +2765,7 @@ func (g *Group) groupSettingUpdate(c *wkhttp.Context) {
 					httperr.ResponseErrorL(c, errcode.ErrGroupCreatorOrManagerOnly, nil, nil)
 					return
 				}
-				if errors.Is(err, errSettingInvalidValueType) || errors.Is(err, errSettingAllowExternalRange) {
+				if errors.Is(err, errSettingInvalidValueType) || errors.Is(err, errSettingAllowExternalRange) || errors.Is(err, errSettingAllowNoMentionRange) {
 					respondGroupRequestInvalid(c, key)
 					return
 				}
@@ -2819,8 +2833,9 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 	**/
 	var newGrouper *MemberModel // 新群主
 	if loginMember.Role == MemberRoleCreator {
-		// 查询第二老成员
-		newGrouper, err = g.db.QuerySecondOldestMember(groupNo)
+		// 查询第二老成员。#354：排除退群群主名下的 bot——它们会在下方被级联带走，
+		// 不能被选为新群主（否则新群主在同一事务内即被删除）。
+		newGrouper, err = g.db.QuerySecondOldestMemberExcludingBotsOf(groupNo, loginUID)
 		if err != nil {
 			g.Error("查询第二元老成员失败！", zap.Error(err))
 			httperr.ResponseErrorL(c, errcode.ErrGroupQueryFailed, nil, nil)
@@ -2882,21 +2897,19 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 	}
 
 	// D-2 · 级联带走 inviter 拉入的 bot（YUJ-49 / Mininglamp-OSS/octo-server#1186）。
-	// Edge case: 群主退群时此逻辑不触发（角色转让由上方 newGrouper 兜底；
-	//            若确要销群应走 DismissGroup）——保持 bot 跟随新群主留在群中。
+	// #354 产品决策：bot 永远跟随其主人，无角色例外——群主退群（角色已由上方
+	// newGrouper 完成转让）同样级联带走自己名下的 bot，和普通成员一致。
 	var cascadedBotUsers []*user.Model
-	if loginMember.Role != MemberRoleCreator {
-		cascadedUIDs, cerr := cascadeRemoveBotsInvitedByUIDTx(g.db, g.ctx, groupNo, loginUID, tx)
-		if cerr != nil {
-			tx.Rollback()
-			g.Error("级联移除 bot 成员失败", zap.Error(cerr))
-			httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
-			return
-		}
-		for _, botUID := range cascadedUIDs {
-			botUser, _ := g.userDB.QueryByUID(botUID)
-			cascadedBotUsers = append(cascadedBotUsers, botUser)
-		}
+	cascadedUIDs, cerr := cascadeRemoveBotsInvitedByUIDTx(g.db, g.ctx, groupNo, loginUID, tx)
+	if cerr != nil {
+		tx.Rollback()
+		g.Error("级联移除 bot 成员失败", zap.Error(cerr))
+		httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
+		return
+	}
+	for _, botUID := range cascadedUIDs {
+		botUser, _ := g.userDB.QueryByUID(botUID)
+		cascadedBotUsers = append(cascadedBotUsers, botUser)
 	}
 
 	// 若退群者是外部成员且当前群是外部群，检查是否需要恢复普通群
@@ -3025,50 +3038,11 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 
 }
 
-// removeUserFromGroupThreads 移除用户在某群下所有子区的成员记录、IM 订阅和置顶
+// removeUserFromGroupThreads 移除用户在某群下所有子区的成员记录、IM 订阅和置顶。
+// 委托给包级 removeUserFromGroupThreadsCleanup（见 thread_cleanup.go，Issue #27），
+// 保留方法签名以最小化调用方改动。
 func (g *Group) removeUserFromGroupThreads(groupNo, uid, spaceID string) {
-	// 查询用户在该群加入的所有子区（shortID 用于构建 IM channelID）
-	type threadInfo struct {
-		ShortID string `db:"short_id"`
-	}
-	var threads []threadInfo
-	_, err := g.db.session.Select("thread.short_id").
-		From("thread").
-		Join("thread_member", "thread.id = thread_member.thread_id").
-		Where("thread.group_no=? AND thread_member.uid=? AND thread.status!=3", groupNo, uid).
-		Load(&threads)
-	if err != nil {
-		g.Error("查询用户子区失败", zap.Error(err), zap.String("groupNo", groupNo), zap.String("uid", uid))
-		return
-	}
-	if len(threads) == 0 {
-		return
-	}
-
-	// 删除成员记录
-	_, err = g.db.session.DeleteFrom("thread_member").
-		Where("uid=? AND thread_id IN (SELECT id FROM thread WHERE group_no=?)", uid, groupNo).
-		Exec()
-	if err != nil {
-		g.Error("删除子区成员失败", zap.Error(err), zap.String("groupNo", groupNo), zap.String("uid", uid))
-		return
-	}
-
-	// 移除 IM 订阅和置顶
-	for _, t := range threads {
-		// 子区 channelID 格式: {groupNo}____{shortID} (与 thread.BuildChannelID 一致)
-		channelID := groupNo + "____" + t.ShortID
-		if rmErr := g.ctx.IMRemoveSubscriber(&config.SubscriberRemoveReq{
-			ChannelID:   channelID,
-			ChannelType: common.ChannelTypeCommunityTopic.Uint8(),
-			Subscribers: []string{uid},
-		}); rmErr != nil {
-			g.Error("移除子区IM订阅者失败", zap.Error(rmErr), zap.String("channelID", channelID), zap.String("uid", uid))
-		}
-		// 清理用户在该子区的置顶
-		user.RemovePinnedForUserInSpace(uid, spaceID, channelID, common.ChannelTypeCommunityTopic.Uint8())
-		conversation_ext.RemoveConvExtForUserInSpace(uid, spaceID, channelID, common.ChannelTypeCommunityTopic.Uint8())
-	}
+	removeUserFromGroupThreadsCleanup(g.ctx, g.Log, groupNo, uid, spaceID)
 }
 
 // addUsersToGroupThreads 新成员入群时，将其加入该群所有子区的 IM 订阅（允许发消息）
@@ -3153,6 +3127,16 @@ func (g *Group) blacklist(c *wkhttp.Context) {
 		httperr.ResponseErrorL(c, errcode.ErrGroupManagerOnly, nil, nil)
 		return
 	}
+	// #354 · Bot 跟人走：拉黑/解除拉黑级联到目标用户名下在群的 bot
+	// （robot.creator_uid 命中）。旧行为只动用户本人，其 bot 仍 status=Normal，
+	// 被拉黑用户可经自己的 bot 旁路读群/子区内容，绕过 ExistMemberActive
+	// 加固线（#343/#345）。解除拉黑走同一扩展，对称恢复。
+	targetUIDs, err := expandBlacklistTargetsWithOwnedBots(g.db, groupNo, req.Uids)
+	if err != nil {
+		g.Error("查询拉黑级联 bot 失败", zap.Error(err))
+		httperr.ResponseErrorL(c, errcode.ErrGroupQueryFailed, nil, nil)
+		return
+	}
 	status := 0
 	if action == "add" {
 		status = int(common.GroupMemberStatusBlacklist)
@@ -3166,21 +3150,36 @@ func (g *Group) blacklist(c *wkhttp.Context) {
 		httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
 		return
 	}
-	err = g.db.updateMembersStatus(version, groupNo, status, req.Uids)
+	err = g.db.updateMembersStatus(version, groupNo, status, targetUIDs)
 	if err != nil {
 		g.Error("添加或移除群成员黑名单错误", zap.Error(err))
 		httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
 		return
 	}
 	if status == int(common.GroupMemberStatusBlacklist) {
-		err = g.setGroupBlacklist(groupNo, req.Uids, status == int(common.GroupMemberStatusBlacklist))
+		err = g.setGroupBlacklist(groupNo, targetUIDs, status == int(common.GroupMemberStatusBlacklist))
 		if err != nil {
 			g.Error("添加IM黑名单错误", zap.Error(err))
 			httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
 			return
 		}
+		// YUJ-4185 P0-1：拉黑 add 分支必须主动摘除每个被拉黑 uid 的子区 + 父群 IM 订阅。
+		// 仅靠 setGroupBlacklist(IMBlacklistAdd) 只挡“发送”，不断“接收”——被拉黑者仍
+		// 通过 WuKongIM WS 收子区/父群实时消息（越权读 P0）。子区订阅复用 #27/#332 统一
+		// helper；父群订阅显式 IMRemoveSubscriber。best-effort：失败只记日志、不回滚拉黑。
+		// #354：级联拉黑的 bot 同样摘除订阅（targetUIDs 已含 bot）。
+		for _, uid := range targetUIDs {
+			g.removeUserFromGroupThreads(groupNo, uid, group.SpaceID)
+		}
+		if rmErr := g.ctx.IMRemoveSubscriber(&config.SubscriberRemoveReq{
+			ChannelID:   groupNo,
+			ChannelType: common.ChannelTypeGroup.Uint8(),
+			Subscribers: targetUIDs,
+		}); rmErr != nil {
+			g.Error("拉黑摘除父群IM订阅失败", zap.Error(rmErr), zap.String("groupNo", groupNo))
+		}
 	} else {
-		members, err := g.db.QueryMembersWithUids(req.Uids, groupNo)
+		members, err := g.db.QueryMembersWithUids(targetUIDs, groupNo)
 		if err != nil {
 			g.Error("查询移除黑名单成员错误", zap.Error(err))
 			httperr.ResponseErrorL(c, errcode.ErrGroupQueryFailed, nil, nil)
@@ -3203,6 +3202,18 @@ func (g *Group) blacklist(c *wkhttp.Context) {
 				httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
 				return
 			}
+			// YUJ-4185 P0-1：解除拉黑必须对称恢复订阅（add 分支摘掉了父群+子区订阅）。
+			// updateMembersStatus 已把 status 改回 Normal，此处把这些成员重新挂回父群和
+			// 群内所有非删除子区的 IM 订阅，参考入群 addUsersToGroupThreads。
+			// best-effort：失败只记日志，不回滚解除黑名单。
+			if addErr := g.ctx.IMAddSubscriber(&config.SubscriberAddReq{
+				ChannelID:   groupNo,
+				ChannelType: common.ChannelTypeGroup.Uint8(),
+				Subscribers: removeUIDs,
+			}); addErr != nil {
+				g.Error("解除拉黑恢复父群IM订阅失败", zap.Error(addErr), zap.String("groupNo", groupNo))
+			}
+			g.addUsersToGroupThreads(groupNo, removeUIDs)
 		}
 	}
 	if group.GroupType == int(GroupTypeCommon) {
@@ -3221,7 +3232,7 @@ func (g *Group) blacklist(c *wkhttp.Context) {
 			return
 		}
 	} else {
-		for _, uid := range req.Uids {
+		for _, uid := range targetUIDs {
 			// 发送群成员更新命令
 			err = g.ctx.SendCMD(config.MsgCMDReq{
 				ChannelID:   groupNo,

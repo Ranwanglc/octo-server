@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
@@ -290,6 +291,15 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 		LastMsgSeqs string `json:"last_msg_seqs"` // 客户端所有会话的最后一条消息序列号 格式： channelID:channelType:last_msg_seq|channelID:channelType:last_msg_seq
 		MsgCount    int64  `json:"msg_count"`     // 每个会话消息数量
 		DeviceUUID  string `json:"device_uuid"`   // 设备uuid
+		// RecentFilter 为 true 时，对响应会话列表套用 sidebar recent tab 同款的
+		// 按频道类型活动窗口过滤（system_settings 的 sidebar.recent_filter_*_days，
+		// 0=该类型不过滤）。issue #294：Web「最近」tab 走本端点而非 /v1/sidebar/sync，
+		// 需要显式 opt-in 才能让管理员配置的过滤窗口生效。
+		//
+		// 默认 false —— 移动端/桌面端的离线全量同步行为完全不变（PR #291 明确把本
+		// 端点列为 "intentionally untouched"），避免安静群/子区从通用会话同步中消失。
+		// 过滤只作用于响应 list，cursor 推进与 per-Space 未读仍基于过滤前的原始会话。
+		RecentFilter bool `json:"recent_filter"`
 	}
 	if err := c.BindJSON(&req); err != nil {
 		co.Error("数据格式有误！", zap.Error(err))
@@ -456,6 +466,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	groupMap := map[string]*group.GroupResp{}                   // 群详情
 	conversationExtraMap := map[string]*conversationExtraResp{} // 最近会话扩展
 	groupVailds := make([]string, 0, len(conversations))        // 有效群
+	groupActives := make([]string, 0, len(conversations))       // 活跃群（排除黑名单）
 	activeThreadShortIDs := make(map[string]struct{})           // 有效子区
 
 	// ---------- 是否在群内 ----------
@@ -463,6 +474,15 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 		groupVailds, err = co.groupService.ExistMembers(groupNos, loginUID)
 		if err != nil {
 			co.Error("查询有效群失败！", zap.Error(err))
+			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
+			return
+		}
+		// CR 整改：子区(CommunityTopic)父群成员校验必须排除黑名单，否则被拉黑
+		// (status=Blacklist、is_deleted=0) 用户仍能在会话列表看到子区并据此拉历史
+		// （越权读）。GROUP 分支沿用 groupVailds 保持既有语义不变。
+		groupActives, err = co.groupService.ExistMembersActive(groupNos, loginUID)
+		if err != nil {
+			co.Error("查询活跃群失败！", zap.Error(err))
 			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 			return
 		}
@@ -509,7 +529,7 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 	// ---------- 用户设置 ----------
 	users := make([]*user.UserDetailResp, 0)
 	if len(uids) > 0 {
-		users, err = co.userService.GetUserDetails(uids, c.GetLoginUID())
+		users, err = co.userService.GetUserDetails(c.Request.Context(), uids, c.GetLoginUID())
 		if err != nil {
 			co.Error("查询用户信息失败！", zap.Error(err))
 			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
@@ -631,26 +651,47 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 
 	syncUserConversationResps := make([]*SyncUserConversationResp, 0, len(conversations))
 	userKey := loginUID
+	// YUJ-4185 P0-3：把 groupVailds（ExistMembers 返回的“当前仍是成员”的群集合）
+	// 转成 set，既给 GROUP 分支 O(1) 校验，也给子区分支补“父群成员”校验用。
+	// groupNos 构造时已把每个子区的 parent groupNo 一并加入（见上文 addGroupNo），
+	// 所以 ExistMembers 的结果天然覆盖父群。
+	groupVaildSet := make(map[string]struct{}, len(groupVailds))
+	for _, gv := range groupVailds {
+		groupVaildSet[gv] = struct{}{}
+	}
+	// CR 整改：子区父群成员校验走 active-only 集合（排除黑名单）。
+	groupActiveSet := make(map[string]struct{}, len(groupActives))
+	for _, ga := range groupActives {
+		groupActiveSet[ga] = struct{}{}
+	}
 	if len(conversations) > 0 {
 		for _, conversation := range conversations {
 
 			if conversation.ChannelType == common.ChannelTypeGroup.Uint8() {
-				vaild := false
-				for _, groupVaild := range groupVailds {
-					if groupVaild == conversation.ChannelID {
-						vaild = true
-						break
-					}
-				}
-				if !vaild { // 无效群则跳过
+				if _, vaild := groupVaildSet[conversation.ChannelID]; !vaild { // 无效群则跳过
 					continue
 				}
 			}
 
-			if conversation.ChannelType == common.ChannelTypeCommunityTopic.Uint8() && threadFilterEnabled {
-				if shortID, ok := threadChannelShortIDMap[conversation.ChannelID]; ok {
-					if _, active := activeThreadShortIDs[shortID]; !active {
-						continue
+			if conversation.ChannelType == common.ChannelTypeCommunityTopic.Uint8() {
+				// YUJ-4185 P0-3：子区可见性必须校验调用者仍是父群成员（fail-closed）。
+				// 之前只按 activeThreadShortIDs 过滤“子区是否存活”，不校验成员身份，
+				// 被移除者的会话列表仍能看到子区并据此拉历史（越权读 P0）。
+				// parent groupNo 在 groupNos 里，ExistMembersActive 已覆盖；解析失败也 skip。
+				// CR 整改：用 groupActiveSet（排除黑名单）而非 groupVaildSet，否则被拉黑
+				// 用户仍能透出子区。
+				parentNo, _, perr := thread.ParseChannelID(conversation.ChannelID)
+				if perr != nil {
+					continue
+				}
+				if _, member := groupActiveSet[parentNo]; !member {
+					continue
+				}
+				if threadFilterEnabled {
+					if shortID, ok := threadChannelShortIDMap[conversation.ChannelID]; ok {
+						if _, active := activeThreadShortIDs[shortID]; !active {
+							continue
+						}
 					}
 				}
 			}
@@ -723,6 +764,27 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 		co.syncConversationVersionMap[userKey] = lastVersion
 	}
 	co.syncConversationResultCacheLock.Unlock()
+
+	// ---------- recent 活动窗口过滤（opt-in，issue #294） ----------
+	// Web「最近」tab 走本端点（非 /v1/sidebar/sync），需要这里复用 sidebar recent
+	// tab 同款的按频道类型活动窗口过滤，管理员配置的 sidebar.recent_filter_*_days
+	// 才能对它生效。仅在客户端显式 RecentFilter=true 时启用 —— 默认关闭，移动端/
+	// 桌面端的离线全量同步行为完全不变。
+	//
+	// 顺序约束：必须在 cursor 推进（lastVersion，基于 raw conversations）之后，
+	// 因为被过滤掉的会话可能正好是本批最高 version 的那条；用过滤后列表推 cursor
+	// 会让客户端反复拉同一批（与 PR-B #1377 / sidebar B1 同一类死循环）。
+	// per-Space 未读仍基于 raw conversations（见下方 fillPersonSpaceUnread），不受影响。
+	//
+	// 系统 Bot 可见性：person 窗口默认 0（不过滤 DM），系统 Bot 默认安全。当
+	// 请求带 space_id 时，EnsureSystemBotsPresent 在 Space 过滤块里、本步之后兜底
+	// 补齐，即便管理员开了 person 窗口也不会丢失系统 Bot —— Web「最近」tab 正是带
+	// space_id 调用，故实际使用安全。仅「不带 space_id + recent_filter=true +
+	// person 窗口>0」这一非常规组合下，安静的系统 Bot DM 可能被本步过滤掉。
+	if req.RecentFilter {
+		cutoffs := loadRecentCutoffs(co.ctx, time.Now())
+		syncUserConversationResps = filterRecentConversations(syncUserConversationResps, cutoffs)
+	}
 
 	// ---------- 子区 source_message_id ----------
 	co.fillThreadMeta(syncUserConversationResps)
@@ -848,6 +910,25 @@ func (co *Conversation) syncUserConversation(c *wkhttp.Context) {
 		ChannelStates:    channelStates,
 		SpaceMemberships: spaceMemberships,
 	})
+}
+
+// filterRecentConversations drops conversations whose per-channel-type activity
+// window has elapsed, mirroring the sidebar recent tab (buildRecentItems): a
+// conversation is hidden iff its type's cutoff is non-zero AND its Timestamp is
+// at or before that cutoff. A cutoff of 0 means "no filter" for that type, and
+// unknown channel types are kept unconditionally (recentCutoffs.cutoffFor).
+//
+// Returns a new slice — the input is not mutated, so the caller's raw-based
+// cursor/unread computations stay intact (issue #294).
+func filterRecentConversations(resps []*SyncUserConversationResp, cutoffs recentCutoffs) []*SyncUserConversationResp {
+	filtered := make([]*SyncUserConversationResp, 0, len(resps))
+	for _, r := range resps {
+		if cutoff := cutoffs.cutoffFor(r.ChannelType); cutoff != 0 && r.Timestamp <= cutoff {
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+	return filtered
 }
 
 func (co *Conversation) channelMessageSeqJoin(channelID string, channelType uint8, lastMessageSeq uint32) string {

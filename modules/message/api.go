@@ -33,6 +33,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
 	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
 	"github.com/Mininglamp-OSS/octo-server/pkg/mentionrewrite"
+	"github.com/Mininglamp-OSS/octo-server/pkg/richtext"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 	"github.com/gocraft/dbr/v2"
@@ -441,9 +442,43 @@ func (m *Message) sendMsg(c *wkhttp.Context) {
 			return
 		}
 	}
+	if req.ReceiveChannelType == common.ChannelTypeCommunityTopic.Uint8() {
+		// YUJ-4185 P1-3：代发到子区(CommunityTopic)必须校验 sender 仍是父群成员
+		// （fail-closed）。子区无独立成员表，权威成员身份在父群，参考 authorizeMutualDelete
+		// 的子区分支。原本缺这条分支 → 被移除者仍可经 /v1/message/send 往子区代发消息。
+		// CR 整改：用 ExistMemberActive（status=Normal 白名单）而非 ExistMember，
+		// 否则被拉黑（status=Blacklist、is_deleted=0）用户仍能过门往子区代发。
+		parentGroupNo, _, perr := thread.ParseChannelID(req.ReceiveChannelID)
+		if perr != nil || parentGroupNo == "" {
+			m.Error("解析子区频道ID失败", zap.Error(perr), zap.String("channelID", req.ReceiveChannelID))
+			httperr.ResponseErrorL(c, errcode.ErrMessageNotGroupMember, nil, nil)
+			return
+		}
+		isExist, err := m.groupService.ExistMemberActive(parentGroupNo, uid)
+		if err != nil {
+			m.Error("查询发送者是否在父群内错误", zap.Error(err))
+			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
+			return
+		}
+		if !isExist {
+			httperr.ResponseErrorL(c, errcode.ErrMessageNotGroupMember, nil, nil)
+			return
+		}
+	}
 	// YUJ-644 / Mininglamp-OSS#33: 把 SpaceMiddleware 已校验的发送方 SpaceID 透传给
 	// sendMessage，作为 PERSONAL DM 的权威 space_id 注入源（不信客户端 body）。
 	senderSpaceID := spacepkg.GetSpaceID(c)
+	// PR#232 review (Jerry-Xin Critical#1): 主用户入口对 RichText(=14) 补 write-strict
+	// 强校验，与 robot 路径（modules/robot/api.go payloadIsVail→ValidateRichTextPayload）
+	// 对称。拒 缺/空 content、空 text 块、data: 图片 URL、缺图片宽高、未知 block type，
+	// 大小上限作用在原始完整 payload 字节。脏 payload 在派发前以 400 拒绝，不进 IM。
+	// EnsurePlain（plain 权威生成 + enrich 后真实出站 payload 的 1MB 复检）在
+	// sendMessage 内、所有 server 端 enrich 之后由 richtext.Finalize 完成。
+	if err := richtext.Validate(req.Payload); err != nil {
+		m.Error("RichText payload 校验失败", zap.Error(err), zap.String("channelID", req.ReceiveChannelID), zap.String("fromUID", uid))
+		respondMessageRequestInvalid(c, "payload")
+		return
+	}
 	err = m.sendMessage(req.ReceiveChannelID, req.ReceiveChannelType, uid, req.Payload, senderSpaceID)
 	if err != nil {
 		m.Error("发送消息失败", zap.Error(err))
@@ -486,6 +521,20 @@ func (m *Message) sendMessage(channelID string, channelType uint8, fromUID strin
 	// 直接覆盖客户端 payload.space_id，跨 Space 推送时收端 SpaceFilter 拿到权威值
 	// 立刻丢弃，不再依赖 channelInfo 缓存命中。
 	payload = m.enrichPayloadWithSpaceID(channelID, channelType, payload, senderSpaceID)
+	// 图文混排 RichText(=14)：派发出口用 content 重算权威顶层 plain，覆盖客户端
+	// 不可信的 plain（契约 §2）。这一步是下游 summary / matter / search / 复制 /
+	// 推送 全部依赖的前置——server 必须在消息落库 / 进 IM 搜索索引前把权威 plain
+	// 写进 payload 字节。非 type=14 的 payload 此 helper 为 no-op，老消息路径不变。
+	//
+	// ⚠️ PR#232 review (Jerry-Xin Critical#2)：Finalize 必须排在 *所有* server 端
+	// enrich（sanitize / RewriteMention / enrichPayloadWithSpaceID）之后，且其 1MB
+	// 复检作用在真实最终 payload 上——server 注入 space_id 等顶层字段会把 payload
+	// 撑大，若在 enrich 前复检会放过「enrich 后超限」的 payload。入站 write-strict
+	// 校验已在 sendMsg handler 用 richtext.Validate 完成（与 robot 路径对称）。
+	if err := richtext.Finalize(payload); err != nil {
+		m.Error("RichText payload plain 生成/复检失败", zap.Error(err), zap.String("channelID", channelID), zap.String("fromUID", fromUID))
+		return err
+	}
 	// Mininglamp-OSS/octo-server#144 + PR#145 review follow-up:
 	// second-pass mention chokepoint. When mention.ais=1 in a GROUP
 	// channel, expand mention.uids to include every bot member of the
@@ -716,6 +765,19 @@ func (m *Message) messageEdit(c *wkhttp.Context) {
 		httperr.ResponseErrorL(c, errcode.ErrMessageIDSeqMismatch, nil, nil)
 		return
 	}
+
+	// 图文混排 RichText(=14)：编辑写入口对 content_edit 做与 send 路径对称的
+	// write-strict 校验 + 权威 plain 重算（契约 §2，plain 服务端重算不信客户端）。
+	// 编辑语义为整体替换 content blocks；canonical JSON 落库后即下游 summary /
+	// search / 复制 的权威来源。非 14 / 非 JSON 体为 no-op，老编辑路径不变。脏/超限
+	// payload 在落库前以 400 拒绝。MD5 去重 hash 落在 normalize 后的 canonical 体上。
+	normalizedEdit, err := richtext.NormalizeContentEdit(req.ContentEdit)
+	if err != nil {
+		m.Error("RichText content_edit 校验失败", zap.Error(err), zap.String("channelID", req.ChannelID), zap.String("messageID", req.MessageID))
+		respondMessageRequestInvalid(c, "content_edit")
+		return
+	}
+	req.ContentEdit = normalizedEdit
 
 	contentEdit := dbr.NewNullString(req.ContentEdit).String
 	contentMD5 := util.MD5(contentEdit)
@@ -1120,6 +1182,39 @@ func (m *Message) syncChannelMessage(c *wkhttp.Context) {
 		exist, err := m.groupService.ExistMember(req.ChannelID, c.GetLoginUID())
 		if err != nil {
 			m.Error("查询是否在群内存在失败！", zap.Error(err))
+			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
+			return
+		}
+		if !exist {
+			c.JSON(http.StatusOK, &syncChannelMessageResp{
+				StartMessageSeq: req.EndMessageSeq,
+				EndMessageSeq:   req.EndMessageSeq,
+				PullMode:        req.PullMode,
+				Messages:        make([]*MsgSyncResp, 0),
+			})
+			return
+		}
+	}
+	// YUJ-4185 P1-4：子区(CommunityTopic)历史读取必须校验调用者仍是父群成员
+	// （fail-closed）。原本只有 GROUP 分支做 ExistMember，子区无校验 →
+	// 被移除者仍可经 /v1/message/channel/sync 拉子区历史（越权读）。
+	// CR 整改：用 ExistMemberActive（status=Normal 白名单）而非 ExistMember，
+	// 否则被拉黑（status=Blacklist、is_deleted=0）用户仍能过门拉子区历史正文。
+	if req.ChannelType == common.ChannelTypeCommunityTopic.Uint8() {
+		parentGroupNo, _, perr := thread.ParseChannelID(req.ChannelID)
+		if perr != nil || parentGroupNo == "" {
+			m.Error("解析子区频道ID失败", zap.Error(perr), zap.String("channelID", req.ChannelID))
+			c.JSON(http.StatusOK, &syncChannelMessageResp{
+				StartMessageSeq: req.EndMessageSeq,
+				EndMessageSeq:   req.EndMessageSeq,
+				PullMode:        req.PullMode,
+				Messages:        make([]*MsgSyncResp, 0),
+			})
+			return
+		}
+		exist, err := m.groupService.ExistMemberActive(parentGroupNo, c.GetLoginUID())
+		if err != nil {
+			m.Error("查询是否在父群内存在失败！", zap.Error(err))
 			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
 			return
 		}
@@ -1786,7 +1881,7 @@ func (m *Message) mutualDelete(c *wkhttp.Context) {
 			httperr.ResponseErrorL(c, errcode.ErrMessageDeleteForbidden, nil, nil)
 			return
 		}
-		isParentGroupMember, err = m.groupService.ExistMember(parentGroupNo, loginUID)
+		isParentGroupMember, err = m.groupService.ExistMemberActive(parentGroupNo, loginUID)
 		if err != nil {
 			m.Error("查询父群成员关系失败", zap.Error(err))
 			httperr.ResponseErrorL(c, errcode.ErrMessageQueryFailed, nil, nil)
@@ -2111,29 +2206,63 @@ func (m *Message) hasRevokePermission(messageM *messageModel, loginUID string) (
 			return true, nil
 		}
 	}
-	if messageM.ChannelType == common.ChannelTypeGroup.Uint8() { // 管理者或创建者可以撤回其他成员的消息
-		loginMember, err := m.groupService.GetMember(messageM.ChannelID, loginUID)
-		if err != nil {
-			return false, err
-		}
-		if loginMember == nil {
+	switch messageM.ChannelType {
+	case common.ChannelTypeGroup.Uint8(): // 管理者或创建者可以撤回其他成员的消息
+		return m.groupRoleRevokeAllowed(messageM.ChannelID, messageM.FromUID, loginUID)
+	case common.ChannelTypeCommunityTopic.Uint8():
+		// issue #222: 子区沿用群聊撤回权限，权限判断基于父群角色（与 authorizeMutualDelete
+		// 的子区逻辑对齐）；忽略子区创建人概念，不给创建人额外特权。
+		parentGroupNo, _, perr := thread.ParseChannelID(messageM.ChannelID)
+		if perr != nil {
+			// fail-closed：无法解析出父群即视为无权限（与 delete2 解析失败的处理一致）。
+			m.Warn("解析子区频道ID失败，拒绝撤回",
+				zap.Error(perr), zap.String("channelID", messageM.ChannelID))
 			return false, nil
 		}
-		fromMember, err := m.groupService.GetMember(messageM.ChannelID, messageM.FromUID)
-		if err != nil {
-			return false, err
-		}
-		if fromMember == nil {
-			// 消息发送者已不在群：管理员/创建者可撤回，普通成员不可
-			return loginMember.Role != int(common.GroupMemberRoleNormal), nil
-		}
-		if fromMember.Role == int(common.GroupMemberRoleCreater) || loginMember.Role == int(common.GroupMemberRoleNormal) {
-			return false, nil
-		}
-		if loginMember.Role == int(common.GroupMemberRoleCreater) || (loginMember.Role == int(common.GroupMemberRoleManager) && fromMember.Role == int(common.GroupMemberRoleNormal)) {
-			return true, nil
-		}
+		return m.groupRoleRevokeAllowed(parentGroupNo, messageM.FromUID, loginUID)
+	}
 
+	return false, nil
+}
+
+// groupRoleRevokeAllowed 按群聊撤回权限矩阵判定 loginUID 是否可撤回 fromUID 在
+// groupNo 群内发的消息。子区（CommunityTopic）传入解析出的父群 groupNo 即可复用同一矩阵。
+//   - 群主：可撤回任何人的消息
+//   - 管理员：仅可撤回普通成员的消息，不能撤回其他管理员或群主
+//   - 普通成员：不能撤回他人（撤回自己的消息已在上层短路）
+//
+// 注意：自己发的消息、bot-owner 等短路分支由调用方 hasRevokePermission 在进入此方法前处理。
+func (m *Message) groupRoleRevokeAllowed(groupNo, fromUID, loginUID string) (bool, error) {
+	loginMember, err := m.groupService.GetMember(groupNo, loginUID)
+	if err != nil {
+		return false, err
+	}
+	if loginMember == nil {
+		return false, nil
+	}
+	// Fail-safe：黑名单 / 已退出但 is_deleted=0 的成员（脏数据或软删除残留）即使
+	// role 仍是 manager/creator，也不视为有效管理者；否则被踢出的管理员仍能撤回
+	// 任意 webhook 消息（FromUID = "iwh_..."，走 fromMember==nil 分支）或普通成员
+	// 消息。PR Mininglamp-OSS/octo-server#31 round-4 (Jerry-Xin)。
+	// 与 modules/group/db.go:QueryIsGroupManagerOrCreator 的 status=Normal 过滤
+	// 配对——前者守住管理 API 入口，后者守住消息撤回入口。群聊与子区共用此函数，
+	// 故两条撤回路径均受保护。
+	if loginMember.Status != int(common.GroupMemberStatusNormal) {
+		return false, nil
+	}
+	fromMember, err := m.groupService.GetMember(groupNo, fromUID)
+	if err != nil {
+		return false, err
+	}
+	if fromMember == nil {
+		// 消息发送者已不在群：管理员/创建者可撤回，普通成员不可
+		return loginMember.Role != int(common.GroupMemberRoleNormal), nil
+	}
+	if fromMember.Role == int(common.GroupMemberRoleCreater) || loginMember.Role == int(common.GroupMemberRoleNormal) {
+		return false, nil
+	}
+	if loginMember.Role == int(common.GroupMemberRoleCreater) || (loginMember.Role == int(common.GroupMemberRoleManager) && fromMember.Role == int(common.GroupMemberRoleNormal)) {
+		return true, nil
 	}
 
 	return false, nil
@@ -2215,6 +2344,12 @@ func (m *Message) cancelMentionReminderIfNeed(message *messageModel) {
 }
 
 // 撤回消息
+//
+// 图文混排 RichText(=14) 说明：revoke 路径无需 14 特判 / 不补 plain。撤回只在
+// message_extra 上置 Revoke=1 + Revoker + Version（见下方 updateTx / insertTx 分支），
+// 从不读写消息 Payload 或 content_edit，因此既不会破坏既有 plain，也没有需要重算的
+// content。权威 plain 的生成只发生在写入/编辑 content 的入口（send / robot send /
+// 四个 message edit 入口），撤回不属于其中之一。
 func (m *Message) revoke(c *wkhttp.Context) {
 	loginUID := c.MustGet("uid").(string)
 	messageID := c.Query("message_id")

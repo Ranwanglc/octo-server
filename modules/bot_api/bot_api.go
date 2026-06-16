@@ -214,8 +214,10 @@ func (ba *BotAPI) Route(r *wkhttp.WKHttp) {
 		botAPI.POST("/heartbeat", ba.heartbeat)
 		botAPI.POST("/messages/sync", ba.syncMessages)
 		botAPI.GET("/groups", ba.getGroups)
+		botAPI.GET("/resolve/targets", ba.botResolveTargets)
 		botAPI.GET("/groups/:group_no", ba.getGroupInfo)
 		botAPI.GET("/groups/:group_no/members", ba.getGroupMembers)
+		botAPI.GET("/groups/:group_no/mention_pref", ba.getMentionPref) // 群级免@偏好读（octo-server#237）
 		botAPI.GET("/groups/:group_no/md", ba.getGroupMd)
 		botAPI.PUT("/groups/:group_no/md", ba.updateGroupMd)
 		botAPI.GET("/space/members", ba.botSpaceMembers)
@@ -268,6 +270,10 @@ func (ba *BotAPI) Route(r *wkhttp.WKHttp) {
 	// User-token endpoints under /v1/obo. Implementation in obo_api.go;
 	// the call is split out so this Route function doesn't grow further.
 	ba.registerOBORoutes(r)
+
+	// 群入站 Webhook 管理（bot token 面），与用户路由共用 incomingwebhook 实例与
+	// 权限矩阵（管理员 bot 同权人类管理员）。实现在 incoming_webhook.go。
+	ba.registerIncomingWebhookRoutes(r)
 }
 
 // ==================== Helper Functions ====================

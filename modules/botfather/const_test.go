@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-server/modules/botfather/cmdmenu"
 	"github.com/Mininglamp-OSS/octo-server/pkg/botutil"
 	"github.com/stretchr/testify/assert"
 )
@@ -106,9 +107,9 @@ func TestGenerateBotToken_Uniqueness(t *testing.T) {
 
 func TestRandomHex(t *testing.T) {
 	tests := []struct {
-		name     string
-		n        int
-		wantLen  int
+		name    string
+		n       int
+		wantLen int
 	}{
 		{"1 byte", 1, 2},
 		{"4 bytes", 4, 8},
@@ -139,22 +140,16 @@ func TestGenerateSkillMD(t *testing.T) {
 
 	md := generateSkillMD(apiURL, wsURL)
 
-	// 应包含关键内容
+	// /v1/bot/skill.md is kept as a compatibility pointer only; the
+	// canonical Bot API skill lives in openclaw-channel-octo.
 	assert.Contains(t, md, "octo")
 	assert.Contains(t, md, apiURL)
-	assert.Contains(t, md, wsURL)
-	assert.Contains(t, md, "/v1/bot/register")
-	assert.Contains(t, md, "/v1/bot/sendMessage")
-	assert.Contains(t, md, "/v1/bot/events")
-	assert.Contains(t, md, "/v1/bot/heartbeat")
-	assert.Contains(t, md, "/v1/bot/typing")
-	assert.Contains(t, md, "Authorization: Bearer")
-
-	// Thread/子区相关文档必须存在
-	assert.Contains(t, md, "channel_type = 5", "skill.md must document thread channel_type")
-	assert.Contains(t, md, "group_no}____{short_id}", "skill.md must document thread channel_id format")
-	assert.Contains(t, md, "Do NOT split the channel_id", "skill.md must warn against splitting thread channel_id")
-	assert.Contains(t, md, "5 = Thread", "Reference section must list channel_type 5")
+	assert.Contains(t, md, "deprecated")
+	assert.Contains(t, md, "create-openclaw-octo install")
+	assert.Contains(t, md, "openclaw-channel-octo/blob/main/skills/octo-bot-api/SKILL.md")
+	assert.NotContains(t, md, "/v1/bot/file/upload")
+	assert.NotContains(t, md, "Upload a file (multipart/form-data, max 100MB)")
+	assert.NotContains(t, md, "channel_type = 5")
 }
 
 func TestDeriveWSURL(t *testing.T) {
@@ -257,6 +252,25 @@ func TestGenerateBotID(t *testing.T) {
 	assert.NotEqual(t, id1, id2)
 }
 
+// TestGenerateBotID_AlwaysLowercase asserts the lowercase invariant on every
+// generated bot ID. util.Ten2Hex is Base62 (charset 0-9 + a-z + A-Z); its
+// uppercase half hits ~50% of timestamp chars, so 200 samples gives near-
+// certainty if the strings.ToLower wrapper in generateBotID() is ever removed.
+//
+// Background: octo-server#302 / openclaw-channel-octo#33 — mixed-case IDs
+// silently mismatch against OpenClaw's lowercase normalize layer.
+func TestGenerateBotID_AlwaysLowercase(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		id := generateBotID()
+		if id != strings.ToLower(id) {
+			t.Fatalf("generateBotID() returned mixed-case ID: %q (iter %d)", id, i)
+		}
+		if !strings.HasSuffix(id, BotUsernameSuffix) {
+			t.Fatalf("generateBotID() missing suffix %q: %q", BotUsernameSuffix, id)
+		}
+	}
+}
+
 func TestBotNameValidation(t *testing.T) {
 	// Pure string-length validation logic — no DB / Redis / IM dependencies.
 	// 模拟 onBotNameInput 中的验证逻辑
@@ -305,6 +319,24 @@ func TestAllCommandsStartWithSlash(t *testing.T) {
 		assert.True(t, strings.HasPrefix(cmd, "/"), "command %q should start with /", cmd)
 		assert.Greater(t, len(cmd), 1, "command should not be just /")
 	}
+}
+
+// TestCmdMenuMatchesCommandConstants pins the cmdmenu leaf package (which
+// cannot import this package and so carries its own command literals) to the
+// Cmd* constants: same commands, same pre-migration menu order (#335).
+func TestCmdMenuMatchesCommandConstants(t *testing.T) {
+	want := []string{
+		CmdInstall, CmdQuickstart, CmdNewBot, CmdMyBots,
+		CmdConnect, CmdDisconnect, CmdSetName, CmdSetDescription,
+		CmdDeleteBot, CmdToken, CmdRevoke, CmdApprove,
+		CmdReject, CmdPending, CmdHelp, CmdCancel,
+	}
+	menu := cmdmenu.Commands("zh-CN")
+	got := make([]string, 0, len(menu))
+	for _, entry := range menu {
+		got = append(got, entry.Command)
+	}
+	assert.Equal(t, want, got)
 }
 
 func TestStateTTL_Reasonable(t *testing.T) {

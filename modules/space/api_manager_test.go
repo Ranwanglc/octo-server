@@ -19,12 +19,25 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// adminToken 在 token 缓存中注入一个带 admin 角色的 token，供管理接口测试使用。
+// adminToken 在 token 缓存中注入一个带 admin 角色的 token，供只读 / 低风险管理
+// 接口测试使用。高危/不可逆操作（强制解散、封禁、移除成员、改角色）已收敛到
+// superAdmin，对应测试请用 superAdminToken。
 func adminToken(t *testing.T) string {
 	t.Helper()
 	token := "space-mgr-admin-token"
 	cfg := testCtx.GetConfig()
 	err := testCtx.Cache().Set(cfg.Cache.TokenCachePrefix+token, testutil.UID+"@admin@"+string(wkhttp.Admin))
+	assert.NoError(t, err)
+	return token
+}
+
+// superAdminToken 注入一个带 superAdmin 角色的 token，供仅限超级管理员的高危
+// 管理接口测试使用。
+func superAdminToken(t *testing.T) string {
+	t.Helper()
+	token := "space-mgr-superadmin-token"
+	cfg := testCtx.GetConfig()
+	err := testCtx.Cache().Set(cfg.Cache.TokenCachePrefix+token, testutil.UID+"@superadmin@"+string(wkhttp.SuperAdmin))
 	assert.NoError(t, err)
 	return token
 }
@@ -172,7 +185,7 @@ func TestManager_SpaceDetail(t *testing.T) {
 func TestManager_ForceDisband(t *testing.T) {
 	s, _, err := setup(t)
 	assert.NoError(t, err)
-	token := adminToken(t)
+	token := superAdminToken(t)
 
 	seedSpace(t, "mgr-force", "about to die", "u-owner", 1)
 	err = testSpaceDB.insertMemberNoTx(&MemberModel{
@@ -324,7 +337,7 @@ func TestManager_Members_KeywordSearch(t *testing.T) {
 func TestManager_LiftBan(t *testing.T) {
 	s, _, err := setup(t)
 	assert.NoError(t, err)
-	token := adminToken(t)
+	token := superAdminToken(t)
 
 	seedSpace(t, "mgr-ban-target", "to be banned", "u-owner", SpaceStatusNormal)
 
@@ -390,7 +403,7 @@ func TestManager_AddMembers(t *testing.T) {
 	assert.Equal(t, 3, count) // owner + 2 new
 
 	t.Run("reactivate removed member", func(t *testing.T) {
-		err := testSpaceDB.removeMember("mgr-addmem", "new-u-1")
+		err := testSpaceDB.removeMemberLocked("mgr-addmem", "new-u-1", 2)
 		assert.NoError(t, err)
 
 		body2 := util.ToJson(map[string]interface{}{"uids": []string{"new-u-1"}})
@@ -426,7 +439,7 @@ func TestManager_AddMembers(t *testing.T) {
 func TestManager_RemoveMembers(t *testing.T) {
 	s, _, err := setup(t)
 	assert.NoError(t, err)
-	token := adminToken(t)
+	token := superAdminToken(t)
 
 	seedSpace(t, "mgr-rm", "remove members", "u-owner", SpaceStatusNormal)
 	for _, uid := range []string{"rm-1", "rm-2", "rm-3"} {
@@ -458,7 +471,7 @@ func TestManager_RemoveMembers(t *testing.T) {
 		req.Header.Set("token", token)
 		s.GetRoute().ServeHTTP(w, req)
 		assert.NotEqual(t, http.StatusOK, w.Code)
-		assert.Contains(t, w.Body.String(), "拥有者")
+		assertSpaceErrorCode(t, w, "err.server.space.owner_constraint")
 		owner, err := testSpaceDB.queryMember("mgr-rm", "u-owner")
 		assert.NoError(t, err)
 		assert.NotNil(t, owner, "owner must remain active")
@@ -468,7 +481,7 @@ func TestManager_RemoveMembers(t *testing.T) {
 func TestManager_UpdateMemberRole(t *testing.T) {
 	s, _, err := setup(t)
 	assert.NoError(t, err)
-	token := adminToken(t)
+	token := superAdminToken(t)
 
 	seedSpace(t, "mgr-role", "role ops", "u-owner", SpaceStatusNormal)
 	err = testSpaceDB.insertMemberNoTx(&MemberModel{
@@ -492,8 +505,7 @@ func TestManager_UpdateMemberRole(t *testing.T) {
 	t.Run("reject demoting owner directly", func(t *testing.T) {
 		// 此前已通过子测试 "promote to admin" 把 m-target 提到 admin
 		// 先把 m-target 提成 owner 来构造"降级 owner"场景
-		err := testSpaceDB.updateMemberRole("mgr-role", "m-target", 2)
-		assert.NoError(t, err)
+		setMemberRoleRaw(t, "mgr-role", "m-target", 2)
 
 		body := util.ToJson(map[string]interface{}{"role": 0})
 		w := httptest.NewRecorder()
@@ -501,17 +513,15 @@ func TestManager_UpdateMemberRole(t *testing.T) {
 		req.Header.Set("token", token)
 		s.GetRoute().ServeHTTP(w, req)
 		assert.NotEqual(t, http.StatusOK, w.Code)
-		assert.Contains(t, w.Body.String(), "拥有者")
+		assertSpaceErrorCode(t, w, "err.server.space.owner_constraint")
 
 		mem, err := testSpaceDB.queryMember("mgr-role", "m-target")
 		assert.NoError(t, err)
 		assert.Equal(t, 2, mem.Role, "owner role must not be dropped")
 
 		// 恢复：把 owner 转回 u-owner 以免影响后续子测试
-		err = testSpaceDB.updateMemberRole("mgr-role", "m-target", 1)
-		assert.NoError(t, err)
-		err = testSpaceDB.updateMemberRole("mgr-role", "u-owner", 2)
-		assert.NoError(t, err)
+		setMemberRoleRaw(t, "mgr-role", "m-target", 1)
+		setMemberRoleRaw(t, "mgr-role", "u-owner", 2)
 	})
 
 	t.Run("transfer ownership demotes previous owner", func(t *testing.T) {
@@ -1002,8 +1012,41 @@ func TestManager_AuthBoundary(t *testing.T) {
 		req.Header.Set("token", testutil.Token)
 		s.GetRoute().ServeHTTP(w, req)
 		assert.NotEqual(t, http.StatusOK, w.Code)
-		assert.Contains(t, w.Body.String(), "角色")
+		assertSpaceErrorCode(t, w, "err.shared.auth.forbidden")
 	})
+}
+
+// TestManager_DestructiveOpsRequireSuperAdmin 固化 issue #363 item 2 的边界：
+// 强制解散 / 封禁 / 移除成员 / 改成员角色这些跨空间高危操作只放行 superAdmin，
+// 普通 admin（只读运营位）一律 403。superAdmin 放行路径由各操作的成功用例覆盖。
+func TestManager_DestructiveOpsRequireSuperAdmin(t *testing.T) {
+	s, _, err := setup(t)
+	assert.NoError(t, err)
+	token := adminToken(t) // 仅 admin，非 superAdmin
+
+	seedSpace(t, "mgr-su-guard", "guard", "u-owner", SpaceStatusNormal)
+
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{"forceDisband", "DELETE", "/v1/manager/spaces/mgr-su-guard", ""},
+		{"ban", "PUT", "/v1/manager/spaces/mgr-su-guard/status/2", ""},
+		{"removeMembers", "DELETE", "/v1/manager/spaces/mgr-su-guard/members", `{"uids":["u-owner"]}`},
+		{"updateMemberRole", "PUT", "/v1/manager/spaces/mgr-su-guard/members/u-owner/role", `{"role":1}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			req, _ := http.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("token", token)
+			s.GetRoute().ServeHTTP(w, req)
+			// admin 被拒：通用 403，不泄露"需要更高角色"的具体原因（反枚举）。
+			assertSpaceErrorCode(t, w, "err.shared.auth.forbidden")
+		})
+	}
 }
 
 func TestManager_DisableListIncludesBanned(t *testing.T) {
@@ -1107,7 +1150,7 @@ func TestManager_LiftBanRefreshesCache(t *testing.T) {
 	// 验证 liftBan 成功后会异步调用 loadKnownSpaceIDs 刷新 pkg/space 缓存
 	s, _, err := setup(t)
 	assert.NoError(t, err)
-	token := adminToken(t)
+	token := superAdminToken(t)
 
 	seedSpace(t, "mgr-ban-cache", "cache", "u-owner-c", SpaceStatusBanned)
 
@@ -1143,7 +1186,7 @@ func TestManager_AddMembersOnDisbandedSpace(t *testing.T) {
 func TestManager_RemoveMembersOnNonExistentSpace(t *testing.T) {
 	s, _, err := setup(t)
 	assert.NoError(t, err)
-	token := adminToken(t)
+	token := superAdminToken(t)
 
 	body := util.ToJson(map[string]interface{}{"uids": []string{"any"}})
 	w := httptest.NewRecorder()
@@ -1274,32 +1317,32 @@ func TestManager_CreateSpace_ValidationErrors(t *testing.T) {
 	cases := []struct {
 		name string
 		body map[string]interface{}
-		msg  string
+		code string
 	}{
 		{
 			"missing creator_uid",
 			map[string]interface{}{"name": "n"},
-			"creator_uid",
+			"err.server.space.request_invalid",
 		},
 		{
 			"missing name",
 			map[string]interface{}{"creator_uid": "u-ok"},
-			"名称",
+			"err.server.space.request_invalid",
 		},
 		{
 			"invalid join_mode",
 			map[string]interface{}{"creator_uid": "u-ok", "name": "n", "join_mode": 9},
-			"加入模式",
+			"err.server.space.request_invalid",
 		},
 		{
 			"negative max_users",
 			map[string]interface{}{"creator_uid": "u-ok", "name": "n", "max_users": -1},
-			"max_users",
+			"err.server.space.request_invalid",
 		},
 		{
 			"creator not exists",
 			map[string]interface{}{"creator_uid": "ghost", "name": "n"},
-			"用户不存在",
+			"err.server.space.member_not_found",
 		},
 	}
 	for _, tc := range cases {
@@ -1310,7 +1353,7 @@ func TestManager_CreateSpace_ValidationErrors(t *testing.T) {
 			req.Header.Set("token", token)
 			s.GetRoute().ServeHTTP(w, req)
 			assert.NotEqual(t, http.StatusOK, w.Code)
-			assert.Contains(t, w.Body.String(), tc.msg)
+			assertSpaceErrorCode(t, w, tc.code)
 		})
 	}
 }
@@ -1673,7 +1716,7 @@ func TestManager_UpdateSpaceProfile_Validation(t *testing.T) {
 		}
 		w := doPUT(util.ToJson(map[string]interface{}{"max_users": 2}))
 		assert.NotEqual(t, http.StatusOK, w.Code)
-		assert.Contains(t, w.Body.String(), "成员")
+		assertSpaceErrorCode(t, w, "err.server.space.request_invalid")
 	})
 
 	t.Run("reject when space does not exist", func(t *testing.T) {
@@ -1704,4 +1747,40 @@ func TestManager_UpdateSpaceProfile_Validation(t *testing.T) {
 		s.GetRoute().ServeHTTP(w, req)
 		assert.NotEqual(t, http.StatusOK, w.Code)
 	})
+}
+
+// TestManager_UpdateMemberRoleIdempotent 目标已是该角色时幂等成功（PR #339 P2：
+// 与用户侧守卫对称），不触发空转的转让事务。
+func TestManager_UpdateMemberRoleIdempotent(t *testing.T) {
+	s, _, err := setup(t)
+	assert.NoError(t, err)
+	token := superAdminToken(t)
+
+	seedSpace(t, "mgr-role-idem", "role idem", "u-owner", SpaceStatusNormal)
+	err = testSpaceDB.insertMemberNoTx(&MemberModel{
+		SpaceId: "mgr-role-idem", UID: "m-target", Role: 1, Status: 1,
+	})
+	assert.NoError(t, err)
+
+	// 同角色更新：幂等 OK
+	body := util.ToJson(map[string]interface{}{"role": 1})
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("PUT", "/v1/manager/spaces/mgr-role-idem/members/m-target/role", bytes.NewReader([]byte(body)))
+	req.Header.Set("token", token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	mem, err := testSpaceDB.queryMember("mgr-role-idem", "m-target")
+	assert.NoError(t, err)
+	assert.Equal(t, 1, mem.Role)
+
+	// 「转让给现任 owner」：幂等 OK，owner 角色不变
+	body = util.ToJson(map[string]interface{}{"role": 2})
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("PUT", "/v1/manager/spaces/mgr-role-idem/members/u-owner/role", bytes.NewReader([]byte(body)))
+	req.Header.Set("token", token)
+	s.GetRoute().ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code)
+	owner, err := testSpaceDB.queryMember("mgr-role-idem", "u-owner")
+	assert.NoError(t, err)
+	assert.Equal(t, 2, owner.Role)
 }

@@ -610,3 +610,538 @@ other = "查询分类数据失败。"
 
 ["err.server.category.store_failed"]
 other = "保存分类数据失败。"
+
+# ---- modules/oidc：自助绑定流程（api_bind.go），保留真实 HTTP 状态码 ----
+
+["err.server.oidc.bind_service_unavailable"]
+other = "账号绑定服务暂时不可用，请稍后再试。"
+
+["err.server.oidc.bind_request_invalid"]
+other = "请求无效。"
+
+["err.server.oidc.bind_sms_unavailable"]
+other = "该账号无法使用短信验证。"
+
+["err.server.oidc.bind_method_disabled"]
+other = "该验证方式当前已停用。"
+
+["err.server.oidc.bind_invalid_credentials"]
+other = "验证失败，请核对信息后重试。"
+
+["err.server.oidc.bind_verify_required"]
+other = "请先完成验证再确认绑定。"
+
+["err.server.oidc.bind_already_verified"]
+other = "该绑定会话已完成验证。"
+
+["err.server.oidc.bind_status_conflict"]
+other = "绑定会话状态冲突。"
+
+["err.server.oidc.bind_already_bound"]
+other = "该身份已绑定，请通过 OIDC 登录以继续。"
+
+["err.server.oidc.bind_conflict_need_manual"]
+other = "匹配到多个账号，需人工处理，请联系支持人员。"
+
+["err.server.oidc.bind_token_invalid"]
+other = "绑定会话已过期或无效，请重新发起。"
+
+["err.server.oidc.bind_claims_incomplete"]
+other = "身份提供方未返回创建账号所需的账号信息。"
+
+# ---- err.server.incomingwebhook.* (modules/incomingwebhook push path, PR #31 D23) ----
+
+["err.server.incomingwebhook.push_unauthorized"]
+other = "未授权。"
+
+["err.server.incomingwebhook.push_rate_limited"]
+other = "请求过于频繁，请稍后再试。"
+
+["err.server.incomingwebhook.push_payload_invalid"]
+other = "请求内容无效。"
+
+["err.server.incomingwebhook.push_payload_too_large"]
+other = "请求内容过大。"
+
+["err.server.incomingwebhook.push_delivery_failed"]
+other = "Webhook 消息投递失败。"
+
+["err.server.incomingwebhook.push_disabled"]
+other = "未找到。"
+
+# ---- err.server.incomingwebhook.mgmt_* (management endpoints, #246 follow-up) ----
+
+["err.server.incomingwebhook.mgmt_forbidden"]
+other = "你没有权限管理此 webhook。"
+
+["err.server.incomingwebhook.mgmt_request_invalid"]
+other = "请求参数无效。"
+
+["err.server.incomingwebhook.mgmt_group_not_found"]
+other = "群不存在或已解散。"
+
+["err.server.incomingwebhook.mgmt_not_found"]
+other = "webhook 不存在。"
+
+["err.server.incomingwebhook.mgmt_quota_exceeded"]
+other = "每个群最多 {{.max}} 个 webhook。"
+
+["err.server.incomingwebhook.mgmt_creator_quota_exceeded"]
+other = "你在该群最多可创建 {{.max}} 个 webhook。"
+
+["err.server.incomingwebhook.mgmt_creator_left"]
+other = "该 webhook 的创建者已退出群聊，暂时无法启用；待创建者重新入群后可再启用，或删除后由群内成员重新创建。"
+
+["err.server.incomingwebhook.mgmt_query_failed"]
+other = "查询 webhook 信息失败。"
+
+["err.server.incomingwebhook.mgmt_operation_failed"]
+other = "操作失败，请稍后再试。"
+
+["err.server.incomingwebhook.mgmt_disabled"]
+other = "群入站 Webhook 功能当前已关闭。"
+
+# ---- err.server.qrcode.* (modules/qrcode: api.go) ----
+
+["err.server.qrcode.request_invalid"]
+other = "二维码请求无效。"
+
+["err.server.qrcode.token_required"]
+other = "token 不能为空。"
+
+["err.server.qrcode.token_invalid"]
+other = "登录信息格式错误。"
+
+["err.server.qrcode.not_found"]
+other = "二维码无效或已过期。"
+
+["err.server.qrcode.user_not_found"]
+other = "用户不存在。"
+
+["err.server.qrcode.group_not_found"]
+other = "群不存在。"
+
+["err.server.qrcode.group_space_forbidden"]
+other = "该群仅允许本空间成员加入。"
+
+["err.server.qrcode.query_failed"]
+other = "查询二维码数据失败。"
+
+["err.server.qrcode.store_failed"]
+other = "更新二维码数据失败。"
+
+# ---- err.server.report.* (modules/report: api.go / api_manager.go) ----
+
+["err.server.report.request_invalid"]
+other = "举报请求无效。"
+
+["err.server.report.session_invalid"]
+other = "举报会话已过期或无效。"
+
+["err.server.report.query_failed"]
+other = "查询举报数据失败。"
+
+["err.server.report.store_failed"]
+other = "保存举报数据失败。"
+
+# ---- err.server.robot.* (modules/robot: api.go / api_manager.go / mention_pref.go) ----
+
+["err.server.robot.request_invalid"]
+other = "请求参数有误。"
+
+["err.server.robot.content_invalid"]
+other = "消息内容无效。"
+
+["err.server.robot.content_type_unsupported"]
+other = "不支持的消息类型。"
+
+["err.server.robot.file_type_unsupported"]
+other = "不支持的文件类型。"
+
+["err.server.robot.file_too_large"]
+other = "文件大小超过限制。"
+
+["err.server.robot.no_fields_to_update"]
+other = "没有需要更新的字段。"
+
+["err.server.robot.creator_only"]
+other = "仅机器人创建者可执行此操作。"
+
+["err.server.robot.message_edit_forbidden"]
+other = "只能编辑自己发送的消息。"
+
+["err.server.robot.channel_send_forbidden"]
+other = "不允许向该频道发送消息。"
+
+["err.server.robot.not_found"]
+other = "机器人不存在。"
+
+["err.server.robot.message_not_found"]
+other = "消息不存在。"
+
+["err.server.robot.auth_failed"]
+other = "机器人鉴权失败。"
+
+["err.server.robot.inline_query_timeout"]
+other = "行内查询超时，请重试。"
+
+["err.server.robot.query_failed"]
+other = "查询机器人数据失败。"
+
+["err.server.robot.store_failed"]
+other = "更新机器人数据失败。"
+
+["err.server.robot.send_failed"]
+other = "消息发送失败。"
+
+["err.server.robot.upload_failed"]
+other = "文件处理失败。"
+
+["err.server.robot.token_gen_failed"]
+other = "生成机器人令牌失败。"
+
+["err.server.robot.auth_check_failed"]
+other = "机器人鉴权校验失败。"
+
+# ---- err.server.space.* (modules/space: api.go / api_manager.go / api_email_invite*.go) ----
+
+["err.server.space.request_invalid"]
+other = "请求参数有误。"
+
+["err.server.space.field_too_long"]
+other = "字段长度超过限制。"
+
+["err.server.space.batch_too_large"]
+other = "单次处理的成员数量过多。"
+
+["err.server.space.permission_denied"]
+other = "你没有权限执行此操作。"
+
+["err.server.space.not_member"]
+other = "你不是该空间成员。"
+
+["err.server.space.creation_disabled"]
+other = "管理员已关闭空间创建功能。"
+
+["err.server.space.not_found"]
+other = "空间不存在或已解散。"
+
+["err.server.space.apply_not_found"]
+other = "申请记录不存在。"
+
+["err.server.space.invite_code_not_found"]
+other = "邀请码不存在。"
+
+["err.server.space.member_not_found"]
+other = "目标成员不存在或已被移除。"
+
+["err.server.space.invite_code_invalid"]
+other = "邀请码无效或已过期。"
+
+["err.server.space.invite_code_exhausted"]
+other = "邀请码已达到使用次数上限。"
+
+["err.server.space.already_member"]
+other = "你已经是该空间成员。"
+
+["err.server.space.apply_processed"]
+other = "该申请已被处理。"
+
+["err.server.space.full"]
+other = "空间已满。"
+
+["err.server.space.immutable"]
+other = "空间已解散或已封禁，无法修改。"
+
+["err.server.space.owner_constraint"]
+other = "请先转让拥有权后再执行此操作。"
+
+["err.server.space.email_invite_not_found"]
+other = "邀请不存在。"
+
+["err.server.space.email_invite_invalid"]
+other = "邀请无效或已过期。"
+
+["err.server.space.email_invite_processed"]
+other = "该邀请已被处理。"
+
+["err.server.space.email_invite_email_mismatch"]
+other = "邮箱与邀请目标不一致。"
+
+["err.server.space.query_failed"]
+other = "查询空间数据失败。"
+
+["err.server.space.store_failed"]
+other = "更新空间数据失败。"
+
+# ---- err.server.search.* (modules/search: api.go) ----
+
+["err.server.search.request_invalid"]
+other = "搜索请求无效。"
+
+["err.server.search.message_query_failed"]
+other = "查询消息搜索数据失败。"
+
+["err.server.search.group_query_failed"]
+other = "查询群搜索数据失败。"
+
+["err.server.search.user_query_failed"]
+other = "查询用户搜索数据失败。"
+
+# ---- err.server.statistics.* (modules/statistics: api.go) ----
+
+["err.server.statistics.request_invalid"]
+other = "统计请求无效。"
+
+["err.server.statistics.query_failed"]
+other = "查询统计数据失败。"
+# ---- err.server.app_bot.* (modules/app_bot: app_bot.go) ----
+
+["err.server.app_bot.request_invalid"]
+other = "请求参数有误。"
+
+["err.server.app_bot.id_invalid"]
+other = "机器人 ID 无效。"
+
+["err.server.app_bot.not_found"]
+other = "机器人不存在。"
+
+["err.server.app_bot.id_conflict"]
+other = "该机器人 ID 已被占用。"
+
+["err.server.app_bot.token_rotation_conflict"]
+other = "令牌已被其他请求轮换，请重试。"
+
+["err.server.app_bot.query_failed"]
+other = "查询数据失败。"
+
+["err.server.app_bot.store_failed"]
+other = "更新数据失败。"
+
+["err.server.app_bot.im_token_failed"]
+other = "获取 IM 令牌失败。"
+
+["err.server.app_bot.internal"]
+other = "服务器内部错误。"
+
+["err.server.bot_api.request_invalid"]
+other = "请求参数有误。"
+
+["err.server.bot_api.limit_exceeded"]
+other = "请求数量超过上限。"
+
+["err.server.bot_api.content_too_large"]
+other = "内容大小超过限制。"
+
+["err.server.bot_api.file_too_large"]
+other = "文件大小超过限制。"
+
+["err.server.bot_api.payload_too_large"]
+other = "上传文件大小超过限制。"
+
+["err.server.bot_api.file_type_unsupported"]
+other = "不支持的文件类型。"
+
+["err.server.bot_api.member_not_human"]
+other = "仅可通过机器人 API 添加真人成员。"
+
+["err.server.bot_api.thread_channel_not_accepted"]
+other = "此处不接受子区频道 ID，请使用子区 GROUP.md 接口。"
+
+["err.server.bot_api.bot_not_provisioned"]
+other = "机器人尚未完成配置，无法执行该操作。"
+
+["err.server.bot_api.obo_mode_unsupported"]
+other = "不支持的 OBO 模式。"
+
+["err.server.bot_api.obo_reserved_field"]
+other = "请求体包含 OBO 保留字段。"
+
+["err.server.bot_api.not_group_member"]
+other = "机器人不是该群成员。"
+
+["err.server.bot_api.not_group_admin"]
+other = "机器人不是该群管理员。"
+
+["err.server.bot_api.cannot_remove_privileged"]
+other = "群主和管理员不能通过机器人 API 移除。"
+
+["err.server.bot_api.not_space_member"]
+other = "不是该空间成员。"
+
+["err.server.bot_api.app_bot_unsupported"]
+other = "应用机器人不支持该操作。"
+
+["err.server.bot_api.app_bot_dm_only"]
+other = "应用机器人仅支持私聊频道操作。"
+
+["err.server.bot_api.not_friend"]
+other = "机器人不是该用户的好友。"
+
+["err.server.bot_api.conversation_not_started"]
+other = "用户尚未与该机器人发起会话。"
+
+["err.server.bot_api.message_edit_forbidden"]
+other = "只能编辑自己发送的消息。"
+
+["err.server.bot_api.obo_not_authorized"]
+other = "无权代表该用户操作。"
+
+["err.server.bot_api.bot_unavailable"]
+other = "机器人不可用。"
+
+["err.server.bot_api.group_not_found"]
+other = "群组不存在。"
+
+["err.server.bot_api.message_not_found"]
+other = "消息不存在。"
+
+["err.server.bot_api.user_not_found"]
+other = "用户不存在。"
+
+["err.server.bot_api.bot_not_registered"]
+other = "被授权方不是已注册的机器人。"
+
+["err.server.bot_api.obo_grant_not_found"]
+other = "OBO 授权不存在。"
+
+["err.server.bot_api.obo_scope_not_found"]
+other = "OBO 授权范围不存在。"
+
+["err.server.bot_api.obo_channel_not_found"]
+other = "频道不存在。"
+
+["err.server.bot_api.obo_grant_exists"]
+other = "OBO 授权已存在。"
+
+["err.server.bot_api.obo_scope_exists"]
+other = "OBO 授权范围已存在。"
+
+["err.server.bot_api.message_not_delivered"]
+other = "消息尚未投递完成，请稍后重试。"
+
+["err.server.bot_api.auth_failed"]
+other = "机器人认证失败。"
+
+["err.server.bot_api.upstream_failed"]
+other = "上游服务不可用。"
+
+["err.server.bot_api.query_failed"]
+other = "查询数据失败。"
+
+["err.server.bot_api.store_failed"]
+other = "更新数据失败。"
+
+["err.server.bot_api.send_failed"]
+other = "消息发送失败。"
+
+["err.server.bot_api.upload_failed"]
+other = "文件处理失败。"
+
+["err.server.bot_api.im_token_failed"]
+other = "获取 IM Token 失败。"
+
+["err.server.bot_api.auth_check_failed"]
+other = "机器人认证校验失败。"
+
+["err.server.bot_api.obo_internal"]
+other = "OBO 操作失败。"
+
+["err.server.botfather.request_invalid"]
+other = "数据格式有误。"
+
+["err.server.botfather.cannot_apply_own_bot"]
+other = "无需申请使用自己的 AI。"
+
+["err.server.botfather.not_owner"]
+other = "你不是该 AI 的 Owner。"
+
+["err.server.botfather.bot_not_in_space"]
+other = "该 Bot 不属于当前 Space。"
+
+["err.server.botfather.robot_not_found"]
+other = "机器人不存在或已被删除。"
+
+["err.server.botfather.apply_not_found"]
+other = "申请记录不存在。"
+
+["err.server.botfather.bot_not_found"]
+other = "Bot 不存在或无权限。"
+
+["err.server.botfather.apply_processed"]
+other = "该申请已被处理。"
+
+["err.server.botfather.apply_exists"]
+other = "你已提交过申请，请等待 Owner 审批。"
+
+["err.server.botfather.already_friends"]
+other = "你们已经是好友了。"
+
+["err.server.botfather.username_taken"]
+other = "用户名已被占用。"
+
+["err.server.botfather.auth_failed"]
+other = "机器人认证失败。"
+
+["err.server.botfather.query_failed"]
+other = "查询数据失败。"
+
+["err.server.botfather.store_failed"]
+other = "更新数据失败。"
+
+# ---- modules/usersecret：用户外部密钥别名表 CRUD + resolve（YUJ-3538），保留真实 HTTP 状态码 ----
+
+["err.server.usersecret.request_invalid"]
+other = "请求无效。"
+
+["err.server.usersecret.unauthorized"]
+other = "认证失败。"
+
+["err.server.usersecret.not_found"]
+other = "未找到对应的密钥。"
+
+["err.server.usersecret.duplicate_name"]
+other = "已存在同名密钥，请换一个名称。"
+
+["err.server.usersecret.ambiguous"]
+other = "该名称匹配到多个密钥，请进一步指明。"
+
+["err.server.usersecret.resolve_failed"]
+other = "密钥解析失败。"
+
+# ---- modules/opanalytics：运营分析看板（管理端 superAdmin 只读） ----
+
+["err.server.opanalytics.forbidden"]
+other = "仅超级管理员可访问运营看板。"
+
+["err.server.opanalytics.request_invalid"]
+other = "请求参数无效。"
+
+["err.server.opanalytics.not_found"]
+other = "Space 不存在。"
+
+["err.server.opanalytics.query_failed"]
+other = "查询看板数据失败。"
+
+["err.server.opanalytics.etl_already_running"]
+other = "运营看板 ETL 正在运行，请稍后再试。"
+
+["err.server.opanalytics.etl_trigger_failed"]
+other = "触发运营看板 ETL 失败。"
+
+# ---- modules/messages_search：消息搜索（直查 OpenSearch） ----
+
+["err.server.messages_search.validation_failed"]
+other = "搜索请求参数无效。"
+
+["err.server.messages_search.upstream_unavailable"]
+other = "搜索服务暂时不可用，请稍后再试。"
+
+["err.server.messages_search.internal"]
+other = "搜索服务内部错误。"
+
+["err.server.messages_search.rate_limited"]
+other = "搜索请求过于频繁，请稍后再试。"
+
+["err.server.messages_search.not_found"]
+other = "未找到对应频道或资源。"
