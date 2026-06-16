@@ -21,6 +21,21 @@ type IService interface {
 	DeleteConversation(uid string, channelID string, channelType uint8) error
 }
 
+// MessageExtraResp is an exported alias for the message_extra response shape
+// returned by GetRevokedMessages and GetDeletedMessages. The underlying
+// messageExtraResp type already ships every field over JSON to clients today;
+// the alias lets external packages — most notably modules/messages_search —
+// build IService stubs / fakes against the real shape without re-exporting it.
+type MessageExtraResp = messageExtraResp
+
+// MessageUserExtraResp is the equivalent alias for the per-user message state
+// response (GetDeletedMessagesWithUID).
+type MessageUserExtraResp = messageUserExtraResp
+
+// ChannelOffsetResp is the equivalent alias for the per-(uid, channel)
+// clear-history watermark response (GetChannelOffsetWithUID).
+type ChannelOffsetResp = channelOffsetResp
+
 type Service struct {
 	ctx *config.Context
 	log.Log

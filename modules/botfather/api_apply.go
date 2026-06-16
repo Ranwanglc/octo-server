@@ -1,7 +1,6 @@
 package botfather
 
 import (
-	"errors"
 	"fmt"
 	"strconv"
 
@@ -10,6 +9,9 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
+	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
+	octoi18n "github.com/Mininglamp-OSS/octo-server/pkg/i18n"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"go.uber.org/zap"
 )
@@ -24,19 +26,19 @@ const (
 func (bf *BotFather) robotApply(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 	if loginUID == "" {
-		c.ResponseError(errors.New("请先登录"))
+		httperr.ResponseErrorL(c, errcode.ErrSharedAuthRequired, nil, nil)
 		return
 	}
 
 	var req RobotApplyReq
 	if err := c.BindJSON(&req); err != nil {
 		bf.Error("数据格式有误", zap.Error(err))
-		c.ResponseError(errors.New("数据格式有误"))
+		respondBotfatherRequestInvalid(c, "")
 		return
 	}
 
 	if req.RobotUID == "" {
-		c.ResponseError(errors.New("robot_uid不能为空"))
+		respondBotfatherRequestInvalid(c, "robot_uid")
 		return
 	}
 
@@ -44,17 +46,17 @@ func (bf *BotFather) robotApply(c *wkhttp.Context) {
 	robot, err := bf.db.queryRobotByRobotID(req.RobotUID)
 	if err != nil {
 		bf.Error("查询机器人失败", zap.Error(err))
-		c.ResponseError(errors.New("查询机器人失败"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherQueryFailed, nil, nil)
 		return
 	}
 	if robot == nil || robot.Status != 1 {
-		c.ResponseError(errors.New("机器人不存在或已被删除"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherRobotNotFound, nil, nil)
 		return
 	}
 
 	// 检查是否是自己的AI
 	if robot.CreatorUID == loginUID {
-		c.ResponseError(errors.New("无需申请使用自己的AI"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherCannotApplyOwnBot, nil, nil)
 		return
 	}
 
@@ -65,12 +67,12 @@ func (bf *BotFather) robotApply(c *wkhttp.Context) {
 		err = bf.createFriendRelation(loginUID, req.RobotUID)
 		if err != nil {
 			bf.Error("创建好友关系失败", zap.Error(err))
-			c.ResponseError(errors.New("创建好友关系失败"))
+			httperr.ResponseErrorL(c, errcode.ErrBotfatherStoreFailed, nil, nil)
 			return
 		}
 		c.Response(map[string]interface{}{
 			"status":  "approved",
-			"message": "已自动通过，可以开始聊天",
+			"message": bf.localizedMessage(c, MsgApplyAutoApproved),
 		})
 		return
 	}
@@ -79,11 +81,11 @@ func (bf *BotFather) robotApply(c *wkhttp.Context) {
 	isFriend, err := bf.userService.IsFriend(loginUID, req.RobotUID)
 	if err != nil {
 		bf.Error("检查好友关系失败", zap.Error(err))
-		c.ResponseError(errors.New("检查好友关系失败"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherQueryFailed, nil, nil)
 		return
 	}
 	if isFriend {
-		c.ResponseError(errors.New("你们已经是好友了"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherAlreadyFriends, nil, nil)
 		return
 	}
 
@@ -92,11 +94,11 @@ func (bf *BotFather) robotApply(c *wkhttp.Context) {
 	existingApply, err := applyDB.queryPendingByUIDAndRobot(loginUID, req.RobotUID)
 	if err != nil {
 		bf.Error("查询申请记录失败", zap.Error(err))
-		c.ResponseError(errors.New("查询申请记录失败"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherQueryFailed, nil, nil)
 		return
 	}
 	if existingApply != nil {
-		c.ResponseError(errors.New("你已提交过申请，请等待Owner审批"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherApplyExists, nil, nil)
 		return
 	}
 
@@ -142,14 +144,14 @@ func (bf *BotFather) robotApply(c *wkhttp.Context) {
 	err = applyDB.insert(apply)
 	if err != nil {
 		bf.Error("创建申请记录失败", zap.Error(err))
-		c.ResponseError(errors.New("创建申请记录失败"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherStoreFailed, nil, nil)
 		return
 	}
 	bf.notifyOwnerNewApply(loginUID, req.RobotUID, robot.CreatorUID, req.Remark, applySpaceID)
 
 	c.Response(map[string]interface{}{
 		"status":  "pending",
-		"message": "申请已提交，等待Owner审批",
+		"message": bf.localizedMessage(c, MsgApplySubmitted),
 	})
 }
 
@@ -157,19 +159,19 @@ func (bf *BotFather) robotApply(c *wkhttp.Context) {
 func (bf *BotFather) robotApplySure(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 	if loginUID == "" {
-		c.ResponseError(errors.New("请先登录"))
+		httperr.ResponseErrorL(c, errcode.ErrSharedAuthRequired, nil, nil)
 		return
 	}
 
 	var req RobotApplySureReq
 	if err := c.BindJSON(&req); err != nil {
 		bf.Error("数据格式有误", zap.Error(err))
-		c.ResponseError(errors.New("数据格式有误"))
+		respondBotfatherRequestInvalid(c, "")
 		return
 	}
 
 	if req.ApplyID <= 0 {
-		c.ResponseError(errors.New("apply_id无效"))
+		respondBotfatherRequestInvalid(c, "apply_id")
 		return
 	}
 
@@ -177,23 +179,23 @@ func (bf *BotFather) robotApplySure(c *wkhttp.Context) {
 	apply, err := applyDB.queryByID(req.ApplyID)
 	if err != nil {
 		bf.Error("查询申请记录失败", zap.Error(err))
-		c.ResponseError(errors.New("查询申请记录失败"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherQueryFailed, nil, nil)
 		return
 	}
 	if apply == nil {
-		c.ResponseError(errors.New("申请记录不存在"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherApplyNotFound, nil, nil)
 		return
 	}
 
 	// 验证Owner身份
 	if apply.OwnerUID != loginUID {
-		c.ResponseError(errors.New("你不是该AI的Owner"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherNotOwner, nil, nil)
 		return
 	}
 
 	// 检查状态
 	if apply.Status != ApplyStatusPending {
-		c.ResponseError(errors.New("该申请已被处理"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherApplyProcessed, nil, nil)
 		return
 	}
 
@@ -201,7 +203,7 @@ func (bf *BotFather) robotApplySure(c *wkhttp.Context) {
 	err = applyDB.updateStatus(req.ApplyID, ApplyStatusApproved)
 	if err != nil {
 		bf.Error("更新申请状态失败", zap.Error(err))
-		c.ResponseError(errors.New("更新申请状态失败"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherStoreFailed, nil, nil)
 		return
 	}
 
@@ -209,7 +211,7 @@ func (bf *BotFather) robotApplySure(c *wkhttp.Context) {
 	err = bf.createFriendRelation(apply.UID, apply.RobotUID)
 	if err != nil {
 		bf.Error("创建好友关系失败", zap.Error(err))
-		c.ResponseError(errors.New("创建好友关系失败"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherStoreFailed, nil, nil)
 		return
 	}
 
@@ -227,14 +229,14 @@ func (bf *BotFather) robotApplySure(c *wkhttp.Context) {
 func (bf *BotFather) robotApplyRefuse(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 	if loginUID == "" {
-		c.ResponseError(errors.New("请先登录"))
+		httperr.ResponseErrorL(c, errcode.ErrSharedAuthRequired, nil, nil)
 		return
 	}
 
 	applyIDStr := c.Param("apply_id")
 	applyID, err := strconv.ParseInt(applyIDStr, 10, 64)
 	if err != nil || applyID <= 0 {
-		c.ResponseError(errors.New("apply_id无效"))
+		respondBotfatherRequestInvalid(c, "apply_id")
 		return
 	}
 
@@ -242,23 +244,23 @@ func (bf *BotFather) robotApplyRefuse(c *wkhttp.Context) {
 	apply, err := applyDB.queryByID(applyID)
 	if err != nil {
 		bf.Error("查询申请记录失败", zap.Error(err))
-		c.ResponseError(errors.New("查询申请记录失败"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherQueryFailed, nil, nil)
 		return
 	}
 	if apply == nil {
-		c.ResponseError(errors.New("申请记录不存在"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherApplyNotFound, nil, nil)
 		return
 	}
 
 	// 验证Owner身份
 	if apply.OwnerUID != loginUID {
-		c.ResponseError(errors.New("你不是该AI的Owner"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherNotOwner, nil, nil)
 		return
 	}
 
 	// 检查状态
 	if apply.Status != ApplyStatusPending {
-		c.ResponseError(errors.New("该申请已被处理"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherApplyProcessed, nil, nil)
 		return
 	}
 
@@ -266,7 +268,7 @@ func (bf *BotFather) robotApplyRefuse(c *wkhttp.Context) {
 	err = applyDB.updateStatus(applyID, ApplyStatusRejected)
 	if err != nil {
 		bf.Error("更新申请状态失败", zap.Error(err))
-		c.ResponseError(errors.New("更新申请状态失败"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherStoreFailed, nil, nil)
 		return
 	}
 
@@ -284,7 +286,7 @@ func (bf *BotFather) robotApplyRefuse(c *wkhttp.Context) {
 func (bf *BotFather) robotApplies(c *wkhttp.Context) {
 	loginUID := c.GetLoginUID()
 	if loginUID == "" {
-		c.ResponseError(errors.New("请先登录"))
+		httperr.ResponseErrorL(c, errcode.ErrSharedAuthRequired, nil, nil)
 		return
 	}
 
@@ -306,14 +308,14 @@ func (bf *BotFather) robotApplies(c *wkhttp.Context) {
 	list, err := applyDB.queryPendingByOwner(loginUID, pageSize, offset)
 	if err != nil {
 		bf.Error("查询申请列表失败", zap.Error(err))
-		c.ResponseError(errors.New("查询申请列表失败"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherQueryFailed, nil, nil)
 		return
 	}
 
 	count, err := applyDB.queryPendingCountByOwner(loginUID)
 	if err != nil {
 		bf.Error("查询申请数量失败", zap.Error(err))
-		c.ResponseError(errors.New("查询申请数量失败"))
+		httperr.ResponseErrorL(c, errcode.ErrBotfatherQueryFailed, nil, nil)
 		return
 	}
 
@@ -410,25 +412,53 @@ func (bf *BotFather) createFriendRelation(userUID, robotUID string) error {
 		Param:       bfCmdParam,
 	})
 
-	// 发送欢迎消息
-	content := "我们已经是好友了，可以愉快的聊天了！"
-	if bf.ctx.GetConfig().Friend.AddedTipsText != "" {
-		content = bf.ctx.GetConfig().Friend.AddedTipsText
+	// 发送欢迎消息：运营配置（Friend.AddedTipsText）优先，未配置时按收件人语言本地化
+	content := bf.ctx.GetConfig().Friend.AddedTipsText
+	if content == "" {
+		lang := recipientLanguage(bf.cmdHandler.langSvc, userUID)
+		if rendered, err := botMessages.Render(MsgFriendAddedTip, lang, nil); err != nil {
+			bf.Error("渲染好友提示失败", zap.String("lang", lang), zap.Error(err))
+		} else {
+			content = rendered
+		}
 	}
-	bfTipPayload := map[string]interface{}{
-		"content": content,
-		"type":    common.Tip,
+	// Skip the tip when content is empty — a render failure (already logged
+	// above) must not send a blank Tip. The friend relation / whitelist / CMD
+	// are already done, so this only drops the cosmetic greeting.
+	if content != "" {
+		bfTipPayload := map[string]interface{}{
+			"content": content,
+			"type":    common.Tip,
+		}
+		// YUJ-674 / Mininglamp-OSS#37: PERSONAL DM via NewPersonalMsgSendReq builder.
+		_ = bf.ctx.SendMessage(config.NewPersonalMsgSendReq(
+			userUID,
+			robotUID,
+			bfTipPayload,
+			spaceID,
+			config.PersonalMsgOptions{Header: config.MsgHeader{RedDot: 1}},
+		))
 	}
-	// YUJ-674 / Mininglamp-OSS#37: PERSONAL DM via NewPersonalMsgSendReq builder.
-	_ = bf.ctx.SendMessage(config.NewPersonalMsgSendReq(
-		userUID,
-		robotUID,
-		bfTipPayload,
-		spaceID,
-		config.PersonalMsgOptions{Header: config.MsgHeader{RedDot: 1}},
-	))
 
 	return nil
+}
+
+// localizedMessage renders an outbound BotFather message for an HTTP
+// success-response body. Unlike IM sends (which resolve language per recipient
+// uid), a success body must follow the *request's* negotiated language exactly
+// as the error envelope does: pkg/i18n's ErrorRenderer resolves it via
+// LanguageOrDefault(c.Request.Context(), DefaultLanguage), honoring
+// ?lang= / cookie / Accept-Language / X-Octo-Lang / user preference. Using the
+// identical path keeps the success message and any error response on the same
+// endpoint in one language, instead of diverging to a per-uid preference.
+func (bf *BotFather) localizedMessage(c *wkhttp.Context, key string) string {
+	lang := octoi18n.LanguageOrDefault(c.Request.Context(), octoi18n.DefaultLanguage)
+	s, err := botMessages.Render(key, lang, nil)
+	if err != nil {
+		bf.Error("渲染响应消息失败", zap.String("key", key), zap.String("lang", lang), zap.Error(err))
+		return ""
+	}
+	return s
 }
 
 // notifyOwnerNewApply 通知Owner有新的申请
@@ -439,13 +469,17 @@ func (bf *BotFather) notifyOwnerNewApply(applicantUID, robotUID, ownerUID, remar
 		applicantName = applicant.Name
 	}
 
-	remarkText := ""
-	if remark != "" {
-		remarkText = fmt.Sprintf("\n备注: %s", remark)
+	lang := recipientLanguage(bf.cmdHandler.langSvc, ownerUID)
+	content, err := botMessages.Render(MsgNotifyOwnerNewApply, lang, map[string]any{
+		"ApplicantName": applicantName,
+		"ApplicantUID":  applicantUID,
+		"RobotUID":      robotUID,
+		"Remark":        remark, // template renders the localized "Note:" line when non-empty
+	})
+	if err != nil {
+		bf.Error("渲染申请通知失败", zap.String("lang", lang), zap.Error(err))
+		return
 	}
-
-	content := fmt.Sprintf("有人申请使用你的AI\n用户: %s (%s)\nAI: %s%s",
-		applicantName, applicantUID, robotUID, remarkText)
 
 	notifyPayload := map[string]interface{}{
 		"content": content,
@@ -463,11 +497,15 @@ func (bf *BotFather) notifyOwnerNewApply(applicantUID, robotUID, ownerUID, remar
 
 // notifyApplicantResult 通知申请人审批结果
 func (bf *BotFather) notifyApplicantResult(applicantUID, robotUID string, approved bool, spaceID string) {
-	var content string
-	if approved {
-		content = fmt.Sprintf("你的AI使用申请已通过！\nAI: %s\n现在可以开始聊天了", robotUID)
-	} else {
-		content = fmt.Sprintf("你的AI使用申请被拒绝\nAI: %s", robotUID)
+	key := MsgNotifyApplicantApproved
+	if !approved {
+		key = MsgNotifyApplicantRejected
+	}
+	lang := recipientLanguage(bf.cmdHandler.langSvc, applicantUID)
+	content, err := botMessages.Render(key, lang, map[string]any{"RobotUID": robotUID})
+	if err != nil {
+		bf.Error("渲染申请结果通知失败", zap.String("lang", lang), zap.Error(err))
+		return
 	}
 
 	resultPayload := map[string]interface{}{

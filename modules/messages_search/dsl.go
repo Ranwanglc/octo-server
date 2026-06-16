@@ -1,0 +1,306 @@
+package messages_search
+
+import (
+	"encoding/json"
+
+	"github.com/olivere/elastic"
+)
+
+// rawSource turns olivere/elastic's *json.RawMessage hit field into the []byte
+// json.Unmarshal expects. Returns nil for missing sources so the caller's
+// Unmarshal fails fast and the bad row is skipped (rather than panicking on
+// a nil deref).
+func rawSource(s *json.RawMessage) []byte {
+	if s == nil {
+		return nil
+	}
+	return []byte(*s)
+}
+
+// addCommonFilters layers the optional filter clauses (sender, time window)
+// shared across all four endpoints onto a *BoolQuery.
+func addCommonFilters(b *elastic.BoolQuery, filters SearchFilters) {
+	if len(filters.SenderIDs) > 0 {
+		terms := make([]any, 0, len(filters.SenderIDs))
+		for _, s := range filters.SenderIDs {
+			if s != "" {
+				terms = append(terms, s)
+			}
+		}
+		if len(terms) > 0 {
+			b.Filter(elastic.NewTermsQuery("from", terms...))
+		}
+	}
+	if filters.SentAtFrom != "" || filters.SentAtTo != "" {
+		rng := elastic.NewRangeQuery("timestamp")
+		if from, ok := parseSentAt(filters.SentAtFrom, true); ok {
+			rng = rng.Gte(from)
+		}
+		if to, ok := parseSentAt(filters.SentAtTo, false); ok {
+			rng = rng.Lte(to)
+		}
+		b.Filter(rng)
+	}
+}
+
+// applyChannelAndRevoked adds the channel-routing filter and the standard
+// revoked / cmd negation clauses every endpoint shares.
+//
+// The `MustNot Term(revoked=true)` clause is a best-effort optimisation, NOT
+// a security boundary: indexer v1.8 only sets `revoked` on the initial index
+// write, so any message revoked AFTER initial indexing keeps `revoked=false`
+// in OS until a partial-update job lands (tracked in the v1.10 mapping
+// follow-up). The authoritative check is the post-filter in
+// visibility.filterVisible — that consults `message_extra.revoke=1` from
+// MySQL on every hit, which is the same source of truth the read paths use
+// (see modules/message/api_channel_files.go::filterMessages). Keeping the
+// native term here still trims the page that hits the post-filter for the
+// docs OS *does* have flagged correctly.
+func applyChannelAndRevoked(b *elastic.BoolQuery, normChannelID string) {
+	b.Filter(elastic.NewTermQuery("channelId", normChannelID))
+	b.MustNot(elastic.NewTermQuery("revoked", true))
+}
+
+// applySpaceIDScope layers the per-Space term filter onto the bool query for
+// p2p (channel_type=1) search only. Group and thread searches are already
+// space-scoped at the channel level (channel_id encodes the parent space) so
+// adding a redundant term filter would only mask indexer-mapping mismatches.
+//
+// p2p docs in OS carry `spaceId` from indexer v1.9 (mirrors
+// payload.space_id). Until that mapping is rolled out and the existing
+// corpus is backfilled, doc.spaceId is missing on legacy rows and the term
+// filter matches nothing — that is the intended fail-closed behaviour while
+// the dependency is satisfied. See PRD-CONSTRAINTS / "Person/DM Space
+// Isolation".
+//
+// Empty spaceID is a no-op here: the handler is responsible for either
+// rejecting the request (RequireSpaceID=true) or knowingly skipping the
+// scope filter (RequireSpaceID=false). We never silently include p2p hits
+// for an unknown Space.
+func applySpaceIDScope(b *elastic.BoolQuery, channelType uint8, spaceID string) {
+	if channelType != channelTypePerson {
+		return
+	}
+	if spaceID == "" {
+		return
+	}
+	b.Filter(elastic.NewTermQuery("spaceId", spaceID))
+}
+
+// applySort returns a SearchService with the requested sort applied.
+//   - time_desc (default): timestamp desc + messageId desc tiebreaker
+//   - time_asc:           timestamp asc  + messageId asc
+//   - relevance:          timestamp desc + _score desc + messageId desc tiebreaker
+//
+// `relevance` is rejected upstream by the validator for endpoints (e.g.
+// _search_media) where no keyword is involved.
+func applySort(s *elastic.SearchService, sort string) *elastic.SearchService {
+	switch sort {
+	case "time_asc":
+		return s.SortBy(
+			elastic.NewFieldSort("timestamp").Asc(),
+			elastic.NewFieldSort("messageId").Asc(),
+		)
+	case "relevance":
+		return s.SortBy(
+			elastic.NewFieldSort("timestamp").Desc(),
+			elastic.NewScoreSort(),
+			elastic.NewFieldSort("messageId").Desc(),
+		)
+	default:
+		return s.SortBy(
+			elastic.NewFieldSort("timestamp").Desc(),
+			elastic.NewFieldSort("messageId").Desc(),
+		)
+	}
+}
+
+// pickSnippet selects the most informative highlight fragment for a hit.
+// Priority follows A doc §2.1: text content first, then forward search-text,
+// then image caption, then file name. Returns "" when no field highlighted.
+func pickSnippet(h map[string][]string) string {
+	if h == nil {
+		return ""
+	}
+	for _, field := range []string{
+		"payload.text.content",
+		"payload.mergeForward.msgs.searchText",
+		"payload.image.caption",
+		"payload.file.name",
+	} {
+		if frags, ok := h[field]; ok && len(frags) > 0 && frags[0] != "" {
+			return frags[0]
+		}
+	}
+	return ""
+}
+
+// extractSortValues pulls (timestamp, messageId, score?) from a search hit's
+// `sort` array so the next-page cursor can be encoded. The shape depends on
+// the requested sort:
+//   - time_desc / time_asc: sort = [timestamp, messageId]      → score=nil
+//   - relevance:            sort = [timestamp, _score, messageId] → score non-nil
+//
+// Returns zeros / nil when the hit is missing sort values, which means the
+// caller has already exhausted the page or requested an inconsistent sort.
+func extractSortValues(sort []any, isRelevance bool) (int64, int64, *float64) {
+	if isRelevance {
+		if len(sort) < 3 {
+			return 0, 0, nil
+		}
+		ts := numericTo64(sort[0])
+		score := numericToFloat(sort[1])
+		msgID := numericTo64(sort[2])
+		return ts, msgID, &score
+	}
+	if len(sort) < 2 {
+		return 0, 0, nil
+	}
+	return numericTo64(sort[0]), numericTo64(sort[1]), nil
+}
+
+// numericTo64 squashes the variety of numeric shapes JSON unmarshalling can
+// produce (float64 from encoding/json, json.Number, ints from typed APIs)
+// into a single int64.
+//
+// Precision caveat: the float64 case rounds for values above 2^53, so it must
+// never be the source of record for snowflake message IDs — those are read
+// from the typed _source (Doc.MessageID) instead; see computeCursorPagination.
+func numericTo64(v any) int64 {
+	switch n := v.(type) {
+	case float64:
+		return int64(n)
+	case json.Number:
+		i, err := n.Int64()
+		if err != nil {
+			f, ferr := n.Float64()
+			if ferr != nil {
+				return 0
+			}
+			return int64(f)
+		}
+		return i
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case int32:
+		return int64(n)
+	case uint64:
+		return int64(n)
+	}
+	return 0
+}
+
+// numericToFloat is the float64 sibling of numericTo64 for OS _score values,
+// which arrive as float64 from encoding/json but may also be json.Number or
+// integer types depending on the client path.
+func numericToFloat(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case json.Number:
+		f, err := n.Float64()
+		if err != nil {
+			return 0
+		}
+		return f
+	case float32:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int32:
+		return float64(n)
+	case uint64:
+		return float64(n)
+	}
+	return 0
+}
+
+// computeCursorPagination derives has_more / next_cursor from an OS hit list.
+// The timestamp (and _score for relevance) come off the last raw hit's Sort
+// array — the canonical sort tuple OS itself uses. The messageId tiebreaker
+// is deliberately NOT taken from Sort: the default decoder unmarshals sort
+// values as float64, which rounds snowflake IDs above 2^53 and silently
+// corrupts the cursor at timestamp-tied boundaries (messages skipped or
+// duplicated on the next page). It is read from the typed _source
+// (Doc.MessageID, int64) instead, which keeps full precision.
+//
+// Invariant: when the last hit yields ts=0 or msgID=0 (e.g. mismatched sort
+// mode, missing sort array, unparsable _source) we return (hasMore=false, "")
+// rather than emitting a half-valid cursor — wire shape requires a non-empty,
+// usable next_cursor whenever has_more is true (spec v4.2 §1.4).
+func (h *Handler) computeCursorPagination(result *elastic.SearchResult, pageSize int, sort string) (bool, string) {
+	if result == nil || result.Hits == nil || len(result.Hits.Hits) == 0 {
+		return false, ""
+	}
+	if len(result.Hits.Hits) < pageSize {
+		return false, ""
+	}
+	last := result.Hits.Hits[len(result.Hits.Hits)-1]
+	ts, _, score := extractSortValues(last.Sort, sort == "relevance")
+	msgID := lastHitMessageID(last)
+	if ts == 0 || msgID == 0 {
+		return false, ""
+	}
+	return true, encodeCursor(h.cfg, ts, msgID, score)
+}
+
+// lastHitMessageID reads the full-precision messageId from a hit's typed
+// _source. Returns 0 when the source is missing or malformed, which the
+// caller treats as "no cursor".
+func lastHitMessageID(hit *elastic.SearchHit) int64 {
+	if hit == nil {
+		return 0
+	}
+	var doc Doc
+	if err := json.Unmarshal(rawSource(hit.Source), &doc); err != nil {
+		return 0
+	}
+	return doc.MessageID
+}
+
+// buildSearchAfterFromHit reconstructs an OS search_after tuple from a hit
+// for in-loop round-refill (paginateWithFilter). The messageId tiebreaker
+// is read from the typed _source rather than hit.Sort: JSON-decoded sort
+// values are float64, which rounds snowflake ids above 2^53 and corrupts
+// the resume boundary at timestamp ties. Same policy as
+// computeCursorPagination, so the internal round-refill anchor and the
+// external next_cursor share one full-precision id source.
+//
+// Sort tuple shapes (must match decodeCursorAsSearchAfter and the sort
+// clauses in dsl.go::buildSearch):
+//   - time_desc / time_asc: [timestamp, messageId]
+//   - relevance:            [timestamp, _score, messageId]
+//
+// Timestamp comes off hit.Sort[0] as float64 — safe at second precision.
+// _score for relevance comes off hit.Sort[1] as float64 — same as OS uses
+// internally.
+//
+// Returns ok=false when the typed _source can't be parsed or hit.Sort is
+// malformed. Caller should stop the round loop on !ok rather than resume
+// on a corrupt boundary.
+func buildSearchAfterFromHit(hit *elastic.SearchHit, isRelevance bool) ([]any, bool) {
+	if hit == nil {
+		return nil, false
+	}
+	msgID := lastHitMessageID(hit)
+	if msgID == 0 {
+		return nil, false
+	}
+	if isRelevance {
+		if len(hit.Sort) < 3 {
+			return nil, false
+		}
+		ts := numericTo64(hit.Sort[0])
+		score := numericToFloat(hit.Sort[1])
+		return []any{ts, score, msgID}, true
+	}
+	if len(hit.Sort) < 2 {
+		return nil, false
+	}
+	ts := numericTo64(hit.Sort[0])
+	return []any{ts, msgID}, true
+}

@@ -80,13 +80,6 @@ func (d *DB) deleteMembersWithGroupNOTx(groupNo string, tx *dbr.Tx) error {
 	return err
 }
 
-// QuerySecondOldestMember 查询群里第二长老
-func (d *DB) QuerySecondOldestMember(groupNo string) (*MemberModel, error) {
-	var memberModel *MemberModel
-	_, err := d.session.Select("*").From("group_member").Where("group_no=? and role<>? and is_deleted=0", groupNo, MemberRoleCreator).OrderDir("created_at", true).Load(&memberModel)
-	return memberModel, err
-}
-
 // 通过vercode查询某个群成员
 func (d *DB) queryMemberWithVercode(vercode string) (*MemberModel, error) {
 	var memberModel *MemberModel
@@ -103,13 +96,17 @@ func (d *DB) queryMemberWithVercodes(vercodes []string) ([]*MemberGroupDetailMod
 
 // QueryIsGroupManagerOrCreator 是否是群管理者或创建者
 //
-// Fail-safe 过滤 is_external=0：外部成员即使在 DB 中残留 role=creator/manager
-// （历史脏数据或绕过 managerAdd 入口校验写入），也不视为该群的管理者。
-// 与 managerAdd / transferGrouper 的前置 is_external 校验构成双层防御
-// （YUJ-231 / GH#1289，ReviewBot YUJ-230 P1）。
+// Fail-safe 过滤：
+//   - is_external=0：外部成员即使在 DB 中残留 role=creator/manager（历史脏数据或
+//     绕过 managerAdd 入口校验写入），也不视为该群的管理者。与 managerAdd /
+//     transferGrouper 的前置 is_external 校验构成双层防御（YUJ-231 / GH#1289，
+//     ReviewBot YUJ-230 P1）。
+//   - status=GroupMemberStatusNormal：黑名单 / 已退出但 is_deleted 仍为 0 的成员
+//     即便保留 role=creator/manager，也不视为有效管理者，避免被踢出的管理者继续
+//     调用敏感 API（PR #31 round-3，Jerry-Xin）。
 func (d *DB) QueryIsGroupManagerOrCreator(groupNo string, uid string) (bool, error) {
 	var count int64
-	_, err := d.session.Select("count(*)").From("group_member").Where("group_no=? and uid=? and is_deleted=0 and is_external=0 and (role=? or role=?)", groupNo, uid, MemberRoleCreator, MemberRoleManager).Load(&count)
+	_, err := d.session.Select("count(*)").From("group_member").Where("group_no=? and uid=? and is_deleted=0 and is_external=0 and status=? and (role=? or role=?)", groupNo, uid, int(common.GroupMemberStatusNormal), MemberRoleCreator, MemberRoleManager).Load(&count)
 	return count > 0, err
 }
 
@@ -186,6 +183,20 @@ func (d *DB) ExistMemberActive(uid string, groupNo string) (bool, error) {
 func (d *DB) existMembers(groupNos []string, uid string) ([]string, error) {
 	var results []string
 	_, err := d.session.Select("group_no").From("group_member").Where("group_no in ? and uid=? and is_deleted=0", groupNos, uid).Load(&results)
+	return results, err
+}
+
+// existMembersActive 是 existMembers 的白名单（fail closed）批量变体：在 is_deleted=0
+// 之外额外要求 status=GroupMemberStatusNormal，即把被拉黑（status=Blacklist）以及未来
+// 可能新增的非正常状态成员从结果里排除。
+// 与单群的 ExistMemberActive 语义一致，专供「子区(CommunityTopic)读/发门禁」这类绕过
+// IM datasource、直查本地分表的批量校验使用，避免被拉黑用户仍出现在“仍是成员”的集合里
+// 进而越权读子区历史/会话（YUJ-4185 CR 整改）。
+func (d *DB) existMembersActive(groupNos []string, uid string) ([]string, error) {
+	var results []string
+	_, err := d.session.Select("group_no").From("group_member").
+		Where("group_no in ? and uid=? and is_deleted=0 and status=?",
+			groupNos, uid, common.GroupMemberStatusNormal).Load(&results)
 	return results, err
 }
 
@@ -293,13 +304,15 @@ func (d *DB) Update(model *Model) error {
 		"allow_view_history_msg":      model.AllowViewHistoryMsg,
 		"allow_member_pinned_message": model.AllowMemberPinnedMessage,
 		"allow_external":              model.AllowExternal,
+		"allow_no_mention":            model.AllowNoMention,
 	}).Where("id=?", model.Id).Exec()
 	return err
 }
 
-func (d *DB) updateAvatar(avatar string, groupNo string) error {
+func (d *DB) updateAvatar(avatar string, avatarVersion int64, groupNo string) error {
 	_, err := d.session.Update("group").SetMap(map[string]interface{}{
 		"avatar":           avatar,
+		"avatar_version":   avatarVersion,
 		"is_upload_avatar": 1,
 	}).Where("group_no=?", groupNo).Exec()
 	return err
@@ -413,6 +426,24 @@ func (d *DB) queryMemberWithGroupNoAndUID(groupNo, uid string) (*MemberDetailMod
 func (d *DB) queryBlacklistMemberUIDsWithGroupNo(groupNo string) ([]string, error) {
 	var uids []string
 	_, err := d.session.Select("group_member.uid").From("group_member").Where("group_member.group_no=? and group_member.is_deleted=0 and status=?", groupNo, common.GroupMemberStatusBlacklist).Load(&uids)
+	return uids, err
+}
+
+// querySubscribableMemberUIDsWithGroupNo 返回某群「可订阅」成员 uid 集合：
+// is_deleted=0 AND status=GroupMemberStatusNormal，即排除被拉黑（status=blacklist）的成员。
+// 子区(channel_type=CommunityTopic) 实时下发的权威订阅源就读这份列表（thread/1module.go
+// Subscribers 回调），WuKongIM 缓存它做 WebSocket push。被拉黑成员若仍出现在这里，即使
+// 上层主动 IMRemoveSubscriber，下一次 WuKongIM 重载 Subscribers 仍会把他加回去 → 拉黑
+// 不自愈（YUJ-4185 P0-2 根因）。
+//
+// 与 queryMembersWithGroupNo（GetMembers，多处复用、语义是“所有非删除成员”）分开，
+// 不改动既有调用方语义；只有需要“能收实时推送的成员”的订阅数据源走这里。
+func (d *DB) querySubscribableMemberUIDsWithGroupNo(groupNo string) ([]string, error) {
+	var uids []string
+	_, err := d.session.Select("group_member.uid").
+		From("group_member").
+		Where("group_member.group_no=? and group_member.is_deleted=0 and status=?", groupNo, common.GroupMemberStatusNormal).
+		Load(&uids)
 	return uids, err
 }
 
@@ -548,23 +579,26 @@ type DetailModel struct {
 
 // Model 群db model
 type Model struct {
-	GroupNo                  string // 群编号
-	GroupType                int    // 群类型 0.普通群 1.超大群
-	Name                     string // 群名称
-	Avatar                   string // 群头像
-	Notice                   string // 群公告
-	Creator                  string // 创建者uid
-	Status                   int    // 群状态
-	Version                  int64  // 版本号
-	Forbidden                int    // 是否全员禁言
-	Invite                   int    // 是否开启邀请确认 0.否 1.是
-	ForbiddenAddFriend       int    //群内禁止加好友
-	AllowViewHistoryMsg      int    // 是否允许新成员查看历史消息
+	GroupNo                  string     // 群编号
+	GroupType                int        // 群类型 0.普通群 1.超大群
+	Name                     string     // 群名称
+	Avatar                   string     // 群头像
+	AvatarVersion            int64      // 群头像对象版本，0 表示旧版稳定路径
+	IsUploadAvatar           int        // 群头像是否已经被用户上传
+	Notice                   string     // 群公告
+	Creator                  string     // 创建者uid
+	Status                   int        // 群状态
+	Version                  int64      // 版本号
+	Forbidden                int        // 是否全员禁言
+	Invite                   int        // 是否开启邀请确认 0.否 1.是
+	ForbiddenAddFriend       int        //群内禁止加好友
+	AllowViewHistoryMsg      int        // 是否允许新成员查看历史消息
 	AllowMemberPinnedMessage int        // 是否允许群成员置顶消息
 	Category                 string     // 群分类
 	SpaceID                  string     // Space ID
 	IsExternalGroup          int        // 外部群 0.否 1.是（自动维护）
 	AllowExternal            int        // 是否允许外部成员加入 1.允许(默认) 0.禁止
+	AllowNoMention           int        // 群级是否允许免@生效 1.允许(默认) 0.禁止（bot 在本群必须被@）
 	GroupMd                  *string    // GROUP.md content
 	GroupMdVersion           int64      // GROUP.md version
 	GroupMdUpdatedAt         *time.Time // GROUP.md last update time
@@ -725,6 +759,48 @@ func (d *DB) QueryBotsInvitedByUIDTx(groupNo string, inviterUID string, tx *dbr.
 		groupNo, inviterUID,
 	).Load(&uids)
 	return uids, err
+}
+
+// QueryBotUIDsOwnedByUIDs 查询群内由 ownerUIDs 中任一用户名下（robot.creator_uid）
+// 的未删除 bot 成员 UID 列表。与 QueryBotsInvitedByUIDTx 同口径：只命中
+// group_member.robot=1 AND is_deleted=0 且 robot.status=1 的 bot；孤儿（无 robot 行）
+// 或禁用（status=0）bot 不视为任何人的 bot，不被级联。
+//
+// 非事务、无行锁版本，供拉黑/解除拉黑级联（#354）这类不开事务的路径使用：
+// 被拉黑用户的 bot 若不连带拉黑，用户可经 bot 旁路读群/子区内容，
+// 绕过 ExistMemberActive 加固线（#343/#345）。
+// 故意不过滤 group_member.status：解除拉黑时需要把已是 Blacklist 状态的 bot 一并恢复。
+func (d *DB) QueryBotUIDsOwnedByUIDs(groupNo string, ownerUIDs []string) ([]string, error) {
+	if groupNo == "" || len(ownerUIDs) == 0 {
+		return nil, nil
+	}
+	var uids []string
+	_, err := d.session.SelectBySql(
+		"SELECT gm.uid FROM group_member gm "+
+			"INNER JOIN robot r ON r.robot_id = gm.uid AND r.status = 1 "+
+			"WHERE gm.group_no = ? AND gm.robot = 1 AND gm.is_deleted = 0 "+
+			"AND r.creator_uid IN ?",
+		groupNo, ownerUIDs,
+	).Load(&uids)
+	return uids, err
+}
+
+// QuerySecondOldestMemberExcludingBotsOf 选出第二元老成员（群主退群时的新群主人选），
+// 在 QuerySecondOldestMember 的基础上额外排除 leaverUID 名下（robot.creator_uid）的
+// 活跃 bot：#354 起群主退群也会级联带走自己的 bot，这些 bot 在同一事务内即将离群，
+// 不能被选为新群主（否则会出现「新群主刚上任就被级联删除」的孤儿群）。
+// 其他人的 bot 不受影响，保持与旧选主逻辑一致。
+func (d *DB) QuerySecondOldestMemberExcludingBotsOf(groupNo string, leaverUID string) (*MemberModel, error) {
+	var memberModel *MemberModel
+	_, err := d.session.SelectBySql(
+		"SELECT gm.* FROM group_member gm "+
+			"LEFT JOIN robot r ON r.robot_id = gm.uid AND r.status = 1 AND r.creator_uid = ? "+
+			"WHERE gm.group_no = ? AND gm.role <> ? AND gm.is_deleted = 0 "+
+			"AND r.robot_id IS NULL "+
+			"ORDER BY gm.created_at ASC LIMIT 1",
+		leaverUID, groupNo, MemberRoleCreator,
+	).Load(&memberModel)
+	return memberModel, err
 }
 
 // QueryExternalMemberCountTx 事务内查询群内「人类」外部成员数量（FOR UPDATE 行锁防并发）。

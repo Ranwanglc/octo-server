@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Octo 会话内搜索 · octo-server → 前端 API</title>
+<style>
+:root{--bg:#f5f7fa;--paper:#fff;--text:#1f2933;--muted:#6b7280;--line:#e5e7eb;--accent:#1f7af2;--accent-soft:#eaf2ff;--warn:#d97706;--warn-soft:#fff3e0;--err:#dc2626;--code-bg:#0f172a;--code-fg:#e2e8f0}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;line-height:1.55;font-size:14px}
+.page{max-width:1100px;margin:0 auto;padding:24px 22px 56px}
+header.top{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:20px 24px;margin-bottom:16px}
+h1{margin:0 0 6px;font-size:22px}.sub{color:var(--muted);font-size:13px;margin:0}
+section{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:18px 22px;margin-bottom:14px}
+section h2{margin:0 0 10px;font-size:18px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+section h3{font-size:15px;margin:16px 0 6px}
+section h4{font-size:12px;margin:10px 0 4px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:600}
+table{width:100%;border-collapse:collapse;margin:4px 0 8px;font-size:13px}
+th,td{border:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}
+th{background:#f3f5f8;font-weight:600}
+td code,p code,li code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;background:#eef2f7;padding:1px 5px;border-radius:3px}
+td.n,td.t{white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+td.t{color:#6b21a8}
+td.r{white-space:nowrap;text-align:center;width:44px}
+.y{color:var(--err);font-weight:700}.no{color:var(--muted)}
+pre{background:var(--code-bg);color:var(--code-fg);padding:10px 12px;border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.5;overflow-x:auto;margin:4px 0 8px}
+.note{border-left:3px solid var(--accent);background:var(--accent-soft);padding:6px 12px;border-radius:0 4px 4px 0;margin:8px 0;font-size:13px}
+.note.warn{border-color:var(--warn);background:var(--warn-soft)}
+ul.tight{margin:4px 0;padding-left:18px}ul.tight li{margin:2px 0}
+.method{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;font-weight:700;padding:2px 7px;border-radius:4px;color:#fff;background:#1f7af2;margin-right:6px}
+.path{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;font-weight:600}
+.tag{display:inline-block;font-size:11px;padding:1px 6px;border-radius:3px;background:#eef2f7;color:#374151;margin-left:4px;font-weight:600}
+footer{color:var(--muted);font-size:12px;text-align:center;padding:14px 0 0}
+</style>
+</head>
+<body>
+<div class="page">
+
+<header class="top">
+  <h1>octo-server → 前端 API（会话内搜索）</h1>
+  <p class="sub">遵循 <b>octo-openapi-dev-skill</b> 规范（R1 envelope / R2 错误码 / R3 时间字段 / R5 分页 / R6 URL / R8 字段 / R10 operationId / R13 swag）。四个独立端点按资源动作拆分，统一 cursor 分页 + envelope 包络。</p>
+</header>
+
+<section id="s0">
+  <h2>0. 概览</h2>
+  <p>会话内搜索按 skill <b>R6 「一资源一端点」</b> 原则拆为 4 个独立端点（均挂 Bearer 鉴权 + Space 中间件）：</p>
+  <table>
+    <thead><tr><th>端点</th><th>operationId（R10）</th><th>用途</th><th>关键词</th></tr></thead>
+    <tbody>
+      <tr><td><span class="method">POST</span><span class="path">/v1/messages/_search</span></td><td class="n">message.search</td><td>文本 / 转发卡 / 引用消息（外层概要展示）</td><td>必填</td></tr>
+      <tr><td><span class="method">POST</span><span class="path">/v1/messages/_search_media</span></td><td class="n">message.search.media</td><td>图片 / 视频时序列表（瀑布）</td><td>禁传</td></tr>
+      <tr><td><span class="method">POST</span><span class="path">/v1/messages/_search_files</span></td><td class="n">message.search.files</td><td>按文件名匹配（无 keyword 时浏览全部）</td><td>可选</td></tr>
+      <tr><td><span class="method">POST</span><span class="path">/v1/messages/_search_all</span></td><td class="n">message.search.all</td><td>聚合 message + file 单列时间倒序</td><td>必填</td></tr>
+    </tbody>
+  </table>
+  <p>点击命中后定位仍复用 <code>POST /v1/message/channel/sync</code>，前端用响应里的 <code>message_seq</code> 作 <code>hitSeq</code> 拉上下文，详见 §3。</p>
+  <div class="note">资源段用复数 <code>messages</code>，动作段用 <code>_</code> 前缀（R6 A.2）；与既有 <code>POST /v1/message/search</code>（WuKongIM 透传的全局关键词搜索，单数 legacy 命名空间）**路径不冲突**，二者并存。</div>
+</section>
+
+<section id="s1">
+  <h2>1. 通用约定</h2>
+
+  <h3>1.1 鉴权（R4）</h3>
+  <p>所有路由挂 <code>AuthMiddleware</code> + <code>SpaceMiddleware</code>；请求头 <code>Authorization: Bearer &lt;token&gt;</code>。当前登录 id 由 token 推导，<b>请求体不传 <code>login_*</code></b>。Space 上下文由 <code>X-Space-ID</code> 头或同名 query 提供。</p>
+
+  <h3>1.2 响应 envelope（R1）</h3>
+  <p>成功 <code>envelope.CursorList[T]</code> → <code>{ "data":[...], "pagination":{ "has_more":bool, "next_cursor":"..." } }</code>；失败 <code>envelope.Error</code> → <code>{ "error":{ "code","message","details","hint" } }</code>。不再使用 <code>{status,msg,data}</code> 旧包络；后续示例只展示包络内部。</p>
+
+  <h3>1.3 时间字段（R3）</h3>
+  <p>统一 <code>_at</code> 后缀 + RFC3339 字符串：响应 <code>sent_at</code>（<code>"2026-06-08T14:20:10Z"</code>）；请求筛选 <code>filters.sent_at_from</code> / <code>filters.sent_at_to</code>（可只到天 <code>"2026-06-01"</code>，按用户本地时区扩展为含起含止）。swag 标 <code>swaggertype:"string,date-time"</code>。</p>
+
+  <h3>1.4 分页（R5，cursor）</h3>
+  <p>请求体顶层 <code>cursor</code>（首屏空串或省略）+ <code>page_size</code>（默认 20，<b>上限 100</b>）。响应 <code>pagination.has_more = (next_cursor != "")</code>，二者同义都返。<code>next_cursor</code> 为<b>不透明字符串</b>，客户端原样回传不可解析。</p>
+
+  <h3>1.5 排序 / 1.6 高亮</h3>
+  <p>请求体 <code>sort</code> 枚举：<code>"time_desc"</code>（默认）/ <code>"time_asc"</code> / <code>"relevance"</code>；<code>_search_media</code> 不允许 <code>relevance</code>。<code>snippet</code> 字段由服务端注入 <code>&lt;mark&gt;</code>，单片段最长 120 字；<code>_search_media</code> 不返回 snippet；<code>_search_files</code> 高亮由前端在 <code>file_name</code> 上自行处理（服务端不返 marked 版本）。</p>
+
+  <h3>1.7 错误码（R2 · 12 项固定 enum）</h3>
+  <p>所有失败响应 <code>error.code</code> 来自 skill 规定的 12 项 enum；业务子分类走 <code>error.details</code> 结构化字段，<b>不新造 code</b>。</p>
+  <table>
+    <thead><tr><th>HTTP</th><th>error.code</th><th>触发条件</th><th>details 字段</th></tr></thead>
+    <tbody>
+      <tr><td>400</td><td class="n">VALIDATION_ERROR</td><td><code>_search</code> / <code>_search_all</code> keyword 必填却空 / <code>/_search_media</code> 传 keyword / 日期格式或先后错 / sender_ids 超 50 / keyword 超 64 字 / cursor 解码或签名失败 / channel_type 与 channel_id 形态不匹配</td><td class="t">field, reason, max_length?</td></tr>
+      <tr><td>401</td><td class="n">AUTH_REQUIRED</td><td>token 缺 / 过期 / 无效</td><td class="t">reason: missing|expired|invalid</td></tr>
+      <tr><td>403</td><td class="n">FORBIDDEN</td><td>无会话查看权限 / 私聊黑名单 / Space 不可见</td><td class="t">resource, required_role?</td></tr>
+      <tr><td>404</td><td class="n">NOT_FOUND</td><td>channel_id 对应的群 / 子区 / 私聊不存在</td><td class="t">resource: "channel"</td></tr>
+      <tr><td>429</td><td class="n">RATE_LIMITED</td><td>单用户 5 QPS / 20 突发桶溢出（前端务必 300ms 防抖）</td><td class="t">retry_after_seconds</td></tr>
+      <tr><td>500</td><td class="n">INTERNAL_ERROR</td><td>未分类异常 / 索引服务异常 / 反序列化失败</td><td class="t">— (不暴露细节)</td></tr>
+      <tr><td>503</td><td class="n">UPSTREAM_UNAVAILABLE</td><td>WuKongIM / 索引下游不可达</td><td class="t">upstream, upstream_status</td></tr>
+    </tbody>
+  </table>
+  <p>失败响应体示例：<code>{ "error": { "code":"VALIDATION_ERROR", "message":"keyword exceeds 64 chars", "details":{ "field":"keyword", "reason":"max_length", "max_length":64 }, "hint":"Trim the search keyword to 64 chars or fewer." } }</code></p>
+
+  <h3>1.8 公共请求字段（4 端点共享）</h3>
+  <table>
+    <thead><tr><th>字段</th><th>类型</th><th class="r">必填</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td class="n">channel_type</td><td class="t">int enum</td><td class="r y">Y</td><td><code>1</code>=私聊 / <code>2</code>=群 / <code>5</code>=子区 thread（对齐 <code>/v1/message/channel/sync</code> 现有取值）</td></tr>
+      <tr><td class="n">channel_id</td><td class="t">string</td><td class="r y">Y</td><td>私聊=对端用户 id；群=群 <code>group_no</code>；子区=<code>"{group_no}____{thread_short_id}"</code>（4 个下划线，沿用 sync 拼接约定）</td></tr>
+      <tr><td class="n">keyword</td><td class="t">string</td><td class="r no">条件</td><td>首尾空白修剪后入库，最长 64 字；<code>_search</code> / <code>_search_all</code> 必填非空；<code>_search_files</code> 可选（不传按时间倒序列全部文件）；<code>_search_media</code> 必须为空</td></tr>
+      <tr><td class="n">filters.sender_ids</td><td class="t">string[]</td><td class="r no">N</td><td>≤ 50；私聊时仅允许当前登录 id 与对端 id 子集</td></tr>
+      <tr><td class="n">filters.sent_at_from / .sent_at_to</td><td class="t">string</td><td class="r no">N</td><td>RFC3339 或仅日期；含起 / 含止；<code>sent_at_to</code> 需 ≥ <code>sent_at_from</code></td></tr>
+      <tr><td class="n">sort</td><td class="t">string enum</td><td class="r no">N</td><td>见 §1.5</td></tr>
+      <tr><td class="n">cursor / page_size</td><td class="t">string / int</td><td class="r no">N</td><td>cursor 首屏空串或省略；page_size 1–100，默认 20</td></tr>
+    </tbody>
+  </table>
+  <p class="sub">字段命名遵循 R8 snake_case + <code>_id</code> 后缀；<code>group_no</code> / <code>thread_short_id</code> 出现在 <code>channel_id</code> 拼接串里是对 octo-server 存量实体名的保留，不在新字段中再造 <code>_uid</code> / <code>_no</code>。响应头 <code>X-Server-Time-Ms</code> 携带服务端处理耗时（不进 body）。</p>
+</section>
+
+<section id="s2-msg">
+  <h2>2.1 <span class="method">POST</span><span class="path">/v1/messages/_search</span><span class="tag">message.search</span></h2>
+  <p>命中文本消息 / 转发卡 / 引用消息，定位指向外层消息。<code>keyword</code> 必填非空。</p>
+  <div class="note">服务端仍在 ES 索引内对转发卡子消息正文 / 引用原消息正文做召回（命中率不变），但 API 层仅返回外层消息 + 单 <code>snippet</code>（来自外层文本或服务端从内层匹配中合成的概要片段）。点击定位仍用外层 <code>message_seq</code>，与 <code>_search_files</code> / <code>_search_media</code> 结构对称。</div>
+
+  <h4>请求示例</h4>
+<pre>{ "channel_type":2, "channel_id":"G_abc123", "keyword":"上线方案",
+  "filters":{ "sender_ids":["u_alice"], "sent_at_from":"2026-06-01", "sent_at_to":"2026-06-08" },
+  "sort":"time_desc", "page_size":20, "cursor":"" }</pre>
+
+  <h4>data[] 元素字段（MessageSearchHit）</h4>
+  <table>
+    <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td class="n">message_id</td><td class="t">string</td><td>外层消息 id，定位跳转用此 id</td></tr>
+      <tr><td class="n">message_seq</td><td class="t">int64</td><td><b>必填</b>。外层消息在所属 channel 内的单调序列号，前端用其调 sync 拉命中 + 上下文（详见 §3）</td></tr>
+      <tr><td class="n">message_kind</td><td class="t">string enum</td><td><code>"text"</code> / <code>"forward"</code></td></tr>
+      <tr><td class="n">snippet</td><td class="t">string</td><td>含 <code>&lt;mark&gt;</code> 的概要片段，来自外层文本或服务端从内层匹配中合成的片段，单片段最长 120 字</td></tr>
+      <tr><td class="n">sender_id / sender_name / sender_avatar_url</td><td class="t">string</td><td>外层消息发送人 id / 显示名 / 头像 URL（R8 <code>_url</code> 后缀）</td></tr>
+      <tr><td class="n">sent_at</td><td class="t">string (date-time)</td><td>外层消息发送时间，RFC3339</td></tr>
+      <tr><td class="n">outer_preview</td><td class="t">object?</td><td>仅 message_kind=forward 返回：<code>{ child_count }</code>（表示合并转发卡含 N 条子消息）。text 分支不返；quote 本期不区分（外层正文 snippet 已能定位原消息）</td></tr>
+      <tr><td class="n">channel_id</td><td class="t">string</td><td>命中所在 channel（与请求回显）</td></tr>
+    </tbody>
+  </table>
+
+  <h4>响应示例</h4>
+<pre>{
+  "data": [
+    { "message_id":"m_2001", "message_seq":12345,
+      "message_kind":"text",
+      "snippet":"我们讨论一下 &lt;mark&gt;上线方案&lt;/mark&gt; 的灰度比例",
+      "sender_id":"u_alice", "sender_name":"Alice",
+      "sender_avatar_url":"https://cdn.octo/avatar/alice.png",
+      "sent_at":"2026-06-08T14:20:10Z",
+      "channel_id":"G_abc123" },
+    { "message_id":"m_1888", "message_seq":12110,
+      "message_kind":"forward",
+      "snippet":"Bob: 关于 &lt;mark&gt;上线方案&lt;/mark&gt;，建议先 1% 灰度",
+      "sender_id":"u_carol", "sender_name":"Carol",
+      "sender_avatar_url":"https://cdn.octo/avatar/carol.png",
+      "sent_at":"2026-06-08T05:40:00Z",
+      "outer_preview":{ "child_count":12 },
+      "channel_id":"G_abc123" }
+  ],
+  "pagination":{ "has_more":true, "next_cursor":"eyJ0c19tcyI6MTcxNzU0MzIxMDAwMCwiaWQiOiJtXzAwMDEifQ==" }
+}</pre>
+</section>
+
+<section id="s2-media">
+  <h2>2.2 <span class="method">POST</span><span class="path">/v1/messages/_search_media</span><span class="tag">message.search.media</span></h2>
+  <div class="note warn"><b>本端点不接受关键词。</b><code>keyword</code> 必须空或省略，传入非空返 <code>400 VALIDATION_ERROR</code>（<code>details.field="keyword"</code>，<code>details.reason="not_allowed"</code>）。响应条目不返回任何 snippet 字段。</div>
+
+  <h4>请求示例</h4>
+<pre>{ "channel_type":2, "channel_id":"G_abc123",
+  "filters":{ "sender_ids":["u_alice"], "sent_at_from":"2026-05-01", "sent_at_to":"2026-05-31" },
+  "sort":"time_desc", "page_size":30, "cursor":"" }</pre>
+
+  <h4>data[] 元素字段（MediaSearchHit）</h4>
+  <table>
+    <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td class="n">message_id</td><td class="t">string</td><td>承载此图/视频的消息 id</td></tr>
+      <tr><td class="n">message_seq</td><td class="t">int64</td><td><b>必填</b>。承载消息序列号，点击缩略图按 §3 调 sync 定位</td></tr>
+      <tr><td class="n">media_kind</td><td class="t">string enum</td><td><code>"image"</code> / <code>"video"</code></td></tr>
+      <tr><td class="n">thumb_url</td><td class="t">string</td><td>缩略图 URL（视频亦给一帧封面）</td></tr>
+      <tr><td class="n">duration_ms</td><td class="t">int</td><td>仅 <code>media_kind="video"</code> 返回；时长以毫秒计（单位字段，非时间戳）</td></tr>
+      <tr><td class="n">width / height</td><td class="t">int</td><td>缩略图宽 / 高（瀑布布局）</td></tr>
+      <tr><td class="n">sender_id / sender_name</td><td class="t">string</td><td>发送人 id / 显示名</td></tr>
+      <tr><td class="n">sent_at</td><td class="t">string (date-time)</td><td>发送时间，RFC3339</td></tr>
+      <tr><td class="n">month_bucket</td><td class="t">string</td><td><code>"YYYY-MM"</code>，用于按月分组标题（业务字段，非 R3 时间字段）</td></tr>
+    </tbody>
+  </table>
+
+  <h4>响应示例</h4>
+<pre>{
+  "data": [
+    { "message_id":"m_2200", "message_seq":22001, "media_kind":"image",
+      "thumb_url":"https://cdn.octo/img/m_2200/thumb.jpg",
+      "width":320, "height":240,
+      "sender_id":"u_alice", "sender_name":"Alice",
+      "sent_at":"2026-05-30T10:13:30Z", "month_bucket":"2026-05" },
+    { "message_id":"m_2201", "message_seq":22042, "media_kind":"video",
+      "thumb_url":"https://cdn.octo/vid/m_2201/cover.jpg",
+      "duration_ms":18500, "width":480, "height":270,
+      "sender_id":"u_bob", "sender_name":"Bob",
+      "sent_at":"2026-05-30T09:10:00Z", "month_bucket":"2026-05" }
+  ],
+  "pagination":{ "has_more":true, "next_cursor":"eyJ0c19tcyI6MTcxNTUwMDAwMDAwMCwiaWQiOiJtXzExMTEifQ==" }
+}</pre>
+</section>
+
+<section id="s2-file">
+  <h2>2.3 <span class="method">POST</span><span class="path">/v1/messages/_search_files</span><span class="tag">message.search.files</span></h2>
+  <p>按文件名关键词匹配（文件内容不参与搜索）。<code>keyword</code> <b>可选</b>：不传则按时间倒序列出会话内全部文件；传则做名称匹配 + 高亮 <code>&lt;mark&gt;</code>。</p>
+
+  <h4>请求示例 A：keyword 空（浏览全部文件）</h4>
+<pre>{ "channel_type":5, "channel_id":"G_abc123____T_55",
+  "filters":{ "sent_at_from":"2026-01-01" },
+  "sort":"time_desc", "page_size":20, "cursor":"" }</pre>
+
+  <h4>请求示例 B：keyword 非空（按文件名匹配）</h4>
+<pre>{ "channel_type":5, "channel_id":"G_abc123____T_55", "keyword":"季度报告",
+  "filters":{ "sent_at_from":"2026-01-01" },
+  "sort":"time_desc", "page_size":20, "cursor":"" }</pre>
+
+  <h4>data[] 元素字段（FileSearchHit）</h4>
+  <table>
+    <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td class="n">message_id</td><td class="t">string</td><td>承载文件的消息 id</td></tr>
+      <tr><td class="n">message_seq</td><td class="t">int64</td><td><b>必填</b>。承载消息序列号，按 §3 调 sync 定位</td></tr>
+      <tr><td class="n">file_name</td><td class="t">string</td><td>纯文件名，不含 mark。高亮由前端拿 <code>file_name + keyword</code> 自行处理（服务端不返 marked 版本）</td></tr>
+      <tr><td class="n">file_size_bytes</td><td class="t">int64</td><td>字节数（带单位后缀，避免 <code>size</code> 歧义）</td></tr>
+      <tr><td class="n">file_ext</td><td class="t">string</td><td>扩展名小写，不含 <code>.</code></td></tr>
+      <tr><td class="n">download_url</td><td class="t">string (uri)</td><td>下载 URL（带签名，R8 <code>_url</code> 后缀）</td></tr>
+      <tr><td class="n">preview_url</td><td class="t">string? (uri)</td><td>预览 URL，不支持时为 null</td></tr>
+      <tr><td class="n">sender_id / sender_name / sender_avatar_url</td><td class="t">string</td><td>发送人 id / 显示名 / 头像 URL</td></tr>
+      <tr><td class="n">sent_at</td><td class="t">string (date-time)</td><td>发送时间，RFC3339</td></tr>
+    </tbody>
+  </table>
+
+  <h4>响应示例</h4>
+<pre>{
+  "data": [
+    { "message_id":"m_1900", "message_seq":19005,
+      "file_name":"Q2 季度报告.pdf",
+      "file_size_bytes":1048576, "file_ext":"pdf",
+      "download_url":"https://cdn.octo/dl/m_1900?sig=...",
+      "preview_url":"https://cdn.octo/preview/m_1900",
+      "sender_id":"u_alice", "sender_name":"Alice",
+      "sender_avatar_url":"https://cdn.octo/avatar/alice.png",
+      "sent_at":"2026-06-01T08:53:20Z" }
+  ],
+  "pagination":{ "has_more":false, "next_cursor":"" }
+}</pre>
+</section>
+
+<section id="s2-all">
+  <h2>2.4 <span class="method">POST</span><span class="path">/v1/messages/_search_all</span><span class="tag">message.search.all</span></h2>
+  <p>单列时间倒序聚合 <code>message + file</code>（转发卡视为 message 子类型，由 <code>message_kind</code> 区分；引用不独立区分类型）。media 不接受关键词，不混入本端点。<code>keyword</code> 必填非空。</p></p>
+
+  <h4>请求示例</h4>
+<pre>{ "channel_type":1, "channel_id":"u_dan", "keyword":"周报",
+  "filters":{}, "sort":"time_desc", "page_size":20, "cursor":"" }</pre>
+
+  <h4>data[] 元素字段（CombinedSearchHit · 判别式）</h4>
+  <table>
+    <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td class="n">result_type</td><td class="t">string enum</td><td><code>"message"</code>（含 forward） / <code>"file"</code> — 判别式</td></tr>
+      <tr><td class="n">message</td><td class="t">object?</td><td><code>result_type="message"</code> 时存在，schema 同 §2.1 MessageSearchHit</td></tr>
+      <tr><td class="n">file</td><td class="t">object?</td><td><code>result_type="file"</code> 时存在，schema 同 §2.3 FileSearchHit</td></tr>
+      <tr><td class="n">sorted_at</td><td class="t">string (date-time)</td><td>统一排序时间（等于内层 <code>message.sent_at</code> 或 <code>file.sent_at</code>），便于客户端不必下钻判别式即可排序</td></tr>
+    </tbody>
+  </table>
+
+  <h4>响应示例</h4>
+<pre>{
+  "data": [
+    { "result_type":"message", "sorted_at":"2026-06-08T14:20:10Z",
+      "message":{ "message_id":"m_2001", "message_seq":30188,
+        "message_kind":"text",
+        "snippet":"这周 &lt;mark&gt;周报&lt;/mark&gt; 我来写",
+        "sender_id":"u_dan", "sender_name":"Dan",
+        "sender_avatar_url":"https://cdn.octo/avatar/dan.png",
+        "sent_at":"2026-06-08T14:20:10Z",
+        "channel_id":"u_dan" } },
+    { "result_type":"file", "sorted_at":"2026-06-01T08:53:20Z",
+      "file":{ "message_id":"m_1900", "message_seq":29940,
+        "file_name":"周报_W23.docx",
+        "file_size_bytes":204800, "file_ext":"docx",
+        "download_url":"https://cdn.octo/dl/m_1900?sig=...",
+        "preview_url":null,
+        "sender_id":"u_self", "sender_name":"我",
+        "sender_avatar_url":"https://cdn.octo/avatar/self.png",
+        "sent_at":"2026-06-01T08:53:20Z" } }
+  ],
+  "pagination":{ "has_more":false, "next_cursor":"" }
+}</pre>
+</section>
+
+<section id="s3">
+  <h2>3. 点击定位（复用 sync）</h2>
+  <p>用户点击任一命中（无论端点），前端统一调 <code>POST /v1/message/channel/sync</code>，用搜索响应里的 <code>message_seq</code>（聚合 <code>_search_all</code> 时取 <code>message.message_seq</code> / <code>file.message_seq</code>）作为 <code>hitSeq</code>，按 <code>[hitSeq - N, hitSeq + N]</code> 一次拉命中消息 + 上下文。</p>
+  <div class="note">sync 端点本身是 octo-server 既有 legacy 路由（路径单数 + 无 <code>_</code> 前缀），<b>不在本次重设计范围</b>。前端按现有契约继续调用即可。</div>
+
+  <h4>三种 channel 的参数映射</h4>
+  <table>
+    <thead><tr><th>来源会话类型</th><th><code>channel_id</code></th><th><code>channel_type</code></th></tr></thead>
+    <tbody>
+      <tr><td>私聊（channel_type=1）</td><td>对端用户 id</td><td><code>1</code></td></tr>
+      <tr><td>群（channel_type=2）</td><td>群 <code>group_no</code></td><td><code>2</code></td></tr>
+      <tr><td>子区 Thread（channel_type=5）</td><td><code>"{group_no}____{thread_short_id}"</code>（4 个下划线）</td><td><code>5</code></td></tr>
+    </tbody>
+  </table>
+
+  <h4>请求示例</h4>
+<pre>POST /v1/message/channel/sync
+{ "channel_id":"&lt;按上表&gt;", "channel_type":&lt;按上表&gt;,
+  "login_uid":"&lt;当前登录 uid&gt;", "device_uuid":"&lt;设备 uuid&gt;",
+  "start_message_seq":&lt;hitSeq - N&gt;, "end_message_seq":&lt;hitSeq + N&gt;,
+  "limit":&lt;2*N + 1&gt;, "pull_mode":1 }</pre>
+
+  <p><b>N 推荐值</b>：<code>N=20</code>（一次最多 41 条），具体由前端按上下文 UI 自决。响应按 <code>message_seq</code> 升序排版，把 hitSeq 那条高亮并滚动到视区中央。</p>
+
+  <h4>注意事项</h4>
+  <ul class="tight">
+    <li>sync 已挂 AuthMiddleware + SpaceMiddleware，前端不附加额外鉴权。</li>
+    <li>非群内用户调 sync 返回空 <code>messages</code> 数组（非 403），按 0 条结果处理。</li>
+    <li>hitSeq 可能已撤回 / 删除而在响应窗口中缺失；前端按 <code>message_seq</code> 排版即可，仅少高亮一条。</li>
+  </ul>
+</section>
+
+<section id="s5">
+  <h2>4. 规范要点速查</h2>
+  <table>
+    <thead><tr><th>R</th><th>本文档落地</th></tr></thead>
+    <tbody>
+      <tr><td class="n">R1 envelope</td><td>成功 <code>{data, pagination}</code> · 失败 <code>{error}</code>；不再用 <code>{status, msg, data}</code></td></tr>
+      <tr><td class="n">R2 错误码</td><td>12 项固定 enum + <code>details</code> 结构化；不新造 <code>SEARCH_*</code> 业务码</td></tr>
+      <tr><td class="n">R3 时间</td><td><code>sent_at</code> RFC3339；<code>filters.sent_at_from</code> / <code>filters.sent_at_to</code>；耗时入 <code>X-Server-Time-Ms</code> 头</td></tr>
+      <tr><td class="n">R5 分页</td><td>cursor 模式 · 顶层 <code>cursor</code> + <code>page_size</code>（默认 20 / 上限 100）· <code>pagination.{has_more,next_cursor}</code></td></tr>
+      <tr><td class="n">R6 URL</td><td>复数 <code>/v1/messages</code> + <code>_</code> 前缀动作；按 kind 拆 4 端点（一资源一动作）</td></tr>
+      <tr><td class="n">R8 字段</td><td>snake_case · <code>is_</code> bool · <code>_url</code> 后缀 · 新字段一律 <code>_id</code>（不新造 <code>_uid</code>）</td></tr>
+      <tr><td class="n">R10 operationId</td><td><code>message.search[.media|.files|.all]</code> 2–3 段</td></tr>
+      <tr><td class="n">R13 swag</td><td>9 个必带标签 · <code>@Router</code> 相对路径（不带 <code>/v1</code>）· <code>@Success/Failure</code> 引 <code>envelope.CursorList[T]</code> / <code>envelope.Error</code> · 本地校验 <code>make openapi-check</code></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<footer>octo-server 会话内搜索 API · 遵循 octo-openapi-dev-skill</footer>
+
+</div>
+</body>
+</html>

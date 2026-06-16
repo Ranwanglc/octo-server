@@ -1,11 +1,39 @@
 package common
 
+import "strconv"
+
 // Value types accepted by system_setting.value_type.
 const (
 	settingTypeString    = "string"
 	settingTypeBool      = "bool"
 	settingTypeInt       = "int"
+	settingTypeFloat     = "float"
 	settingTypeEncrypted = "encrypted"
+)
+
+// settingIntMin / settingIntMax bound every settingTypeInt value, applied both
+// on the admin write path (api_manager_system_setting.go) and in the clamping
+// getters (getIntClamped). Today all int settings are day-window counts
+// (sidebar.recent_filter_*_days), for which [0, 3650] (0 .. ~10 years) is a
+// generous sane range; 0 is the documented "disable filter" sentinel. Adding
+// an int setting that needs a different range should move this to a per-key
+// field on settingDef — until then a single shared bound keeps the write path
+// simple and closes the pre-existing "no bounds check" gap (issue #289).
+const (
+	settingIntMin = 0
+	settingIntMax = 3650
+)
+
+// Sidebar recent-tab activity-filter defaults (issue #289). The recent tab of
+// POST /v1/sidebar/sync hides conversations whose last activity is older than
+// a per-channel-type window. These defaults reproduce the historical
+// hard-coded behaviour exactly (groups/threads = 3-day window, DMs unfiltered)
+// so the feature is zero-impact until an operator opts in. A value of 0
+// disables the window for that channel type (return all, no time limit).
+const (
+	defaultSidebarRecentFilterGroupDays  = 3
+	defaultSidebarRecentFilterThreadDays = 3
+	defaultSidebarRecentFilterPersonDays = 0
 )
 
 // settingDef is the canonical definition of a system_setting key.
@@ -27,6 +55,16 @@ type settingDef struct {
 	// API layer is responsible for masking before serialisation; never
 	// surface this value directly.
 	Effective func(*SystemSettings) string
+	// Positive, when set on a settingTypeInt / settingTypeFloat key, requires a
+	// strictly-positive finite value on the admin write path and OPTS OUT of the
+	// shared [settingIntMin, settingIntMax] bound (which exists for the
+	// day-window int settings where 0 is a valid "disable" sentinel). Used by
+	// rate-limit / quota knobs (incomingwebhook.*) where 0 / negative / NaN / Inf
+	// would silently disable the control — the schema comment on settingIntMin
+	// anticipated this per-key override. No artificial upper bound is imposed
+	// (matches the env semantics these keys fall back to). Read-side defence is
+	// in the typed getters (clamp ≤0 / non-finite → default).
+	Positive bool
 }
 
 // systemSettingSchema enumerates every admin-tunable setting backed by the
@@ -56,6 +94,30 @@ var systemSettingSchema = []settingDef{
 	{Category: "space", Key: "disable_user_create", Type: settingTypeBool, Description: "是否关闭普通用户创建空间入口",
 		Effective: func(s *SystemSettings) string { return boolToCanonical(s.SpaceDisableUserCreate()) }},
 
+	// Sidebar recent-tab activity filter — per-channel-type window in days for
+	// POST /v1/sidebar/sync 的 recent tab。0 = 关闭该类型的时间过滤（全量返回）。
+	// 默认复刻历史硬编码行为：群/话题 3 天窗口、DM 不过滤（issue #289）。
+	{Category: "sidebar", Key: "recent_filter_group_days", Type: settingTypeInt, Description: "最近会话-群聊活跃过滤窗口(天)，0=不过滤",
+		Effective: func(s *SystemSettings) string { return strconv.Itoa(s.SidebarRecentFilterGroupDays()) }},
+	{Category: "sidebar", Key: "recent_filter_thread_days", Type: settingTypeInt, Description: "最近会话-话题(社区话题)活跃过滤窗口(天)，0=不过滤",
+		Effective: func(s *SystemSettings) string { return strconv.Itoa(s.SidebarRecentFilterThreadDays()) }},
+	{Category: "sidebar", Key: "recent_filter_person_days", Type: settingTypeInt, Description: "最近会话-单聊(DM)活跃过滤窗口(天)，0=不过滤(默认)",
+		Effective: func(s *SystemSettings) string { return strconv.Itoa(s.SidebarRecentFilterPersonDays()) }},
+
+	// Incoming webhook 总开关 + 核心阈值 — 与 env(DM_INCOMINGWEBHOOK_*) 等价，DB 为
+	// 单一真源。enabled 关闭后 push 返回 404、管理写操作被拒、仅保留 list 只读；
+	// 其余三项实时调阈值无需重启（SystemSettings 快照 60s 内多实例收敛）。
+	{Category: "incomingwebhook", Key: "enabled", Type: settingTypeBool, Description: "是否开启群入站 Webhook（关闭后停止推送与管理写操作）",
+		Effective: func(s *SystemSettings) string { return boolToCanonical(s.IncomingWebhookEnabled()) }},
+	{Category: "incomingwebhook", Key: "per_webhook_rps", Type: settingTypeFloat, Description: "单个 Webhook 每秒推送速率上限（令牌桶 rps）", Positive: true,
+		Effective: func(s *SystemSettings) string { return floatToCanonical(s.IncomingWebhookPerWebhookRPS()) }},
+	{Category: "incomingwebhook", Key: "per_webhook_burst", Type: settingTypeInt, Description: "单个 Webhook 推送突发上限（令牌桶 burst）", Positive: true,
+		Effective: func(s *SystemSettings) string { return strconv.Itoa(s.IncomingWebhookPerWebhookBurst()) }},
+	{Category: "incomingwebhook", Key: "max_per_group", Type: settingTypeInt, Description: "单个群最多可创建的 Webhook 数量", Positive: true,
+		Effective: func(s *SystemSettings) string { return strconv.Itoa(s.IncomingWebhookMaxPerGroup()) }},
+	{Category: "incomingwebhook", Key: "max_per_creator", Type: settingTypeInt, Description: "单个普通成员/机器人在一个群内最多可创建的 Webhook 数量（群主/管理员不受限）", Positive: true,
+		Effective: func(s *SystemSettings) string { return strconv.Itoa(s.IncomingWebhookMaxPerCreator()) }},
+
 	// Email server config — formerly yaml-only (Support.* in config.go).
 	{Category: "support", Key: "email", Type: settingTypeString, Description: "技术支持邮箱（发件人）",
 		Effective: func(s *SystemSettings) string { return s.SupportEmail() }},
@@ -73,6 +135,12 @@ func boolToCanonical(v bool) string {
 		return "1"
 	}
 	return "0"
+}
+
+// floatToCanonical 把 float 规范成最短十进制表示（5.0 → "5"，0.5 → "0.5"），与
+// settingTypeFloat 的 DB 存储 / POST 入参拼写保持一致，供 GET effective_value 用。
+func floatToCanonical(v float64) string {
+	return strconv.FormatFloat(v, 'g', -1, 64)
 }
 
 // schemaKey returns the canonical "category.key" string used as map key in

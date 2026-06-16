@@ -23,6 +23,7 @@ type LanguageSource string
 
 const (
 	LanguageSourceTrustedHeader LanguageSource = "trusted_header"
+	LanguageSourceGRPCMetadata  LanguageSource = "grpc_metadata"
 	LanguageSourceQuery         LanguageSource = "query"
 	LanguageSourceCookie        LanguageSource = "cookie"
 	LanguageSourceUser          LanguageSource = "user"

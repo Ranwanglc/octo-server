@@ -15,20 +15,18 @@
 # i18n value — external/infra consumers that never read the localized
 # envelope) are tagged "# EXEMPT: <why>" so future migrations don't try to
 # zero them; all other rows are migration debt and should ratchet to 0.
-9 modules/app_bot/app_bot.go
-6 modules/bot_api/auth.go
-9 modules/bot_api/groups.go
-5 modules/bot_api/obo_api.go
-1 modules/bot_api/threads.go
-3 modules/bot_api/voice_adapter.go
-3 modules/botfather/api.go
-9 modules/botfather/api_bot.go
-1 modules/botfather/api_bot_thread.go
-9 modules/botfather/api_user.go
+0 modules/app_bot/app_bot.go  # forbidden guards migrated to httperr.ResponseErrorL / ResponseErrorLWithStatus
+0 modules/bot_api/auth.go  # migrated to httperr.ResponseErrorLWithStatus (#276)
+0 modules/bot_api/groups.go  # migrated to httperr.ResponseErrorL / ResponseErrorLWithStatus (#276)
+0 modules/bot_api/obo_api.go  # migrated to httperr.ResponseErrorLWithStatus (#276)
+0 modules/bot_api/threads.go  # migrated to httperr.ResponseErrorLWithStatus (#276)
+0 modules/bot_api/voice_adapter.go  # migrated to httperr.ResponseErrorLWithStatus (#276)
+0 modules/botfather/api.go  # bot handlers moved to modules/bot_api; only doc/init code remains (#278)
+0 modules/botfather/api_user.go  # migrated to httperr.ResponseErrorL / ResponseErrorLWithStatus (#278)
 2 modules/notify/api.go
-14 modules/oidc/api.go
-37 modules/oidc/api_bind.go
-6 modules/robot/api.go
+14 modules/oidc/api.go  # EXEMPT: OAuth2/OIDC protocol endpoints (authorize/callback/logout) — browser-facing redirect flow, not the dmwork front-end; raw errMsg() kept by design (#220). The err.Error() leaks were closed in #220.
+0 modules/oidc/api_bind.go  # migrated to httperr.ResponseErrorLWithStatus (#220)
+0 modules/robot/api.go  # migrated to httperr.ResponseErrorL / ResponseErrorLWithStatus (#267)
 8 modules/user/api.go
 4 modules/webhook/github.go  # EXEMPT: GitHub webhook signature errors — external GH never reads the localized envelope
 4 pkg/space/middleware.go

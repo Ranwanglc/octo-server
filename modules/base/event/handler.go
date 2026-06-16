@@ -9,6 +9,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/pool"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
+	"github.com/Mininglamp-OSS/octo-server/pkg/avatarversion"
 	"go.uber.org/zap"
 )
 
@@ -171,6 +172,15 @@ func (e *Event) handleGroupAvatarUpdateEvent(model *Model) {
 				e.Error("解析JSON失败！", zap.Error(err), zap.String("data", model.Data))
 				return
 			}
+			state, err := e.db.queryGroupAvatarState(req.GroupNo)
+			if err != nil {
+				e.Error("查询群头像状态失败！", zap.String("groupNo", req.GroupNo), zap.Error(err))
+				return
+			}
+			if state == nil || !shouldComposeGroupAvatar(state.IsUploadAvatar) {
+				e.updateEventStatus(nil, model.VersionLock, model.Id)
+				return
+			}
 			// 组合群头像
 			downloadURLs := make([]string, 0)
 			for _, member := range req.Members {
@@ -179,10 +189,20 @@ func (e *Event) handleGroupAvatarUpdateEvent(model *Model) {
 				}
 				downloadURLs = append(downloadURLs, fmt.Sprintf("%s/users/%s/avatar?v=%d", e.ctx.GetConfig().External.APIBaseURL, member, time.Now().UnixNano()))
 			}
-			uploadPath := e.ctx.GetConfig().GetGroupAvatarFilePath(req.GroupNo)
+			avatarVersion := avatarversion.New()
+			uploadPath := e.ctx.GetConfig().GetGroupAvatarFilePath(req.GroupNo, avatarVersion)
 			_, err = e.fileService.DownloadAndMakeCompose(uploadPath, downloadURLs)
 			if err != nil {
 				e.Error("组合群头像失败！", zap.String("groupNo", req.GroupNo), zap.Any("members", req.Members), zap.Error(err))
+				return
+			}
+			updated, err := e.db.updateGeneratedGroupAvatar(req.GroupNo, uploadPath, avatarVersion)
+			if err != nil {
+				e.Error("更新合成群头像版本失败！", zap.String("groupNo", req.GroupNo), zap.String("avatar", uploadPath), zap.Error(err))
+				return
+			}
+			if !updated {
+				e.updateEventStatus(nil, model.VersionLock, model.Id)
 				return
 			}
 			// 发送群头像更新命令
@@ -201,6 +221,10 @@ func (e *Event) handleGroupAvatarUpdateEvent(model *Model) {
 			e.updateEventStatus(err, model.VersionLock, model.Id)
 		},
 	}
+}
+
+func shouldComposeGroupAvatar(isUploadAvatar int) bool {
+	return isUploadAvatar != 1
 }
 
 // 群成员扫码加入
