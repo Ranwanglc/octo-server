@@ -135,20 +135,6 @@ func (bf *BotFather) runtimeOnboarding(c *wkhttp.Context) {
 		return
 	}
 
-	// commands.start 是 standalone 可复制可跑的 multi-line block: 2 个
-	// OCTO_*_URL export 让 daemon 各 service 调用走 env (fleet 走 runtime/bot
-	// 端点, server 走 auth/bot_token 端点), 末尾 octo-daemon start 行的
-	// --api-url 用 serverURL — 跟旧 BotFather /daemon 命令一致 (cfg.APIURL 在
-	// daemon 内只是 env 缺失时的 fallback, env 全设了 cfg.APIURL 不会被读).
-	// 不下发 OCTO_MATTER_URL: daemon 二进制不读该 env (它不直接调 matter),
-	// 且 matter 当前未上线. caller 直接复制 commands.start 就跑得起来, 不用
-	// 再去 env_vars 字段二次拼接 (env_vars 单独保留供想 set 到 shell rc 而非
-	// inline 的场景).
-	startBlock := fmt.Sprintf(
-		"export OCTO_SERVER_URL=%s\nexport OCTO_FLEET_URL=%s\nocto-daemon start --api-key %s --api-url %s",
-		serverURL, fleetURL, apiKey, serverURL,
-	)
-
 	resp := runtimeOnboardingResp{
 		APIKey:    apiKey,
 		SpaceID:   spaceID,
@@ -156,15 +142,47 @@ func (bf *BotFather) runtimeOnboarding(c *wkhttp.Context) {
 		FleetURL:  fleetURL,
 		MatterURL: matterURL,
 		Commands: onboardingCmds{
-			Install: "npm install -g @mininglamp-oss/octo-daemon",
-			Start:   startBlock,
+			Install: daemonInstallCommand,
+			Start:   buildDaemonStartBlock(serverURL, fleetURL, apiKey),
 		},
-		EnvVars: map[string]string{
-			"OCTO_SERVER_URL": serverURL,
-			"OCTO_FLEET_URL":  fleetURL,
-		},
+		EnvVars: daemonEnvVars(serverURL, fleetURL),
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// daemonInstallCommand installs the octo-daemon CLI the onboarding block
+// instructs the user to run.
+const daemonInstallCommand = "npm install -g @mininglamp-oss/octo-daemon"
+
+// buildDaemonStartBlock renders the standalone, copy-runnable multi-line
+// start block: two OCTO_*_URL exports so the daemon's per-service calls go
+// through env (fleet → runtime/bot endpoints, server → auth/bot_token
+// endpoints), then `octo-daemon start` whose --api-url uses serverURL (matching
+// the now-removed BotFather /daemon command — cfg.APIURL is only the daemon's
+// env-missing fallback, so with both envs set it is never read).
+//
+// OCTO_MATTER_URL is deliberately NOT emitted (#362): the octo-daemon binary
+// does not read that env (it never calls matter directly — matter task
+// ack/pull is reached through the fleet/server endpoints), so instructing the
+// user to export it was a no-op that caused bot-provisioning friction. Only
+// the two URLs the daemon actually consumes are emitted. Keep this contract:
+// the start block and env_vars must contain exactly OCTO_SERVER_URL and
+// OCTO_FLEET_URL, never OCTO_MATTER_URL.
+func buildDaemonStartBlock(serverURL, fleetURL, apiKey string) string {
+	return fmt.Sprintf(
+		"export OCTO_SERVER_URL=%s\nexport OCTO_FLEET_URL=%s\nocto-daemon start --api-key %s --api-url %s",
+		serverURL, fleetURL, apiKey, serverURL,
+	)
+}
+
+// daemonEnvVars returns the env vars the daemon actually consumes, for callers
+// who prefer setting them in a shell rc file rather than inlining per-invocation.
+// Mirrors buildDaemonStartBlock — OCTO_MATTER_URL is intentionally excluded (#362).
+func daemonEnvVars(serverURL, fleetURL string) map[string]string {
+	return map[string]string{
+		"OCTO_SERVER_URL": serverURL,
+		"OCTO_FLEET_URL":  fleetURL,
+	}
 }
 
 // getOrCreateUserAPIKey looks up the (uid, space_id) api_key row, or
