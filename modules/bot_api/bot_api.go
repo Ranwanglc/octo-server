@@ -15,6 +15,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/thread"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-server/modules/voice_adapter"
+	appwkhttp "github.com/Mininglamp-OSS/octo-server/pkg/wkhttp"
 )
 
 const (
@@ -29,13 +30,13 @@ const (
 // BotAPI is the public Bot API gateway module.
 // It handles all bot-facing endpoints (/v1/bot/*) with unified auth.
 type BotAPI struct {
-	ctx                   *config.Context
-	db                    *botAPIDB
-	userService           user.IService
-	fileService           file.IService
-	groupService          group.IService
-	userDB                *user.DB
-	threadService         thread.IService
+	ctx           *config.Context
+	db            *botAPIDB
+	userService   user.IService
+	fileService   file.IService
+	groupService  group.IService
+	userDB        *user.DB
+	threadService thread.IService
 	// robotService gives the OBO fan-out path a way to enqueue synthetic
 	// events directly into a grantee bot's /v1/bot/events queue. The
 	// webhook layer drops NoPersist=1 messages before NotifyMessagesListeners
@@ -232,8 +233,12 @@ func (ba *BotAPI) Route(r *wkhttp.WKHttp) {
 	// register endpoint (token needed but not via authBot group — handled inline)
 	r.POST("/v1/bot/register", ba.register)
 
-	// Bot API endpoints (unified auth middleware)
-	botAPI := r.Group("/v1/bot", ba.authBot())
+	// Bot API endpoints (unified auth middleware).
+	// SharedUIDRateLimiter is mounted AFTER authBot() so it reads the "uid"
+	// authBot sets (= robotID): every authenticated bot send/stream/manage call
+	// is capped per-bot, not just by the global per-IP DDoS floor. This closes
+	// the stream-amplification gap on stream/start (OCT-42).
+	botAPI := r.Group("/v1/bot", ba.authBot(), appwkhttp.SharedUIDRateLimiter(r, ba.ctx))
 	{
 		botAPI.POST("/sendMessage", ba.sendMessage)
 		botAPI.POST("/typing", ba.typing)
@@ -295,8 +300,9 @@ func (ba *BotAPI) Route(r *wkhttp.WKHttp) {
 		botAPI.GET("/obo-grant", ba.oboBotGetGrant)
 	}
 
-	// Bot File API (separate group for wildcard conflict avoidance)
-	botFileAPI := r.Group("/v1/botfile", ba.authBot())
+	// Bot File API (separate group for wildcard conflict avoidance).
+	// Same per-UID cap as the main bot group (OCT-42).
+	botFileAPI := r.Group("/v1/botfile", ba.authBot(), appwkhttp.SharedUIDRateLimiter(r, ba.ctx))
 	{
 		botFileAPI.GET("/*path", ba.botProxyFile)
 		botFileAPI.POST("/upload", ba.botUploadFile)

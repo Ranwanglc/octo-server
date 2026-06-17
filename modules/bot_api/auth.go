@@ -42,6 +42,18 @@ func (ba *BotAPI) authBot() wkhttp.HandlerFunc {
 	}
 }
 
+// setBotActorUID records the resolved bot identity on both the bot-specific
+// CtxKeyRobotID and the generic "uid" context key. The "uid" mirror is what
+// SharedUIDRateLimiter (and any other AuthMiddleware-shaped consumer) reads —
+// setting it at every authBot resolution point means every authBot-mounted
+// group is per-UID rate limited without each call site remembering to insert
+// botActorUID(). The limiter fails open silently when "uid" is unset (see
+// UIDRateLimitMiddleware), so this must run wherever auth succeeds. (OCT-42)
+func setBotActorUID(c *wkhttp.Context, uid string) {
+	c.Set(CtxKeyRobotID, uid)
+	c.Set("uid", uid)
+}
+
 // authUserBot authenticates a User Bot via robot table lookup.
 func (ba *BotAPI) authUserBot(c *wkhttp.Context, token string) {
 	robot, err := ba.db.queryRobotByBotToken(token)
@@ -55,7 +67,7 @@ func (ba *BotAPI) authUserBot(c *wkhttp.Context, token string) {
 		return
 	}
 
-	c.Set(CtxKeyRobotID, robot.RobotID)
+	setBotActorUID(c, robot.RobotID)
 	c.Set(CtxKeyBotKind, BotKindUser)
 	c.Set(CtxKeyRobot, robot)
 	c.Next()
@@ -67,7 +79,7 @@ func (ba *BotAPI) authUserBot(c *wkhttp.Context, token string) {
 func (ba *BotAPI) authAppBot(c *wkhttp.Context, token string) {
 	// Try in-memory Registry first (O(1))
 	if spec := ba.lookupAppBotRegistry(token); spec != nil {
-		c.Set(CtxKeyRobotID, spec.UID)
+		setBotActorUID(c, spec.UID)
 		c.Set(CtxKeyBotKind, BotKindApp)
 		c.Set(CtxKeyAppBotScope, spec.Scope)
 		if spec.Scope == "space" {
@@ -95,7 +107,7 @@ func (ba *BotAPI) authAppBot(c *wkhttp.Context, token string) {
 		return
 	}
 
-	c.Set(CtxKeyRobotID, appBot.UID)
+	setBotActorUID(c, appBot.UID)
 	c.Set(CtxKeyBotKind, BotKindApp)
 	c.Set(CtxKeyAppBotScope, appBot.Scope)
 	if appBot.Scope == "space" {
