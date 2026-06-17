@@ -58,6 +58,13 @@ type BotAPI struct {
 	// final MsgSendReq (including server-authoritative payload.space_id).
 	// nil in production; the real path goes through ba.ctx.SendMessageWithResult.
 	dispatchOverride func(*config.MsgSendReq) (*config.MsgSendResp, error)
+	// streamStartOverride / streamEndOverride let unit tests intercept the
+	// WuKongIM stream RPCs (IMStreamStart / IMStreamEnd) so the /v1/bot/stream/*
+	// handlers can be table-tested — including the security-critical assertion
+	// that FromUID is forced to the authenticated robotID — without a live
+	// WuKongIM. nil in production → the real ba.ctx path runs.
+	streamStartOverride func(config.MessageStreamStartReq) (string, error)
+	streamEndOverride   func(config.MessageStreamEndReq) error
 	// oboStoreOverride lets unit tests inject an in-memory oboStore so
 	// checkOBO / REST handlers / fan-out can run without standing up MySQL.
 	// nil in production; the real path uses ba.db (which satisfies oboStore).
@@ -140,6 +147,28 @@ func (ba *BotAPI) dispatchMsgSendReq(req *config.MsgSendReq) (*config.MsgSendRes
 	return ba.ctx.SendMessageWithResult(req)
 }
 
+// dispatchStreamStart opens a WuKongIM message stream via ba.ctx, OR a
+// test-injected streamStartOverride. Returns the server-assigned stream_no.
+func (ba *BotAPI) dispatchStreamStart(req config.MessageStreamStartReq) (string, error) {
+	if ba.streamStartOverride != nil {
+		return ba.streamStartOverride(req)
+	}
+	return ba.ctx.IMStreamStart(req)
+}
+
+// dispatchStreamEnd closes a WuKongIM message stream via ba.ctx, OR a
+// test-injected streamEndOverride. This is the terminal signal the octo-web
+// client waits on (streamFlag == END) to stop the live "streaming" bubble;
+// a missing END leaves the bubble stuck. The gateway (cc-channel-octo) must
+// always call /v1/bot/stream/end in a finally so END fires even on
+// error/abort/truncation.
+func (ba *BotAPI) dispatchStreamEnd(req config.MessageStreamEndReq) error {
+	if ba.streamEndOverride != nil {
+		return ba.streamEndOverride(req)
+	}
+	return ba.ctx.IMStreamEnd(req)
+}
+
 // NewBotAPI creates the Bot API gateway module.
 func NewBotAPI(ctx *config.Context) *BotAPI {
 	speechURL := os.Getenv(voice_adapter.EnvSpeechServiceURL)
@@ -208,6 +237,13 @@ func (ba *BotAPI) Route(r *wkhttp.WKHttp) {
 	{
 		botAPI.POST("/sendMessage", ba.sendMessage)
 		botAPI.POST("/typing", ba.typing)
+		// Incremental channel streaming (OCT-31). Mirrors the internal
+		// modules/robot stream protocol on the public bot API: open a
+		// stream, send incremental items via /sendMessage with the returned
+		// stream_no, then close it. Both are gated by checkSendPermission and
+		// scoped to the authenticated bot — see stream.go.
+		botAPI.POST("/stream/start", ba.streamStart)
+		botAPI.POST("/stream/end", ba.streamEnd)
 		botAPI.POST("/readReceipt", ba.readReceipt)
 		botAPI.POST("/events", ba.getEvents)
 		botAPI.POST("/events/:event_id/ack", ba.eventAck)
