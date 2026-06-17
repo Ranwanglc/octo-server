@@ -87,6 +87,9 @@ func (cn *Common) Route(r *wkhttp.WKHttp) {
 				"status": "up",
 				"db":     "up",
 				"redis":  "up",
+				// OCT-17: channel/IM (WuKongIM) boundary readiness. "unknown"
+				// when no WuKongIM API URL is configured (e.g. local/test).
+				"im": "up",
 			}
 			lastError error
 		)
@@ -103,6 +106,19 @@ func (cn *Common) Route(r *wkhttp.WKHttp) {
 			cn.Error("redis ping error", zap.Error(err))
 			lastError = err
 			statusMap["redis"] = "down"
+		}
+
+		// OCT-17: extend health to the channel/IM boundary. A reachable
+		// WuKongIM control plane is required for the agent turn (bot reply
+		// delivery) to succeed, so surface it in readiness.
+		imURL := strings.TrimSpace(cn.ctx.GetConfig().WuKongIM.APIURL)
+		if imURL == "" {
+			// Not configured -> cannot probe; don't fail overall readiness.
+			statusMap["im"] = "unknown"
+		} else if imErr := imReachable(imURL); imErr != nil {
+			cn.Error("im reachability check failed", zap.Error(imErr))
+			lastError = imErr
+			statusMap["im"] = "down"
 		}
 
 		if lastError != nil {
@@ -137,6 +153,32 @@ func (cn *Common) Route(r *wkhttp.WKHttp) {
 	// 此处直接读 snapshot 是安全的:Load 刚刚完成,值就是 DB 当前值。
 	cn.systemSettings.LogLocalLoginOffSafetyOverrideIfActive(
 		cn.systemSettings.RawLocalLoginOffFromSnapshot())
+}
+
+// imHealthTimeout bounds the WuKongIM reachability probe so a hung IM control
+// plane can't stall the health endpoint (and any liveness probe behind it).
+const imHealthTimeout = 2 * time.Second
+
+// imReachable probes the WuKongIM control plane for liveness. It treats ANY
+// HTTP response (even 4xx/5xx) as "reachable": the goal is to confirm the IM
+// API server is up and answering on the network, not to assert a specific
+// route exists — so we don't couple readiness to a particular WuKongIM health
+// path/version. Only a transport-level failure (DNS, dial, timeout) marks the
+// IM boundary down. A GET to the API base is used because every WuKongIM
+// deployment serves the root, and no manager token is required.
+func imReachable(apiURL string) error {
+	client := &http.Client{Timeout: imHealthTimeout}
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	// Close so the connection can be reused and no fd leaks per probe.
+	_ = resp.Body.Close()
+	return nil
 }
 
 // 获取后台运行引导视频
