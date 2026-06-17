@@ -51,6 +51,7 @@ type Group struct {
 	groupService  IService
 	fileService   file.IService
 	commonService common2.IService
+	reconciler    *ChannelReconciler
 }
 
 // New New
@@ -73,7 +74,51 @@ func New(ctx *config.Context) *Group {
 	g.ctx.AddEventListener(event.OrgOrDeptEmployeeUpdate, g.handleOrgOrDeptEmployeeUpdate)
 	g.ctx.AddEventListener(event.OrgEmployeeExit, g.handleOrgEmployeeExit)
 	source.SetGroupMemberProvider(g)
+	g.startChannelReconciler()
 	return g
+}
+
+// startChannelReconciler 启动 IM 频道孤儿找回 worker（octo-server #394）。
+//
+// 在 New 中启动而非 register.Module.Start：main.go 只调 module.Setup（间接触发本
+// 构造），并不调 module.Start，与 oidc SyncWorker 的接入点一致。测试模式
+// (cfg.Test) 下禁用——避免后台 goroutine 在测试进程里周期性打真实 WuKongIM/Redis；
+// reconcile 逻辑由单测直接构造 ChannelReconciler 验证。
+//
+// 周期/grace 可经环境变量覆盖；间隔 ≤0 视为禁用。多实例用 Redis tick lock 去重，
+// 锁不可用时降级无锁运行（重建/翻转幂等，正确性不受影响）。
+func (g *Group) startChannelReconciler() {
+	if g.ctx.GetConfig().Test {
+		return
+	}
+	interval := defaultReconcileInterval
+	if v := strings.TrimSpace(os.Getenv("DM_GROUP_CHANNEL_RECONCILE_INTERVAL_SEC")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			interval = time.Duration(n) * time.Second
+		}
+	}
+	if interval <= 0 {
+		g.Info("channel reconcile worker disabled (interval<=0)")
+		return
+	}
+	grace := defaultReconcileGraceSec
+	if v := strings.TrimSpace(os.Getenv("DM_GROUP_CHANNEL_RECONCILE_GRACE_SEC")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			grace = n
+		}
+	}
+	svc, ok := g.groupService.(*Service)
+	if !ok {
+		g.Error("channel reconcile worker not started: groupService is not *Service")
+		return
+	}
+	g.reconciler = NewChannelReconciler(svc, ReconcileConfig{
+		Interval: interval,
+		GraceSec: grace,
+	}, newRedisReconcileLock(g.ctx))
+	g.reconciler.Start(context.Background())
+	g.Info("channel reconcile worker started",
+		zap.Duration("interval", interval), zap.Int("graceSec", grace))
 }
 
 // Route 路由配置

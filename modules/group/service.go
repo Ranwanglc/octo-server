@@ -134,17 +134,24 @@ type Service struct {
 	log.Log
 	settingDB *settingDB
 	userDB    *user.DB
+
+	// imCreateChannel 是「创建/更新 IM 频道」的注入点，生产默认指向
+	// ctx.IMCreateOrUpdateChannel。抽成字段是为了让 CreateGroup 的 IM 失败补偿
+	// 路径与 reconcile worker 的找回逻辑可在单测里注入受控失败/成功，而无需依赖
+	// 真实 WuKongIM 的故障注入（octo-server #394）。
+	imCreateChannel func(*config.ChannelCreateReq) error
 }
 
 // NewService NewService
 func NewService(ctx *config.Context) IService {
 	return &Service{
-		ctx:       ctx,
-		db:        NewDB(ctx),
-		managerDB: newManagerDB(ctx.DB()),
-		Log:       log.NewTLog("groupService"),
-		settingDB: newSettingDB(ctx),
-		userDB:    user.NewDB(ctx),
+		ctx:             ctx,
+		db:              NewDB(ctx),
+		managerDB:       newManagerDB(ctx.DB()),
+		Log:             log.NewTLog("groupService"),
+		settingDB:       newSettingDB(ctx),
+		userDB:          user.NewDB(ctx),
+		imCreateChannel: ctx.IMCreateOrUpdateChannel,
 	}
 }
 
@@ -1136,6 +1143,15 @@ func (s *Service) CreateGroup(req *CreateGroupServiceReq) (*CreateGroupServiceRe
 		return nil, errors.New("failed to insert group record")
 	}
 
+	// octo-server #394：在事务内把新群标记为「IM 频道尚未确认」(channel_synced=0)。
+	// IM 频道在 commit 之后才创建；若 IM 创建失败 + 补偿删除也失败，或在 commit 与
+	// IM 创建之间崩溃，这一标记让残留的 group 行可被 reconcile worker 检测并找回，
+	// 而不会永久成为「可查询但无 IM 频道」的孤儿。确认 IM 频道后再翻成 1。
+	if err := s.db.markChannelPendingTx(groupNo, tx); err != nil {
+		s.Error("mark channel pending failed", zap.Error(err), zap.String("groupNo", groupNo))
+		return nil, errors.New("failed to mark channel pending")
+	}
+
 	// 插入成员
 	realMemberUIDs := make([]string, 0, len(memberUsers))
 	memberVos := make([]*config.UserBaseVo, 0, len(memberUsers))
@@ -1275,24 +1291,38 @@ func (s *Service) CreateGroup(req *CreateGroupServiceReq) (*CreateGroupServiceRe
 	}
 
 	// 创建 IM 频道
-	err = s.ctx.IMCreateOrUpdateChannel(&config.ChannelCreateReq{
+	err = s.imCreateChannel(&config.ChannelCreateReq{
 		ChannelID:   groupNo,
 		ChannelType: common.ChannelTypeGroup.Uint8(),
 		Subscribers: realMemberUIDs,
 	})
 	if err != nil {
 		s.Error("create IM channel failed, performing compensating rollback", zap.Error(err), zap.String("groupNo", groupNo))
+		metricChannelCreateTotal.WithLabelValues("im_fail").Inc()
 		// Compensating delete: remove group_member and group records that were
 		// already committed. Use s.ctx.DB() (not tx) because the transaction
 		// has already been committed.
+		//
+		// octo-server #394: this delete is best-effort and narrows the orphan
+		// window. If it fails, the group row remains with channel_synced=0 and
+		// the reconcile worker will detect + recover it — the orphan is no
+		// longer permanent.
 		if _, delErr := s.ctx.DB().DeleteFrom("group_member").Where("group_no=?", groupNo).Exec(); delErr != nil {
 			s.Error("compensating delete group_member failed", zap.Error(delErr), zap.String("groupNo", groupNo))
 		}
 		if _, delErr := s.ctx.DB().DeleteFrom("group").Where("group_no=?", groupNo).Exec(); delErr != nil {
-			s.Error("compensating delete group failed", zap.Error(delErr), zap.String("groupNo", groupNo))
+			s.Error("compensating delete group failed, group left as channel_synced=0 for reconcile", zap.Error(delErr), zap.String("groupNo", groupNo))
 		}
 		return nil, errors.New("failed to create IM channel, group has been rolled back")
 	}
+
+	// octo-server #394：IM 频道确认创建成功，把群翻成已同步(channel_synced=1)，
+	// reconcile worker 不再处理它。这一步失败不阻断建群（频道已就绪，群可用），
+	// 仅记日志——reconcile worker 会在 grace 窗口后重做这次幂等翻转兜底。
+	if _, syncErr := s.db.MarkChannelSynced(groupNo); syncErr != nil {
+		s.Error("mark channel synced failed (reconcile will recover)", zap.Error(syncErr), zap.String("groupNo", groupNo))
+	}
+	metricChannelCreateTotal.WithLabelValues("ok").Inc()
 
 	// 发送群创建通知
 	s.ctx.SendGroupCreate(&config.MsgGroupCreateReq{

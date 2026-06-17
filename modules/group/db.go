@@ -38,6 +38,47 @@ func (d *DB) Insert(m *Model) error {
 	return err
 }
 
+// markChannelPendingTx 在事务内把群标记为「IM 频道尚未确认」(channel_synced=0)。
+//
+// octo-server #394：CreateGroup 在 commit 后才创建 IM 频道，commit 与 IM 创建之间
+// 的任何失败/崩溃都会留下孤儿群。建群事务内先把行写成 pending，确认 IM 频道后再
+// 调 MarkChannelSynced 翻成 1，使孤儿可被 reconcile worker 检测与找回。
+//
+// channel_synced 不在 Model 结构体上（避免 AttrToUnderscore 把它带进系统群/注册建群
+// 等其它 Insert 路径，那些路径应保持 DB 默认值 1）；故这里用独立 UPDATE 显式置 0。
+func (d *DB) markChannelPendingTx(groupNo string, tx *dbr.Tx) error {
+	_, err := tx.Update("group").Set("channel_synced", 0).Where("group_no=?", groupNo).Exec()
+	return err
+}
+
+// MarkChannelSynced 确认 IM 频道已就绪后把群标记为已同步(channel_synced=1)。
+// 幂等：重复调用只是把已为 1 的行再写 1。返回受影响行数供 reconcile 竞态观测。
+func (d *DB) MarkChannelSynced(groupNo string) (int64, error) {
+	res, err := d.session.Update("group").Set("channel_synced", 1).Where("group_no=?", groupNo).Exec()
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// QueryReconcilableGroupNos 返回需要 reconcile 的孤儿群编号：channel_synced=0 且
+// 状态正常(GroupStatusNormal)、且创建时间早于 graceSeconds（避开正在进行中的建群
+// 与 IM 确认之间的正常窗口，防止误判）。limit 控制单批处理量。
+//
+// 只挑 GroupStatusNormal：已解散(GroupStatusDisband)的群其 IM 频道是被有意销毁的，
+// 不应重建。
+func (d *DB) QueryReconcilableGroupNos(graceSeconds, limit int) ([]string, error) {
+	var groupNos []string
+	_, err := d.session.Select("group_no").
+		From("`group`").
+		Where("channel_synced=0 AND status=?", GroupStatusNormal).
+		Where(fmt.Sprintf("created_at < DATE_SUB(NOW(), INTERVAL %d SECOND)", graceSeconds)).
+		OrderAsc("created_at").
+		Limit(uint64(limit)).
+		Load(&groupNos)
+	return groupNos, err
+}
+
 // 修改群类型
 func (d *DB) UpdateGroupTypeTx(groupNo string, groupType GroupType, tx *dbr.Tx) error {
 	_, err := tx.Update("group").Set("group_type", int(groupType)).Where("group_no=?", groupNo).Exec()
