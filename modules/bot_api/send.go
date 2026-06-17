@@ -251,7 +251,12 @@ func (ba *BotAPI) sendMessage(c *wkhttp.Context) {
 		FromUID:     fromUID,
 		Payload:     []byte(util.ToJson(wirePayload)),
 	}
+	// OCT-17 observability: time the bot reply delivery to the channel
+	// (server↔WuKongIM boundary) and record success/failure. This is the
+	// agent-turn outbound leg — see modules/bot_api/metrics.go.
+	deliveryStart := time.Now()
 	result, err := ba.dispatchMsgSendReq(msgReq)
+	observeAgentTurnDelivery(req.ChannelType, time.Since(deliveryStart).Seconds(), err)
 	if err != nil {
 		ba.Error("发送消息失败", zap.Error(err))
 		httperr.ResponseErrorL(c, errcode.ErrBotAPISendFailed, nil, nil)
