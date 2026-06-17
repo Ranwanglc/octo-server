@@ -161,6 +161,11 @@ func runAPI(ctx *config.Context) {
 		}
 		accessLogger(c)
 	})
+	// Operator-audit log for admin/management writes (#367 Phase 1): one
+	// structured "who did what" line per mutating /v1/manager request. Reads the
+	// operator id set by AuthMiddleware after c.Next(); see pkg/accesslog
+	// operator_audit.go for the field schema Phase 2 consumes.
+	route.UseGin(accesslog.OperatorAuditMiddleware(log.NewTLog("ManagerAudit")))
 	// 全局 per-IP 作为 DDoS 底线：办公室共享出网 IP 下 IM 基础量就能到 100+ rps
 	// （每人 1-2 rps × 数十人），200 余量过小；真实 DDoS 常数千 rps+，底线设 500
 	// 更合理。精细限流交给 UID 层和端点级严格桶（#1090）。
