@@ -147,6 +147,7 @@ Tests require MySQL + Redis + WuKongIM running (see CI or `make env-test` in dmw
 - API routes: prefix `/v1/`
 - New modules: add blank import in `internal/modules.go`
 - Auth: all routes go through `AuthMiddleware` unless explicitly excluded — document why if skipping
+- Manager authz: every `/v1/manager` **admin** route handler must call a role check (`c.CheckLoginRoleIsSuperAdmin()` or `c.CheckLoginRole()`) before doing work — `AuthMiddleware` only authenticates, it does not gate admin role. The `manager-authz-lint` CI guard (`tools/lint-manager-authz`) fails the build on any `/v1/manager` route whose handler lacks a check. Routes that live under `/v1/manager` but are NOT admin (public login, user-scoped CRUD like `/v1/manager/secrets`) go in `tools/lint-manager-authz/allowlist.txt` with a one-line reason (octo-server#366 Part 1)
 - i18n: user-facing errors use `httperr.ResponseErrorL` + a registered `pkg/errcode` code; never raw `c.ResponseError`/`c.JSON`/`AbortWithStatusJSON`. Run `make i18n-extract-check` + `make i18n-lint` after touching codes (see Architecture › Error Handling & i18n)
 - Rate limiting: mount `SharedUIDRateLimiter` (auth routes) or `StrictIPRateLimitMiddleware` (unauth) — never hand-roll a Redis counter for request-frequency limiting (see Architecture › Rate Limiting)
 - Space isolation: handlers that access user data must go through Space middleware

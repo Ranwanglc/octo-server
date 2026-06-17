@@ -1,0 +1,16 @@
+# lint-manager-authz allowlist — routes under /v1/manager that intentionally
+# do NOT carry an admin role check. Format: "<VERB> <path>  # reason".
+# Every entry MUST have a reason. See tools/lint-manager-authz/main.go and
+# https://github.com/Mininglamp-OSS/octo-server/issues/366.
+
+# Public, pre-auth: issues the admin session token. The group has no
+# AuthMiddleware by design; role cannot be checked before login.
+POST /v1/manager/login  # public login endpoint, issues admin session token
+
+# User-scoped secret CRUD that happens to live under the /v1/manager/secrets
+# path. Authz here is AuthMiddleware (authenticated user) + owner==login-UID
+# scoping inside the handler, NOT an admin-role gate. Not an admin surface.
+POST   /v1/manager/secrets              # user-scoped (owner=UID), not admin
+GET    /v1/manager/secrets              # user-scoped (owner=UID), not admin
+PUT    /v1/manager/secrets/:secret_id   # user-scoped (owner=UID), not admin
+DELETE /v1/manager/secrets/:secret_id   # user-scoped (owner=UID), not admin

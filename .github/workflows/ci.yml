@@ -306,6 +306,36 @@ jobs:
       - name: Reject direct PERSONAL MsgSendReq literals
         run: go run ./tools/lint-personal-msgsendreq ./modules
 
+  manager-authz-lint:
+    needs: [changes]
+    if: |
+      (github.event_name != 'pull_request' || !github.event.pull_request.draft) &&
+      needs.changes.outputs.code == 'true'
+    # Mininglamp-OSS/octo-server#366 Part 1: source-guard for the admin
+    # (/v1/manager) authorization surface. Authz there is enforced per-handler
+    # by an inline c.CheckLoginRole / c.CheckLoginRoleIsSuperAdmin call (no
+    # central policy middleware yet). A new /v1/manager route that forgets the
+    # check would silently ship a privilege-escalation hole — AuthMiddleware
+    # only authenticates, it does not gate role. This guard AST-walks ./modules
+    # and fails CI if any /v1/manager route handler lacks a role check, unless
+    # the route is allowlisted (tools/lint-manager-authz/allowlist.txt) with a
+    # reason. The tool's own unit tests run first.
+    name: Manager Authz Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Test the guard
+        run: go test ./tools/lint-manager-authz/...
+
+      - name: Require a role check on every /v1/manager route
+        run: go run ./tools/lint-manager-authz ./modules
+
   i18n-extract-check:
     needs: [changes]
     if: |
