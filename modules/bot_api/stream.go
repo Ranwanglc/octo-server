@@ -67,6 +67,17 @@ func (ba *BotAPI) streamStart(c *wkhttp.Context) {
 		httperr.ResponseErrorL(c, errcode.ErrBotAPISendFailed, nil, nil)
 		return
 	}
+
+	// OCT-41: record stream_no → robotID so /v1/bot/stream/end can verify the
+	// caller owns the stream before terminating it. Best-effort — the bubble is
+	// already live, so a binding-write failure must not fail the open; it only
+	// weakens the later ownership check (which then falls through to the channel
+	// gate). Log and continue.
+	if bindErr := ba.streamOwners().bind(streamNo, robotID); bindErr != nil {
+		ba.Warn("记录stream owner失败", zap.Error(bindErr),
+			zap.String("robotID", robotID), zap.String("streamNo", streamNo))
+	}
+
 	c.Response(gin.H{
 		"stream_no": streamNo,
 	})
@@ -84,6 +95,21 @@ func (ba *BotAPI) streamStart(c *wkhttp.Context) {
 //
 // Gated by the same checkSendPermission as stream/start and sendMessage so a
 // bot can only close streams in channels it may post to.
+//
+// OCT-41 — ownership binding. The channel gate alone does NOT prove the caller
+// opened this stream_no: WuKongIM resolves a stream by its stream_no alone, and
+// the channel_id/channel_type in MessageStreamEndReq are addressing/routing
+// fields, not a stream↔channel authorization check (the deployed WuKongIM, an
+// octo-im v2.2.x fork, exposes no "does stream_no belong to channel_id?" check
+// — the legacy /streammessage/* manager API that octo-lib targets is served
+// only by older v1.x images and still keys streams by stream_no). So without
+// the explicit owner check below, a co-member bot could observe a peer's live
+// stream_no (it is rendered into the channel and visible via /messages/sync)
+// and prematurely terminate the peer's bubble. We bind stream_no → robotID at
+// start (streamStart) and reject an end whose recorded owner is a different
+// bot. The binding is independent of channel_id, so it also closes the
+// channel-gate-bypass concern (claiming a channel you may post to while ending
+// a stream that lives elsewhere).
 func (ba *BotAPI) streamEnd(c *wkhttp.Context) {
 	var req config.MessageStreamEndReq
 	if err := c.BindJSON(&req); err != nil {
@@ -111,6 +137,25 @@ func (ba *BotAPI) streamEnd(c *wkhttp.Context) {
 		return
 	}
 
+	// OCT-41 ownership gate. Posture: deny on a CONFIRMED owner mismatch; fall
+	// through (allow) when no binding is found or the lookup errors. A binding
+	// is present for the entire live window of any stream opened via
+	// stream/start, so the griefing window — a co-member bot ending a peer's
+	// still-live bubble — is fully covered. Absence means the stream is stale
+	// (TTL elapsed, so it closed long ago) or was opened outside this path;
+	// failing open there preserves the terminal-END guarantee (a missing END
+	// leaves the octo-web bubble stuck "streaming") without reopening the
+	// attack, since a stale/foreign stream_no has no live bubble to grief.
+	if owner, ownErr := ba.streamOwners().owner(req.StreamNo); ownErr != nil {
+		ba.Warn("查询stream owner失败，跳过归属校验", zap.Error(ownErr),
+			zap.String("robotID", robotID), zap.String("streamNo", req.StreamNo))
+	} else if owner != "" && owner != robotID {
+		ba.Warn("拒绝结束非本bot的stream", zap.String("robotID", robotID),
+			zap.String("owner", owner), zap.String("streamNo", req.StreamNo))
+		httperr.ResponseErrorL(c, errcode.ErrBotAPIStreamNotOwned, nil, nil)
+		return
+	}
+
 	req.ChannelID = ba.resolveSpaceChannelID(robotID, req.ChannelID, req.ChannelType)
 
 	if err := ba.dispatchStreamEnd(req); err != nil {
@@ -118,5 +163,13 @@ func (ba *BotAPI) streamEnd(c *wkhttp.Context) {
 		httperr.ResponseErrorL(c, errcode.ErrBotAPISendFailed, nil, nil)
 		return
 	}
+
+	// Stream closed: drop the binding so the stream_no does not linger in the
+	// store. Best-effort — a stale binding only expires by TTL otherwise.
+	if relErr := ba.streamOwners().release(req.StreamNo); relErr != nil {
+		ba.Warn("释放stream owner失败", zap.Error(relErr),
+			zap.String("robotID", robotID), zap.String("streamNo", req.StreamNo))
+	}
+
 	c.ResponseOK()
 }

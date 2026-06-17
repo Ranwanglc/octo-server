@@ -66,6 +66,12 @@ type BotAPI struct {
 	// WuKongIM. nil in production → the real ba.ctx path runs.
 	streamStartOverride func(config.MessageStreamStartReq) (string, error)
 	streamEndOverride   func(config.MessageStreamEndReq) error
+	// streamOwnerStoreOverride lets unit tests inject an in-memory
+	// stream_no→robotID ownership map so the OCT-41 ownership check in
+	// streamEnd (and the binding write in streamStart) can be table-tested
+	// without a live Redis. nil in production → the Redis-backed
+	// redisStreamOwnerStore runs. See stream_owner.go.
+	streamOwnerStoreOverride streamOwnerStore
 	// oboStoreOverride lets unit tests inject an in-memory oboStore so
 	// checkOBO / REST handlers / fan-out can run without standing up MySQL.
 	// nil in production; the real path uses ba.db (which satisfies oboStore).

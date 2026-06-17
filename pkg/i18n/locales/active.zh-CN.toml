@@ -984,6 +984,9 @@ other = "用户尚未与该机器人发起会话。"
 ["err.server.bot_api.message_edit_forbidden"]
 other = "只能编辑自己发送的消息。"
 
+["err.server.bot_api.stream_not_owned"]
+other = "只能结束自己开启的消息流。"
+
 ["err.server.bot_api.obo_not_authorized"]
 other = "无权代表该用户操作。"
 

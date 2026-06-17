@@ -175,6 +175,15 @@ var (
 		HTTPStatus:     http.StatusForbidden,
 		DefaultMessage: "You can only edit messages you sent.",
 	})
+	// ErrBotAPIStreamNotOwned covers the OCT-41 stream-ownership guard: a bot may
+	// only end a stream it opened. /v1/bot/stream/end rejects a stream_no whose
+	// recorded owner is a different bot (a co-member bot must not terminate a
+	// peer's live bubble).
+	ErrBotAPIStreamNotOwned = register(codes.Code{
+		ID:             "err.server.bot_api.stream_not_owned",
+		HTTPStatus:     http.StatusForbidden,
+		DefaultMessage: "You can only end a stream you opened.",
+	})
 	// ErrBotAPIOBONotAuthorized covers a send/typing OBO request lacking an
 	// active grant or per-channel scope (ErrOBONotAuthorized).
 	ErrBotAPIOBONotAuthorized = register(codes.Code{

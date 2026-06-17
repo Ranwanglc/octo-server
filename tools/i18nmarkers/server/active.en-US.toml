@@ -147,6 +147,9 @@ other = "Failed to send the message."
 ["err.server.bot_api.store_failed"]
 other = "Failed to update data."
 
+["err.server.bot_api.stream_not_owned"]
+other = "You can only end a stream you opened."
+
 ["err.server.bot_api.thread_channel_not_accepted"]
 other = "A thread channel id is not accepted here; use the thread GROUP.md endpoint instead."
 

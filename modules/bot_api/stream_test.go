@@ -85,8 +85,9 @@ func TestStreamStart_ScopesFromUIDToBot(t *testing.T) {
 
 	sc := &streamStartCapture{streamNo: wantStream}
 	ba := &BotAPI{
-		Log:                 log.NewTLog("BotAPI-stream-it"),
-		streamStartOverride: sc.hook,
+		Log:                      log.NewTLog("BotAPI-stream-it"),
+		streamStartOverride:      sc.hook,
+		streamOwnerStoreOverride: newMemStreamOwnerStore(),
 	}
 
 	body, _ := json.Marshal(config.MessageStreamStartReq{
@@ -193,8 +194,9 @@ func TestStreamEnd_EmitsTerminalEnd(t *testing.T) {
 
 	ec := &streamEndCapture{}
 	ba := &BotAPI{
-		Log:               log.NewTLog("BotAPI-stream-it"),
-		streamEndOverride: ec.hook,
+		Log:                      log.NewTLog("BotAPI-stream-it"),
+		streamEndOverride:        ec.hook,
+		streamOwnerStoreOverride: newMemStreamOwnerStore(),
 	}
 
 	body, _ := json.Marshal(config.MessageStreamEndReq{
