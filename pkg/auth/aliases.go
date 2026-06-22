@@ -6,11 +6,41 @@
 // This package is kept only so the six existing call sites (main.go,
 // modules/{group,message,user,qrcode}/api.go, modules/user/api_manager.go)
 // can be migrated incrementally and so out-of-tree forks have a deprecation
-// window. Six months after this shim was introduced it WILL be removed; new
-// code must import modules/auth directly.
+// window.
+//
+// # Removal schedule
+//
+// This shim is scheduled for removal on or after 2026-12-22 (six months
+// after the alias was introduced in PR-A1 / #429). The removal is tracked
+// alongside the Stage A epic [octo-server#428] so anyone touching pkg/auth
+// in the interim can see the deadline + see who owns the migration.
+//
+// What the removal entails:
+//   - Delete pkg/auth/aliases.go and pkg/auth/aliases_test.go.
+//   - The six callers listed above must by then have switched their imports
+//     to "github.com/Mininglamp-OSS/octo-server/modules/auth".
+//   - Out-of-tree forks that still import pkg/auth at removal time will
+//     get a clean compile error pointing them at the canonical path
+//     (the package itself disappears; no silent breakage).
+//
+// To migrate a caller today: change
+//
+//	import "github.com/Mininglamp-OSS/octo-server/pkg/auth"
+//
+// to
+//
+//	import "github.com/Mininglamp-OSS/octo-server/modules/auth"
+//
+// The exported surface is identical (types via Go `type =` aliases;
+// sentinel errors re-exported by value so [errors.Is] still works;
+// functions re-exported as wrapper funcs preserving variadic signatures).
+// `gofmt -r` or a one-shot `goimports` pass over the importing file is
+// enough — no further code edits are needed.
 //
 // Deprecated: import
-// "github.com/Mininglamp-OSS/octo-server/modules/auth" instead.
+// "github.com/Mininglamp-OSS/octo-server/modules/auth" instead. To be
+// removed on or after 2026-12-22 — see [octo-server#428] for the
+// migration tracker.
 package auth
 
 import (
