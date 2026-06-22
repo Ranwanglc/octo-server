@@ -46,7 +46,13 @@ func (ba *BotAPI) LookupUserBot(token string) (*auth.UserBotIdentity, error) {
 // existing two-tier lookup from authAppBot:
 //
 //  1. O(1) in-memory Registry (via [lookupAppBotRegistry]) — primary
-//     path; populated by modules/app_bot at boot.
+//     path; populated by modules/app_bot at boot with the full
+//     identity shape (UID/DisplayName/Scope/SpaceID/CreatedBy) so
+//     the fast path returns a COMPLETE AppBotIdentity and the verify
+//     handler does not need a fallback DB lookup just to fill
+//     name/owner. PR-A2 widened AppBotRegistrySpec to add the
+//     DisplayName + CreatedBy fields exactly for this reason
+//     (Jerry-Xin review on octo-server #430).
 //  2. DB fallback (`queryAppBotByToken`) — covers the startup race
 //     window before the registry is loaded.
 //
@@ -57,13 +63,14 @@ func (ba *BotAPI) LookupUserBot(token string) (*auth.UserBotIdentity, error) {
 //   - (id,  nil)                        : matched + published
 //
 // The status check is deliberately ONLY on the DB path — the in-memory
-// Registry is populated at boot from published bots only, so a registry
-// hit is always a published bot. This matches the existing
-// authAppBot's behaviour (status check is between the registry-miss /
-// DB-hit branches).
+// Registry is populated at boot from published bots only (loaded via
+// queryPublishedBots in modules/app_bot/app_bot.go:loadRegistryFromDB),
+// so a registry hit is always a published bot. This matches the
+// existing authAppBot's behaviour.
 //
-// The DB-row OwnerUID maps from app_bot.created_by; SpaceID is only
-// populated when scope == "space" (matches authAppBot:73-74).
+// SpaceID is only populated when Scope == "space" (matches authAppBot's
+// CtxKeyAppBotSpaceID branch); for Scope == "platform", SpaceID stays
+// empty to signal "cross-space access permitted".
 func (ba *BotAPI) LookupAppBot(token string) (*auth.AppBotIdentity, error) {
 	if token == "" {
 		return nil, nil
@@ -71,17 +78,14 @@ func (ba *BotAPI) LookupAppBot(token string) (*auth.AppBotIdentity, error) {
 	// In-memory registry first (O(1)).
 	if spec := ba.lookupAppBotRegistry(token); spec != nil {
 		id := &auth.AppBotIdentity{
-			BotUID: spec.UID,
-			Scope:  spec.Scope,
+			BotUID:   spec.UID,
+			BotName:  spec.DisplayName,
+			OwnerUID: spec.CreatedBy,
+			Scope:    spec.Scope,
 		}
 		if spec.Scope == "space" {
 			id.SpaceID = spec.SpaceID
 		}
-		// Registry spec is intentionally minimal (UID/Scope/SpaceID); name
-		// and owner come from the DB row when needed. Verify-bot handler
-		// can either accept that the registry-hit path returns these
-		// fields empty, or do an additional name lookup. For PR-A2 we
-		// surface what we have; PR-A3 composes the full response.
 		return id, nil
 	}
 

@@ -273,9 +273,11 @@ func (ab *AppBot) loadRegistryFromDB(authRegistry *bot_api.AppBotRegistryAdapter
 			CreatedBy:   bot.CreatedBy,
 		})
 		authRegistry.Add(bot.Token, &bot_api.AppBotRegistrySpec{
-			UID:     bot.UID,
-			Scope:   bot.Scope,
-			SpaceID: bot.SpaceID,
+			UID:         bot.UID,
+			DisplayName: bot.DisplayName,
+			Scope:       bot.Scope,
+			SpaceID:     bot.SpaceID,
+			CreatedBy:   bot.CreatedBy,
 		})
 
 		// Ensure user record exists (repair for bots created before avatar fix)
@@ -608,7 +610,7 @@ func (ab *AppBot) updateBot(c *wkhttp.Context) {
 			Token:       bot.Token,
 			CreatedBy:   bot.CreatedBy,
 		})
-		ab.syncAuthRegistry(bot.Token, bot.UID, bot.Scope, bot.SpaceID)
+		ab.syncAuthRegistry(bot.Token, bot.UID, bot.DisplayName, bot.Scope, bot.SpaceID, bot.CreatedBy)
 	}
 
 	// Sync display_name to user table (for SDK avatar/name resolution)
@@ -772,7 +774,7 @@ func (ab *AppBot) rotateToken(c *wkhttp.Context) {
 			Token:       newToken,
 			CreatedBy:   bot.CreatedBy,
 		})
-		ab.updateAuthRegistry(bot.Token, newToken, bot.UID, bot.Scope, bot.SpaceID)
+		ab.updateAuthRegistry(bot.Token, newToken, bot.UID, bot.DisplayName, bot.Scope, bot.SpaceID, bot.CreatedBy)
 	}
 
 	c.Response(gin.H{"token": newToken})
@@ -872,7 +874,7 @@ func (ab *AppBot) publishBot(c *wkhttp.Context) {
 		Token:       bot.Token,
 		CreatedBy:   bot.CreatedBy,
 	})
-	ab.syncAuthRegistry(bot.Token, bot.UID, bot.Scope, bot.SpaceID)
+	ab.syncAuthRegistry(bot.Token, bot.UID, bot.DisplayName, bot.Scope, bot.SpaceID, bot.CreatedBy)
 
 	c.ResponseOK()
 }
@@ -926,12 +928,14 @@ func (ab *AppBot) unpublishBot(c *wkhttp.Context) {
 }
 
 // syncAuthRegistry adds an app bot to the bot_api auth registry.
-func (ab *AppBot) syncAuthRegistry(token, uid, scope, spaceID string) {
+func (ab *AppBot) syncAuthRegistry(token, uid, displayName, scope, spaceID, createdBy string) {
 	if r, ok := bot_api.GetAppBotRegistry().(*bot_api.AppBotRegistryAdapter); ok && r != nil {
 		r.Add(token, &bot_api.AppBotRegistrySpec{
-			UID:     uid,
-			Scope:   scope,
-			SpaceID: spaceID,
+			UID:         uid,
+			DisplayName: displayName,
+			Scope:       scope,
+			SpaceID:     spaceID,
+			CreatedBy:   createdBy,
 		})
 	}
 }
@@ -944,12 +948,14 @@ func (ab *AppBot) removeAuthRegistry(token string) {
 }
 
 // updateAuthRegistry atomically swaps a spec from oldToken to newToken in the bot_api auth registry.
-func (ab *AppBot) updateAuthRegistry(oldToken, newToken, uid, scope, spaceID string) {
+func (ab *AppBot) updateAuthRegistry(oldToken, newToken, uid, displayName, scope, spaceID, createdBy string) {
 	if r, ok := bot_api.GetAppBotRegistry().(*bot_api.AppBotRegistryAdapter); ok && r != nil {
 		r.Update(oldToken, newToken, &bot_api.AppBotRegistrySpec{
-			UID:     uid,
-			Scope:   scope,
-			SpaceID: spaceID,
+			UID:         uid,
+			DisplayName: displayName,
+			Scope:       scope,
+			SpaceID:     spaceID,
+			CreatedBy:   createdBy,
 		})
 	}
 }

@@ -6,10 +6,21 @@ import (
 )
 
 // AppBotRegistrySpec is the minimal spec needed by bot_api auth.
+//
+// PR-A2 widened this struct to carry DisplayName and CreatedBy so the
+// registry-hit fast path in LookupAppBot can return a complete
+// AppBotIdentity (BotName + OwnerUID) without falling back to a DB
+// round-trip. Previously the registry only carried UID/Scope/SpaceID;
+// any caller wanting the owner UID had to do its own DB lookup or
+// accept an empty field. Jerry-Xin flagged this on octo-server #430
+// review as blocking — the registry IS the primary lookup path, so
+// it must produce complete identities for the seam to be useful.
 type AppBotRegistrySpec struct {
-	UID     string
-	Scope   string
-	SpaceID string
+	UID         string
+	DisplayName string
+	Scope       string
+	SpaceID     string
+	CreatedBy   string
 }
 
 // AppBotRegistryInterface is the interface for App Bot in-memory registry lookup.
