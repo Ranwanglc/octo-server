@@ -65,14 +65,17 @@ func (a *API) verifyBotHTTP(c *wkhttp.Context) {
 
 // verifyAPIKeyHTTP handles POST /v1/auth/verify-api-key. Wires the
 // stub APIKeyLookup from modules/usersecret through the standard
-// Service → handler → httperr.ResponseErrorL path; until real `uk_`
-// storage lands, every call returns 401 ErrAuthTokenInvalid which is
-// the same contract surface fleet's SDK already expects.
+// Service → handler → httperr path; until real `uk_` storage lands,
+// every call returns 401 ErrAuthTokenInvalid which is the same
+// contract surface fleet's SDK already expects.
+//
+// Uses ResponseErrorLWithStatus for the same wire-status reason as
+// verifyUserHTTP / verifyBotHTTP (see handleServiceError comment).
 func (a *API) verifyAPIKeyHTTP(c *wkhttp.Context) {
 	var req VerifyAPIKeyReq
 	if err := c.BindJSON(&req); err != nil {
 		a.log.Warn("auth: verify-api-key request body malformed", zap.Error(err))
-		httperr.ResponseErrorL(c, errcode.ErrAuthTokenInvalid, nil, nil)
+		httperr.ResponseErrorLWithStatus(c, errcode.ErrAuthTokenInvalid, nil, nil)
 		return
 	}
 	resp, err := a.svc.VerifyAPIKey(c.Request.Context(), req)
