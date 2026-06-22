@@ -51,40 +51,40 @@ import (
 
 // TokenInfo is an alias for [modulesauth.TokenInfo].
 //
-// Deprecated: use [modulesauth.TokenInfo].
+// Deprecated: use [modulesauth.TokenInfo]. To be removed on or after 2026-12-22 — see [octo-server#428].
 type TokenInfo = modulesauth.TokenInfo
 
 // LanguageResolver is an alias for [modulesauth.LanguageResolver].
 //
-// Deprecated: use [modulesauth.LanguageResolver].
+// Deprecated: use [modulesauth.LanguageResolver]. To be removed on or after 2026-12-22 — see [octo-server#428].
 type LanguageResolver = modulesauth.LanguageResolver
 
 // RoleResolver is an alias for [modulesauth.RoleResolver].
 //
-// Deprecated: use [modulesauth.RoleResolver].
+// Deprecated: use [modulesauth.RoleResolver]. To be removed on or after 2026-12-22 — see [octo-server#428].
 type RoleResolver = modulesauth.RoleResolver
 
 // CacheTokenParser is an alias for [modulesauth.CacheTokenParser].
 //
-// Deprecated: use [modulesauth.CacheTokenParser].
+// Deprecated: use [modulesauth.CacheTokenParser]. To be removed on or after 2026-12-22 — see [octo-server#428].
 type CacheTokenParser = modulesauth.CacheTokenParser
 
 // ParserOption is an alias for [modulesauth.ParserOption].
 //
-// Deprecated: use [modulesauth.ParserOption].
+// Deprecated: use [modulesauth.ParserOption]. To be removed on or after 2026-12-22 — see [octo-server#428].
 type ParserOption = modulesauth.ParserOption
 
 // ErrEmptyToken re-exports [modulesauth.ErrEmptyToken] by value so
 // `errors.Is(err, auth.ErrEmptyToken)` keeps matching errors produced by the
 // canonical package.
 //
-// Deprecated: use [modulesauth.ErrEmptyToken].
+// Deprecated: use [modulesauth.ErrEmptyToken]. To be removed on or after 2026-12-22 — see [octo-server#428].
 var ErrEmptyToken = modulesauth.ErrEmptyToken
 
 // ErrInvalidToken re-exports [modulesauth.ErrInvalidToken] by value; same
 // sentinel-identity contract as [ErrEmptyToken].
 //
-// Deprecated: use [modulesauth.ErrInvalidToken].
+// Deprecated: use [modulesauth.ErrInvalidToken]. To be removed on or after 2026-12-22 — see [octo-server#428].
 var ErrInvalidToken = modulesauth.ErrInvalidToken
 
 // Encode is a wrapper preserving the exported call signature for callers
@@ -92,7 +92,7 @@ var ErrInvalidToken = modulesauth.ErrInvalidToken
 // function immutable (unlike a `var = ...` re-export, which would let an
 // importer reassign the symbol package-globally).
 //
-// Deprecated: use [modulesauth.Encode].
+// Deprecated: use [modulesauth.Encode]. To be removed on or after 2026-12-22 — see [octo-server#428].
 func Encode(info TokenInfo) (string, error) {
 	return modulesauth.Encode(info)
 }
@@ -100,21 +100,21 @@ func Encode(info TokenInfo) (string, error) {
 // Decode is a wrapper mirroring [Encode]; see Encode for the wrapper-vs-var
 // rationale.
 //
-// Deprecated: use [modulesauth.Decode].
+// Deprecated: use [modulesauth.Decode]. To be removed on or after 2026-12-22 — see [octo-server#428].
 func Decode(raw string) (TokenInfo, error) {
 	return modulesauth.Decode(raw)
 }
 
 // WithLanguageResolver is a wrapper for [modulesauth.WithLanguageResolver].
 //
-// Deprecated: use [modulesauth.WithLanguageResolver].
+// Deprecated: use [modulesauth.WithLanguageResolver]. To be removed on or after 2026-12-22 — see [octo-server#428].
 func WithLanguageResolver(r LanguageResolver) ParserOption {
 	return modulesauth.WithLanguageResolver(r)
 }
 
 // WithRoleResolver is a wrapper for [modulesauth.WithRoleResolver].
 //
-// Deprecated: use [modulesauth.WithRoleResolver].
+// Deprecated: use [modulesauth.WithRoleResolver]. To be removed on or after 2026-12-22 — see [octo-server#428].
 func WithRoleResolver(r RoleResolver) ParserOption {
 	return modulesauth.WithRoleResolver(r)
 }
@@ -124,7 +124,7 @@ func WithRoleResolver(r RoleResolver) ParserOption {
 // `NewCacheTokenParser(c, prefix, WithLanguageResolver(r), WithRoleResolver(rr))`
 // keep compiling unchanged.
 //
-// Deprecated: use [modulesauth.NewCacheTokenParser].
+// Deprecated: use [modulesauth.NewCacheTokenParser]. To be removed on or after 2026-12-22 — see [octo-server#428].
 func NewCacheTokenParser(c cache.Cache, prefix string, opts ...ParserOption) *CacheTokenParser {
 	return modulesauth.NewCacheTokenParser(c, prefix, opts...)
 }
