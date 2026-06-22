@@ -46,10 +46,11 @@ const (
 
 // 投递来源/适配器（auditModel.Adapter）。后续扩展 gitlab/feishu。
 const (
-	adapterNative = "native" // 原生推送端点
-	adapterTest   = "test"   // 管理端「测试推送」
-	adapterGitHub = "github" // GitHub 事件适配器（#297 Phase 3）
-	adapterWeCom  = "wecom"  // 企业微信群机器人格式适配器（#297 Phase 3）
+	adapterNative  = "native"  // 原生推送端点
+	adapterTest    = "test"    // 管理端「测试推送」
+	adapterGitHub  = "github"  // GitHub 事件适配器（#297 Phase 3）
+	adapterWeCom   = "wecom"   // 企业微信群机器人格式适配器（#297 Phase 3）
+	adapterMultica = "multica" // Multica 出站 webhook 适配器（#426）
 )
 
 // auditModel 对应 incoming_webhook_audit 表，记录【鉴权通过后】的每次投递结果
@@ -63,7 +64,7 @@ type auditModel struct {
 	Status     int    // auditSuccess / auditFailed / auditSkipped
 	Reason     string // 失败/跳过原因码；成功为空
 	HTTPStatus int    // 返回给调用方的 HTTP 状态码
-	Adapter    string // 来源/适配器：adapterNative / adapterTest / adapterGitHub / adapterWeCom
+	Adapter    string // 来源/适配器：adapterNative / adapterTest / adapterGitHub / adapterWeCom / adapterMultica
 	db.BaseModel
 }
 
@@ -134,7 +135,7 @@ type createResp struct {
 	webhookResp
 	Token string `json:"token"`
 	URL   string `json:"url"`
-	// URLs 各推送形态的路径（native / github / wecom），与 URL 一样不含 host、由前端
+	// URLs 各推送形态的路径（native / github / wecom / multica），与 URL 一样不含 host、由前端
 	// 拼接基础域名。token 仅在 create/regenerate 时可见，故完整推送路径也只在这两处
 	// 下发（list 不回显 token，自然也不回推送 URL）。
 	URLs map[string]string `json:"urls"`
