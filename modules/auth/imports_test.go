@@ -6,11 +6,17 @@
 // APIKeyLookup interfaces, the implementer packages import modules/auth
 // and satisfy them, and main.go wires the concrete instance at boot.
 //
-// This test walks every non-_test.go file under modules/auth/, parses
-// imports with go/parser, and fails if any import path begins with a
-// forbidden prefix. It runs in CI via `go test ./...` so an accidental
-// reverse import is caught at the same time as any other test failure
-// — no separate lint gate, no .golangci.yml change.
+// This test walks every non-_test.go file under modules/auth/ (recursively,
+// including future sub-packages), parses imports with go/parser, and fails
+// if any import path begins with a forbidden prefix. It runs in CI via
+// `go test ./...` so an accidental reverse import is caught at the same
+// time as any other test failure — no separate lint gate, no .golangci.yml
+// change.
+//
+// The walker uses filepath.WalkDir so that the first sub-package added to
+// modules/auth/ is covered automatically; an earlier os.ReadDir version
+// would have stopped at the top level and quietly let a reverse import in
+// a sub-package slip through (OctoBoooot review on octo-server #430).
 //
 // The alternative would have been a golangci-lint depguard rule, but
 // (1) the project's .golangci.yml is in a deliberately minimal
@@ -56,32 +62,52 @@ func TestNoForbiddenImports(t *testing.T) {
 		t.Fatalf("getwd: %v", err)
 	}
 
-	entries, err := os.ReadDir(wd)
+	entries := make([]string, 0)
+	err = filepath.WalkDir(wd, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			// testdata/ is an idiomatic Go convention for fixture files
+			// the toolchain explicitly ignores; respect that here too so
+			// fixture .go files (if ever added) don't trigger false
+			// positives. Likewise skip generated mock/proto dirs by
+			// their conventional names.
+			name := d.Name()
+			if path != wd && (name == "testdata" || name == "mocks" || name == "vendor") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := d.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		entries = append(entries, path)
+		return nil
+	})
 	if err != nil {
-		t.Fatalf("readdir %s: %v", wd, err)
+		t.Fatalf("walk %s: %v", wd, err)
 	}
 
 	fset := token.NewFileSet()
 	var checked int
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		path := filepath.Join(wd, name)
+	for _, path := range entries {
 		f, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
 		if err != nil {
-			t.Fatalf("parse %s: %v", name, err)
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		// rel for nicer failure messages — strip wd prefix.
+		rel, _ := filepath.Rel(wd, path)
+		if rel == "" {
+			rel = filepath.Base(path)
 		}
 		for _, imp := range f.Imports {
 			// imp.Path.Value is the import literal including quotes; strip.
 			ip := strings.Trim(imp.Path.Value, `"`)
 			for _, forbidden := range forbiddenImportPrefixes {
 				if ip == forbidden || strings.HasPrefix(ip, forbidden+"/") {
-					t.Errorf("%s imports forbidden package %q — modules/auth must not depend on identity-source implementations (see doc.go)", name, ip)
+					t.Errorf("%s imports forbidden package %q — modules/auth must not depend on identity-source implementations (see doc.go)", rel, ip)
 				}
 			}
 		}
