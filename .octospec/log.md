@@ -6,6 +6,13 @@ change-log convention (§7). Newest first.
 
 ## 2026-06-22
 
+- **Creation** — Added task `auth-verify-handlers` (`.octospec/tasks/auth-verify-handlers/`):
+  PR-A3 of Stage A epic (octo-server #428). Migrates `/v1/auth/verify` and
+  `/v1/auth/verify-bot` handlers from `modules/user/api.go` to a new
+  `modules/auth/` implementation using the PR-A2 BotLookup interface and the
+  unified `errcode.ErrAuth*` codes via `httperr.ResponseErrorL`. Collapses
+  plan PR-A3 + PR-A5 into one PR. Journal:
+  `.octospec/journal/shared/auth-verify-handlers.md`.
 - **Creation** — Added task `auth-lookup-interfaces` (`.octospec/tasks/auth-lookup-interfaces/`):
   PR-A2 of Stage A epic (octo-server #428). Adds `BotLookup` / `APIKeyLookup`
   consumer-defined interfaces in `modules/auth`, implements them in

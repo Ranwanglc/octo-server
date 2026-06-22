@@ -199,10 +199,12 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 	// burst 取小值：人类正常重试容忍 + 不给攻击者初始白嫖窗口
 	// tag 用稳定字符串分离 keyspace；注意 register 和 sms 参数相同但语义不同，必须分开
 	loginLimit := r.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "login", 10.0/60, 5)       // 10 req/min, burst 5
-	verifyLimit := r.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "verify", 1000.0/60, 100) // 1000 req/min, burst 100 (Gateway traffic)
 	registerLimit := r.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "register", 5.0/60, 3)  // 5 req/min, burst 3
 	smsLimit := r.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "sms", 5.0/60, 3)            // 5 req/min, burst 3
 	searchLimit := r.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "search", 30.0/60, 15)    // 30 req/min, burst 15
+	// verifyLimit moved to modules/auth/1module.go with the verify routes
+	// (Stage A epic #428, PR-A3). The "verify" rate-limit tag namespace
+	// is preserved over there so the Redis bucket keys stay identical.
 
 	auth := r.Group("/v1", u.ctx.AuthMiddleware(r))
 	{
@@ -302,12 +304,10 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 		v.POST("/user/sms/login_check_phone", smsLimit, u.sendLoginCheckPhoneCode) //发送登录设备验证验证码
 		v.POST("/user/login/check_phone", loginLimit, u.loginCheckPhone)           //登录验证设备手机号
 
-		// #################### Token / Bot 认证验证（供 Gateway 调用） ####################
-		v.POST("/auth/verify", verifyLimit, u.authVerifyToken)   // 验证用户 token
-		v.POST("/auth/verify-bot", verifyLimit, u.authVerifyBot) // 验证 Bot API Key
-		// ↑ Verify endpoints are rate-limited (1000 req/min/IP). For production,
-		// restrict access at network level (nginx allow internal IPs only) or
-		// add X-Internal-Key header validation.
+		// Token / Bot verify endpoints (POST /v1/auth/verify, /v1/auth/verify-bot)
+		// moved to modules/auth/1module.go in Stage A epic #428 (PR-A3). The
+		// `verifyLimit` Redis bucket namespace ("verify" tag) is preserved
+		// over there so existing rate-limit dashboards / runbooks keep working.
 
 		// #################### 第三方授权 ####################
 		v.GET("/user/thirdlogin/authcode", u.thirdAuthcode)     // 第三方授权码获取
@@ -3963,145 +3963,11 @@ func (u *User) verifyTokenAegisRedirect(c *wkhttp.Context) {
 	})
 }
 
-// ==================== Auth Verify API (for Gateway / Microservices) ====================
-
-type authVerifyTokenReq struct {
-	Token string `json:"token"`
-}
-
-type ownedBot struct {
-	UID  string `json:"uid"`
-	Name string `json:"name"`
-}
-
-type authVerifyTokenResp struct {
-	UID       string     `json:"uid"`
-	Name      string     `json:"name"`
-	Role      string     `json:"role"`
-	OwnedBots []ownedBot `json:"owned_bots"`
-}
-
-// authVerifyToken validates a user token and returns identity + owned bots.
-func (u *User) authVerifyToken(c *wkhttp.Context) {
-	var req authVerifyTokenReq
-	if err := c.BindJSON(&req); err != nil {
-		u.Warn("authVerifyToken 请求体格式错误", zap.Error(err))
-		respondUserRequestInvalid(c, "")
-		return
-	}
-	if req.Token == "" {
-		respondUserTokenRequired(c, "token")
-		return
-	}
-
-	// Same Redis lookup as AuthMiddleware: "token:<value>" → versioned envelope
-	// (v2 JSON) 或 legacy "uid@name[@role]"。auth.Decode 兼容两者。
-	raw, cacheErr := u.ctx.Cache().Get(u.ctx.GetConfig().Cache.TokenCachePrefix + req.Token)
-	if cacheErr != nil || strings.TrimSpace(raw) == "" {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "invalid or expired token"})
-		return
-	}
-	info, decodeErr := auth.Decode(raw)
-	if decodeErr != nil {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "malformed token data"})
-		return
-	}
-
-	resp := authVerifyTokenResp{
-		UID:       info.UID,
-		Name:      info.Name,
-		Role:      info.Role,
-		OwnedBots: make([]ownedBot, 0),
-	}
-
-	// Query owned bots: robot.creator_uid = uid
-	type botRow struct {
-		RobotID string `db:"robot_id"`
-		Name    string `db:"name"`
-	}
-	var bots []botRow
-	_, err := u.db.session.SelectBySql(
-		"SELECT r.robot_id, IFNULL(u.name,'') as name FROM robot r "+
-			"INNER JOIN `user` u ON r.robot_id = u.uid "+
-			"WHERE r.creator_uid = ? AND r.status = 1", resp.UID,
-	).Load(&bots)
-	if err == nil {
-		for _, b := range bots {
-			resp.OwnedBots = append(resp.OwnedBots, ownedBot{UID: b.RobotID, Name: b.Name})
-		}
-	}
-
-	c.Response(resp)
-}
-
-type authVerifyBotReq struct {
-	BotToken string `json:"bot_token"`
-}
-
-type authVerifyBotResp struct {
-	BotUID    string `json:"bot_uid"`
-	BotName   string `json:"bot_name"`
-	OwnerUID  string `json:"owner_uid"`
-	OwnerName string `json:"owner_name"`
-	SpaceID   string `json:"space_id"`
-}
-
-// authVerifyBot validates a Bot token (BotFather Bearer token) and returns bot + owner info.
-func (u *User) authVerifyBot(c *wkhttp.Context) {
-	var req authVerifyBotReq
-	if err := c.BindJSON(&req); err != nil {
-		u.Warn("authVerifyBot 请求体格式错误", zap.Error(err))
-		respondUserRequestInvalid(c, "")
-		return
-	}
-	if req.BotToken == "" {
-		respondUserTokenRequired(c, "bot_token")
-		return
-	}
-
-	// Query robot by bot_token
-	var botInfo struct {
-		RobotID    string `db:"robot_id"`
-		CreatorUID string `db:"creator_uid"`
-	}
-	err := u.db.session.Select("robot_id", "IFNULL(creator_uid,'') as creator_uid").
-		From("robot").
-		Where("bot_token = ? AND bot_token != '' AND status = 1", req.BotToken).
-		LoadOne(&botInfo)
-	if err != nil {
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"msg": "invalid bot token"})
-		return
-	}
-
-	// Get bot display name
-	botName := botInfo.RobotID
-	botUser, _ := u.userService.GetUser(botInfo.RobotID)
-	if botUser != nil {
-		botName = botUser.Name
-	}
-
-	// Get owner name
-	ownerName := ""
-	if botInfo.CreatorUID != "" {
-		ownerUser, _ := u.userService.GetUser(botInfo.CreatorUID)
-		if ownerUser != nil {
-			ownerName = ownerUser.Name
-		}
-	}
-
-	// Get bot's Space (first active space_member record)
-	var spaceID string
-	_ = u.db.session.Select("space_id").From("space_member").
-		Where("uid = ? AND status = 1", botInfo.RobotID).
-		OrderDir("created_at", false).
-		Limit(1).
-		LoadOne(&spaceID)
-
-	c.Response(authVerifyBotResp{
-		BotUID:    botInfo.RobotID,
-		BotName:   botName,
-		OwnerUID:  botInfo.CreatorUID,
-		OwnerName: ownerName,
-		SpaceID:   spaceID,
-	})
-}
+// Auth Verify API (/v1/auth/verify, /v1/auth/verify-bot) moved to
+// modules/auth/api.go in Stage A epic #428 (PR-A3). The new implementation
+// uses the BotLookup interface registered by bot_api at module setup and
+// returns the additive `schema_version` / `kind` / `bot_kind` fields per
+// the SDK contract (github.com/Mininglamp-OSS/octo-auth/sdk-go
+// contract/auth-v1.yaml). Legacy field positions / JSON tags are
+// preserved at the wire so existing matter / fleet callers compile
+// unchanged.

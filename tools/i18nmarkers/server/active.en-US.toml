@@ -33,6 +33,15 @@ other = "Failed to update data."
 ["err.server.app_bot.token_rotation_conflict"]
 other = "The token was rotated by another request; please retry."
 
+["err.server.auth.bot_unavailable"]
+other = "Bot is currently unavailable."
+
+["err.server.auth.token_invalid"]
+other = "Invalid or expired token."
+
+["err.server.auth.upstream_failed"]
+other = "Authentication service temporarily unavailable."
+
 ["err.server.bot.occupied"]
 other = "Bot is already occupied by another agent."
 

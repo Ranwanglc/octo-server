@@ -23,6 +23,15 @@ package modules
 import (
 	_ "github.com/Mininglamp-OSS/octo-server/modules/backup"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/base"
+	// auth must be imported BEFORE its lookup providers (bot_api, usersecret)
+	// so its registry singletons (modules/auth/registry.go) are initialised
+	// before those providers' SetupAPI hooks call SetBotLookup /
+	// SetAPIKeyLookup. Go init-order is determined by the import graph, but
+	// blank-import order here is the visible nudge to readers; the actual
+	// guarantee is that modules/auth has no dependency on bot_api /
+	// usersecret (enforced by modules/auth/imports_test.go), so it sorts
+	// earlier in the topological init order regardless.
+	_ "github.com/Mininglamp-OSS/octo-server/modules/auth"
 
 	// `robot` before `botfather`: botfather migrations ALTER the robot table
 	// (历史顺序，非 load-bearing —— 真正排序由 SQL 文件时间戳决定)。
