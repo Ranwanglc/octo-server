@@ -167,3 +167,85 @@ func TestServiceVerifyBotNoLookupRegistered(t *testing.T) {
 		t.Fatalf("no-provider must return ErrUpstreamFailure, got %v", err)
 	}
 }
+
+// fakeAPIKeyLookup is an in-memory APIKeyLookup for service tests.
+type fakeAPIKeyLookup struct {
+	keys map[string]*APIKeyIdentity
+	err  error
+}
+
+func (f *fakeAPIKeyLookup) LookupAPIKey(apiKey string) (*APIKeyIdentity, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.keys[apiKey], nil
+}
+
+// TestServiceVerifyAPIKey covers the four documented paths: empty,
+// no-provider, lookup-miss, and lookup-hit. The lookup-error path is
+// covered transitively via the err-sticky fake.
+func TestServiceVerifyAPIKey(t *testing.T) {
+	prev := GetAPIKeyLookup()
+	t.Cleanup(func() {
+		if prev != nil {
+			SetAPIKeyLookup(prev)
+		}
+	})
+
+	s := &Service{}
+
+	// 1. Empty / whitespace → ErrInvalidAPIKey
+	for _, k := range []string{"", "   ", "\t\n"} {
+		if _, err := s.VerifyAPIKey(context.Background(), VerifyAPIKeyReq{APIKey: k}); !errors.Is(err, ErrInvalidAPIKey) {
+			t.Fatalf("empty/whitespace key %q must return ErrInvalidAPIKey, got %v", k, err)
+		}
+	}
+
+	// 2. No provider registered → ErrUpstreamFailure
+	apiKeyLookupValue.Store(&apiKeyLookupHolder{v: nil})
+	if _, err := s.VerifyAPIKey(context.Background(), VerifyAPIKeyReq{APIKey: "uk_x"}); !errors.Is(err, ErrUpstreamFailure) {
+		t.Fatalf("no-provider must return ErrUpstreamFailure, got %v", err)
+	}
+
+	// 3. Provider returns (nil, nil) → ErrInvalidAPIKey (the stub path
+	//    fleet hits today)
+	stub := &fakeAPIKeyLookup{keys: map[string]*APIKeyIdentity{}}
+	SetAPIKeyLookup(stub)
+	if _, err := s.VerifyAPIKey(context.Background(), VerifyAPIKeyReq{APIKey: "uk_no_match"}); !errors.Is(err, ErrInvalidAPIKey) {
+		t.Fatalf("nil-nil lookup must return ErrInvalidAPIKey, got %v", err)
+	}
+
+	// 4. Provider returns identity → response wrapped correctly with
+	//    schema_version=1 + kind="apikey"
+	wired := &fakeAPIKeyLookup{
+		keys: map[string]*APIKeyIdentity{
+			"uk_real": {
+				UID:              "u1",
+				KeyID:            "k1",
+				SpaceID:          "sp_a",
+				OwnedBotsBySpace: map[string][]string{"sp_a": {"b1", "b2"}},
+			},
+		},
+	}
+	SetAPIKeyLookup(wired)
+	resp, err := s.VerifyAPIKey(context.Background(), VerifyAPIKeyReq{APIKey: "uk_real"})
+	if err != nil {
+		t.Fatalf("happy path: %v", err)
+	}
+	if resp.SchemaVersion != 1 || resp.Kind != "apikey" {
+		t.Fatalf("envelope fields wrong: %+v", resp)
+	}
+	if resp.UID != "u1" || resp.KeyID != "k1" || resp.SpaceID != "sp_a" {
+		t.Fatalf("identity mapping mismatch: %+v", resp)
+	}
+	if len(resp.OwnedBotsBySpace["sp_a"]) != 2 {
+		t.Fatalf("OwnedBotsBySpace not preserved: %+v", resp.OwnedBotsBySpace)
+	}
+
+	// 5. Provider returns an infra error → ErrUpstreamFailure
+	boom := &fakeAPIKeyLookup{err: errors.New("redis down")}
+	SetAPIKeyLookup(boom)
+	if _, err := s.VerifyAPIKey(context.Background(), VerifyAPIKeyReq{APIKey: "uk_anything"}); !errors.Is(err, ErrUpstreamFailure) {
+		t.Fatalf("infra error must wrap to ErrUpstreamFailure, got %v", err)
+	}
+}

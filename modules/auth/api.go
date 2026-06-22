@@ -63,6 +63,26 @@ func (a *API) verifyBotHTTP(c *wkhttp.Context) {
 	c.Response(resp)
 }
 
+// verifyAPIKeyHTTP handles POST /v1/auth/verify-api-key. Wires the
+// stub APIKeyLookup from modules/usersecret through the standard
+// Service → handler → httperr.ResponseErrorL path; until real `uk_`
+// storage lands, every call returns 401 ErrAuthTokenInvalid which is
+// the same contract surface fleet's SDK already expects.
+func (a *API) verifyAPIKeyHTTP(c *wkhttp.Context) {
+	var req VerifyAPIKeyReq
+	if err := c.BindJSON(&req); err != nil {
+		a.log.Warn("auth: verify-api-key request body malformed", zap.Error(err))
+		httperr.ResponseErrorL(c, errcode.ErrAuthTokenInvalid, nil, nil)
+		return
+	}
+	resp, err := a.svc.VerifyAPIKey(c.Request.Context(), req)
+	if err != nil {
+		a.handleServiceError(c, "verify-api-key", err)
+		return
+	}
+	c.Response(resp)
+}
+
 // handleServiceError maps a sentinel error from the Service to the right
 // errcode + log line. Anti-enumeration: all "token bad" reasons collapse
 // to a single 401 (ErrAuthTokenInvalid) at the wire; the specific reason
@@ -77,7 +97,9 @@ func (a *API) verifyBotHTTP(c *wkhttp.Context) {
 // (Jerry-Xin / yujiawei review on #431).
 func (a *API) handleServiceError(c *wkhttp.Context, endpoint string, err error) {
 	switch {
-	case errors.Is(err, ErrInvalidUserToken), errors.Is(err, ErrInvalidBotToken):
+	case errors.Is(err, ErrInvalidUserToken),
+		errors.Is(err, ErrInvalidBotToken),
+		errors.Is(err, ErrInvalidAPIKey):
 		// Single anti-enumeration code; log the specific sentinel so
 		// operators can still distinguish in audit.
 		a.log.Info("auth: rejected", zap.String("endpoint", endpoint), zap.Error(err))

@@ -220,6 +220,52 @@ func (s *Service) lookupUserName(uid string) string {
 	return name
 }
 
+// VerifyAPIKey implements POST /v1/auth/verify-api-key business logic.
+//
+// Calls the registered APIKeyLookup (modules/usersecret) to resolve a
+// `uk_`-prefixed API key to its owner identity.
+//
+// Stage A scope (PR-A4): the usersecret.LookupAPIKey implementation is
+// a stub (it returns nil, nil for every input) because real `uk_` API
+// Key storage does not yet exist in octo-server. This handler is in
+// place so fleet's daemon /v1/auth/verify-api-key call stops 404ing —
+// it instead returns the structured 401 ErrAuthTokenInvalid envelope
+// fleet's SDK already knows how to handle. The day real storage lands,
+// only the stub body in modules/usersecret/lookup.go has to change;
+// this handler and its wire contract stay put.
+//
+// Same error-mapping contract as VerifyBot:
+//   - empty / whitespace token → ErrInvalidAPIKey
+//   - no APIKeyLookup registered → ErrUpstreamFailure
+//   - lookup returns nil, nil → ErrInvalidAPIKey
+//   - lookup returns non-nil error → ErrUpstreamFailure
+//   - lookup returns identity → wrap into VerifyAPIKeyResp
+func (s *Service) VerifyAPIKey(ctx context.Context, req VerifyAPIKeyReq) (*VerifyAPIKeyResp, error) {
+	key := strings.TrimSpace(req.APIKey)
+	if key == "" {
+		return nil, ErrInvalidAPIKey
+	}
+	lookup := GetAPIKeyLookup()
+	if lookup == nil {
+		return nil, ErrUpstreamFailure
+	}
+	id, err := lookup.LookupAPIKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUpstreamFailure, err)
+	}
+	if id == nil {
+		return nil, ErrInvalidAPIKey
+	}
+	return &VerifyAPIKeyResp{
+		SchemaVersion:    1,
+		Kind:             "apikey",
+		UID:              id.UID,
+		KeyID:            id.KeyID,
+		SpaceID:          id.SpaceID,
+		OwnedBotsBySpace: id.OwnedBotsBySpace,
+	}, nil
+}
+
 // Sentinel errors returned by Service methods. The HTTP layer in api.go
 // maps these to errcode.ErrAuth* codes — keeping the mapping in one
 // place lets the Service be unit-tested without httperr import.
@@ -230,6 +276,9 @@ var (
 	// ErrInvalidBotToken — anti-enumeration catch-all for bot verify.
 	// Maps to errcode.ErrAuthTokenInvalid (401).
 	ErrInvalidBotToken = errors.New("auth: invalid or expired bot token")
+	// ErrInvalidAPIKey — anti-enumeration catch-all for API Key verify.
+	// Maps to errcode.ErrAuthTokenInvalid (401).
+	ErrInvalidAPIKey = errors.New("auth: invalid or expired api key")
 	// ErrBotUnavailable — App Bot exists but is unpublished.
 	// Maps to errcode.ErrAuthBotUnpublished (503).
 	ErrBotUnavailable = errors.New("auth: bot is currently unavailable")

@@ -63,3 +63,25 @@ type VerifyBotResp struct {
 	Scope         string `json:"scope,omitempty"`
 	SpaceID       string `json:"space_id"`
 }
+
+// VerifyAPIKeyReq is the request body for POST /v1/auth/verify-api-key.
+// Daemon-side callers (e.g. octo-fleet runtime daemon) send their `uk_`
+// API key here to resolve their owner identity. Until real `uk_` storage
+// lands, every call resolves to "no match" → 401 ErrAuthTokenInvalid; the
+// contract is in place so daemons stop seeing a 404 ghost endpoint.
+type VerifyAPIKeyReq struct {
+	APIKey string `json:"api_key"`
+}
+
+// VerifyAPIKeyResp is the response body for POST /v1/auth/verify-api-key.
+// SpaceID and OwnedBotsBySpace are optional — empty when the key carries
+// no context binding (the only path that exists today since the lookup
+// is a stub).
+type VerifyAPIKeyResp struct {
+	SchemaVersion    int                 `json:"schema_version"`
+	Kind             string              `json:"kind"` // "apikey"
+	UID              string              `json:"uid"`
+	KeyID            string              `json:"key_id"`
+	SpaceID          string              `json:"space_id,omitempty"`
+	OwnedBotsBySpace map[string][]string `json:"owned_bots_by_space,omitempty"`
+}

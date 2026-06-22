@@ -6,6 +6,13 @@ change-log convention (§7). Newest first.
 
 ## 2026-06-22
 
+- **Creation** — Added task `auth-verify-api-key` (`.octospec/tasks/auth-verify-api-key/`):
+  PR-A4 of Stage A epic (octo-server #428). Adds the missing
+  `/v1/auth/verify-api-key` endpoint wiring the PR-A2 APIKeyLookup stub
+  through the existing verify Service + handler + verifyLimit
+  plumbing. Closes the ghost-endpoint gap fleet has been hitting; until
+  real `uk_` storage lands, every call returns 401 ErrAuthTokenInvalid.
+  Journal: `.octospec/journal/shared/auth-verify-api-key.md`.
 - **Creation** — Added task `auth-verify-handlers` (`.octospec/tasks/auth-verify-handlers/`):
   PR-A3 of Stage A epic (octo-server #428). Migrates `/v1/auth/verify` and
   `/v1/auth/verify-bot` handlers from `modules/user/api.go` to a new

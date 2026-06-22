@@ -52,6 +52,11 @@ func (m *moduleAPI) Route(r *wkhttp.WKHttp) {
 	{
 		v.POST("/auth/verify", verifyLimit, m.api.verifyUserHTTP)
 		v.POST("/auth/verify-bot", verifyLimit, m.api.verifyBotHTTP)
+		// verify-api-key reuses the same verifyLimit bucket (per plan
+		// §5.4 / §10) — prevents attackers from probing API keys at a
+		// higher rate than they could probe session tokens. Sharing the
+		// "verify" tag also keeps the operator dashboards consolidated.
+		v.POST("/auth/verify-api-key", verifyLimit, m.api.verifyAPIKeyHTTP)
 	}
 }
 

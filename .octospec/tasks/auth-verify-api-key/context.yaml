@@ -1,0 +1,62 @@
+schema_version: 1
+task: auth-verify-api-key
+brief: .octospec/tasks/auth-verify-api-key/brief.md
+issue: octo-server#428
+
+touched_paths:
+  - modules/auth/contract.go        # add VerifyAPIKeyReq / VerifyAPIKeyResp
+  - modules/auth/service.go         # add VerifyAPIKey method + ErrInvalidAPIKey sentinel
+  - modules/auth/api.go             # add verifyAPIKeyHTTP handler + extend handleServiceError
+  - modules/auth/1module.go         # register the new route under shared verifyLimit
+  - modules/auth/service_test.go    # add TestServiceVerifyAPIKey covering 5 paths
+
+load_bearing_tags: [auth, wire-contract, error-response, rate-limit]
+
+injected_rules:
+  - id: error-handling
+    priority: 85
+    load_bearing: true
+    matched_by:
+      paths: ["modules/**/*.go"]
+      touches: ["error-response", "wire-contract"]
+    why: >
+      Anti-enumeration: ErrInvalidAPIKey joins the existing
+      {ErrInvalidUserToken, ErrInvalidBotToken} family that collapses to
+      the single 401 ErrAuthTokenInvalid via handleServiceError. No new
+      errcode registered; verifyAPIKeyHTTP uses the unchanged
+      httperr.ResponseErrorL surface from PR-A3. Wire contract:
+      VerifyAPIKeyResp matches plan §4.1.3 (schema_version, kind, uid,
+      key_id, optional space_id, optional owned_bots_by_space). Fleet's
+      existing /v1/auth/verify-api-key callers stop seeing 404 and start
+      seeing structured 401 envelopes — same status code, richer body.
+  - id: rate-limit
+    priority: 80
+    load_bearing: true
+    matched_by:
+      paths: ["modules/**/*.go"]
+      touches: ["rate-limit"]
+    why: >
+      verify-api-key reuses the SAME verifyLimit middleware instance
+      (shared "verify" tag) as the other two verify endpoints — prevents
+      attackers from probing API keys at a higher rate than session tokens
+      (plan §10 risk: "verify-api-key endpoint implementation error
+      exposes all API Keys"; mitigation: rate-limit-shared with verify-bot).
+  - id: testing
+    priority: 70
+    load_bearing: false
+    matched_by:
+      paths: ["**/*_test.go"]
+      touches: ["test"]
+    why: >
+      TestServiceVerifyAPIKey covers all five documented paths:
+      empty/whitespace input, no-provider-registered (boot race),
+      lookup-returns-nil-nil (the stub path fleet hits today),
+      lookup-returns-identity (the future-real-storage path), and
+      lookup-returns-infra-error → ErrUpstreamFailure. Same nil-ctx
+      pattern as the other Service tests so no DB needed.
+
+not_injected:
+  - id: space-isolation
+    why: This endpoint resolves identity from a token; it does not access
+      space-scoped data. Space membership checks are the caller's
+      responsibility downstream.
