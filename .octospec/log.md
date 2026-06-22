@@ -6,6 +6,12 @@ change-log convention (§7). Newest first.
 
 ## 2026-06-22
 
+- **Creation** — Added task `auth-lookup-interfaces` (`.octospec/tasks/auth-lookup-interfaces/`):
+  PR-A2 of Stage A epic (octo-server #428). Adds `BotLookup` / `APIKeyLookup`
+  consumer-defined interfaces in `modules/auth`, implements them in
+  `modules/bot_api` and `modules/usersecret`, and locks the dependency
+  direction with an in-tree `imports_test.go` guard. Journal:
+  `.octospec/journal/shared/auth-lookup-interfaces.md`.
 - **Creation** — Added task `modules-auth-skeleton` (`.octospec/tasks/modules-auth-skeleton/`):
   brief + context for PR-A1 (octo-server #428). Relocated `pkg/auth/{tokeninfo,parser}` and
   their tests to the new `modules/auth/` package; `pkg/auth/` becomes a Deprecated alias

@@ -1,0 +1,65 @@
+schema_version: 1
+task: auth-lookup-interfaces
+brief: .octospec/tasks/auth-lookup-interfaces/brief.md
+issue: octo-server#428
+
+touched_paths:
+  - modules/auth/lookup.go             # new: BotLookup, APIKeyLookup interfaces + identity result types
+  - modules/auth/sentinels.go          # new: ErrAppBotUnpublished sentinel
+  - modules/auth/imports_test.go       # new: in-tree guard enforcing dependency-direction invariant
+  - modules/bot_api/lookup.go          # new: LookupUserBot + LookupAppBot implementing auth.BotLookup
+  - modules/usersecret/lookup.go       # new: LookupAPIKey stub implementing auth.APIKeyLookup
+
+load_bearing_tags: [auth, wire-contract, bot-api, space, isolation]
+
+injected_rules:
+  - id: space-isolation
+    priority: 92
+    load_bearing: true
+    matched_by:
+      paths: ["modules/**/*.go"]
+      touches: ["auth", "bot-api", "isolation", "space"]
+    why: >
+      AppBotIdentity.Scope / SpaceID drive Space fail-closed checks at the SDK
+      caller side (plan §6.3 RequireSpaceMember). The DB-row → identity-struct
+      mapping in LookupAppBot uses the SAME field plumbing as the existing
+      authAppBot middleware (auth.go:73-74 sets CtxKeyAppBotSpaceID only when
+      Scope=="space"); the new path preserves this exactly, so an
+      App Bot bound to space sp_A cannot accidentally surface as
+      cross-space-accessible via the new code path. No widening, no fail-open
+      added.
+  - id: error-handling
+    priority: 85
+    load_bearing: true
+    matched_by:
+      paths: ["modules/**/*.go"]
+      touches: ["wire-contract"]
+    why: >
+      The Lookup* interfaces' identity types (UserBotIdentity, AppBotIdentity,
+      APIKeyIdentity) feed directly into PR-A3's verify response wire shape;
+      field names and types are chosen to match plan §4.1.2 / §4.1.3 1-to-1
+      so PR-A3 is a trivial struct mapping. ErrAppBotUnpublished is the
+      typed sentinel PR-A3 will map to AUTH_BOT_UNAVAILABLE (503). This PR
+      registers no new errcode and writes no HTTP handler, so no
+      httperr.ResponseErrorL surface is touched; i18n-extract-check and
+      i18n-lint both stay no-op.
+  - id: testing
+    priority: 70
+    load_bearing: false
+    matched_by:
+      paths: ["**/*_test.go"]
+      touches: ["test"]
+    why: >
+      imports_test.go is a self-contained guard using go/parser to walk
+      modules/auth's own source files at test time — no DB, no Redis, no
+      WuKongIM dep. Bot_api / usersecret implementations have compile-time
+      assertions (var _ auth.BotLookup = (*BotAPI)(nil) /
+      var _ auth.APIKeyLookup = (*API)(nil)) so signature drift fails at
+      `go build` rather than waiting for a test to run.
+
+not_injected:
+  - id: rate-limit
+    why: No HTTP route is added or moved in PR-A2. Rate-limit-relevant code
+      is untouched.
+  - id: commit-style
+    why: Always-on convention; applied at commit time.
