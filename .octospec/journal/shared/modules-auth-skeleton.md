@@ -50,9 +50,13 @@ tracked in epic #428.
   `NewCacheTokenParser`) re-exported. Types use Go `type =` aliases (so
   pkg/auth.TokenInfo IS modulesauth.TokenInfo at the type level); errors
   re-exported by value so `errors.Is(err, pkgauth.ErrEmptyToken)` keeps
-  matching errors produced by the canonical package; functions re-exported
-  as function variables (`var Encode = modulesauth.Encode`) so existing
-  call signatures including variadic options compile unchanged.
+  matching errors produced by the canonical package; **functions
+  re-exported as wrapper funcs** that forward to `modulesauth.*` —
+  preserves call signatures including variadic options while keeping the
+  symbols immutable (a `var X = ...` re-export would let importers
+  reassign the symbol package-globally; Jerry-Xin flagged this on PR
+  review and the wrapper form is the more defensive choice for a shim
+  consumed by other packages).
 - `pkg/auth/aliases_test.go` (new): tiny guard test. Round-trips
   `Encode → Decode` via the shim names, then cross-checks that the shim's
   Encode output is byte-identical to the canonical package's Encode output.
@@ -117,12 +121,13 @@ minimal and the diff trivially reviewable.
 
 ## Lessons
 
-- **Aliasing functions via `var X = Y`** preserves variadic signatures
-  cleanly (e.g. `NewCacheTokenParser(c, prefix, opts...)`), and gives
-  callers a one-line migration path: they can move to the canonical
-  import path at their own pace. Worth remembering for any future
-  package relocation where you cannot rewrite all call sites in the
-  same PR.
+- **Aliasing functions via wrapper funcs** (not `var X = Y`) is the
+  more defensive form for a shim package: it preserves the exported
+  call signature including variadic options, and keeps the symbols
+  immutable so an importer cannot reassign `auth.Encode = customFn`
+  package-globally. Worth remembering for any future package
+  relocation where a shim must outlive a deprecation window. Jerry-Xin
+  flagged this on PR-A1 review and the codebase now follows it.
 - **Sentinel error re-export must be by value** (`var ErrX = pkg.ErrX`),
   not `var ErrX = errors.New(...)`. The latter would create a distinct
   error value and silently break `errors.Is` for callers — a footgun

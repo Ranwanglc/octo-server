@@ -14,6 +14,8 @@
 package auth
 
 import (
+	"github.com/Mininglamp-OSS/octo-lib/pkg/cache"
+
 	modulesauth "github.com/Mininglamp-OSS/octo-server/modules/auth"
 )
 
@@ -55,34 +57,44 @@ var ErrEmptyToken = modulesauth.ErrEmptyToken
 // Deprecated: use [modulesauth.ErrInvalidToken].
 var ErrInvalidToken = modulesauth.ErrInvalidToken
 
-// Encode is a function-variable alias preserving the exported call signature.
-// `auth.Encode(info)` continues to work for all existing callers without
-// source edits during the migration window.
+// Encode is a wrapper preserving the exported call signature for callers
+// importing this shim. Forwarding to the canonical implementation keeps the
+// function immutable (unlike a `var = ...` re-export, which would let an
+// importer reassign the symbol package-globally).
 //
 // Deprecated: use [modulesauth.Encode].
-var Encode = modulesauth.Encode
+func Encode(info TokenInfo) (string, error) {
+	return modulesauth.Encode(info)
+}
 
-// Decode is a function-variable alias mirroring [Encode].
+// Decode is a wrapper mirroring [Encode]; see Encode for the wrapper-vs-var
+// rationale.
 //
 // Deprecated: use [modulesauth.Decode].
-var Decode = modulesauth.Decode
+func Decode(raw string) (TokenInfo, error) {
+	return modulesauth.Decode(raw)
+}
 
-// WithLanguageResolver is a function-variable alias for
-// [modulesauth.WithLanguageResolver].
+// WithLanguageResolver is a wrapper for [modulesauth.WithLanguageResolver].
 //
 // Deprecated: use [modulesauth.WithLanguageResolver].
-var WithLanguageResolver = modulesauth.WithLanguageResolver
+func WithLanguageResolver(r LanguageResolver) ParserOption {
+	return modulesauth.WithLanguageResolver(r)
+}
 
-// WithRoleResolver is a function-variable alias for
-// [modulesauth.WithRoleResolver].
+// WithRoleResolver is a wrapper for [modulesauth.WithRoleResolver].
 //
 // Deprecated: use [modulesauth.WithRoleResolver].
-var WithRoleResolver = modulesauth.WithRoleResolver
+func WithRoleResolver(r RoleResolver) ParserOption {
+	return modulesauth.WithRoleResolver(r)
+}
 
-// NewCacheTokenParser is a function-variable alias for
-// [modulesauth.NewCacheTokenParser]; the variadic signature is preserved so
-// existing callers like `NewCacheTokenParser(c, prefix,
-// WithLanguageResolver(r), WithRoleResolver(rr))` keep compiling unchanged.
+// NewCacheTokenParser is a wrapper for [modulesauth.NewCacheTokenParser];
+// the variadic signature is preserved so existing callers like
+// `NewCacheTokenParser(c, prefix, WithLanguageResolver(r), WithRoleResolver(rr))`
+// keep compiling unchanged.
 //
 // Deprecated: use [modulesauth.NewCacheTokenParser].
-var NewCacheTokenParser = modulesauth.NewCacheTokenParser
+func NewCacheTokenParser(c cache.Cache, prefix string, opts ...ParserOption) *CacheTokenParser {
+	return modulesauth.NewCacheTokenParser(c, prefix, opts...)
+}
