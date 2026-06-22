@@ -36,7 +36,7 @@ func (a *API) verifyUserHTTP(c *wkhttp.Context) {
 	var req VerifyUserReq
 	if err := c.BindJSON(&req); err != nil {
 		a.log.Warn("auth: verify request body malformed", zap.Error(err))
-		httperr.ResponseErrorL(c, errcode.ErrAuthTokenInvalid, nil, nil)
+		httperr.ResponseErrorLWithStatus(c, errcode.ErrAuthTokenInvalid, nil, nil)
 		return
 	}
 	resp, err := a.svc.VerifyUser(c.Request.Context(), req)
@@ -52,7 +52,7 @@ func (a *API) verifyBotHTTP(c *wkhttp.Context) {
 	var req VerifyBotReq
 	if err := c.BindJSON(&req); err != nil {
 		a.log.Warn("auth: verify-bot request body malformed", zap.Error(err))
-		httperr.ResponseErrorL(c, errcode.ErrAuthTokenInvalid, nil, nil)
+		httperr.ResponseErrorLWithStatus(c, errcode.ErrAuthTokenInvalid, nil, nil)
 		return
 	}
 	resp, err := a.svc.VerifyBot(c.Request.Context(), req)
@@ -67,19 +67,27 @@ func (a *API) verifyBotHTTP(c *wkhttp.Context) {
 // errcode + log line. Anti-enumeration: all "token bad" reasons collapse
 // to a single 401 (ErrAuthTokenInvalid) at the wire; the specific reason
 // is only in the log.
+//
+// Uses ResponseErrorLWithStatus (not ResponseErrorL) so the **HTTP
+// transport** status matches the semantic status — Gateway / SDK callers
+// branch on the HTTP status line (401 → re-auth, 503 → retry-with-backoff,
+// 500 → fatal) per the original modules/user/api.go contract. The legacy
+// handlers used raw AbortWithStatusJSON(401,...) for the same reason; the
+// i18n-envelope migration must preserve that wire-status contract
+// (Jerry-Xin / yujiawei review on #431).
 func (a *API) handleServiceError(c *wkhttp.Context, endpoint string, err error) {
 	switch {
 	case errors.Is(err, ErrInvalidUserToken), errors.Is(err, ErrInvalidBotToken):
 		// Single anti-enumeration code; log the specific sentinel so
 		// operators can still distinguish in audit.
 		a.log.Info("auth: rejected", zap.String("endpoint", endpoint), zap.Error(err))
-		httperr.ResponseErrorL(c, errcode.ErrAuthTokenInvalid, nil, nil)
+		httperr.ResponseErrorLWithStatus(c, errcode.ErrAuthTokenInvalid, nil, nil)
 	case errors.Is(err, ErrBotUnavailable):
 		a.log.Info("auth: bot unpublished", zap.String("endpoint", endpoint))
-		httperr.ResponseErrorL(c, errcode.ErrAuthBotUnpublished, nil, nil)
+		httperr.ResponseErrorLWithStatus(c, errcode.ErrAuthBotUnpublished, nil, nil)
 	default:
 		// Treat anything else (incl. wrapped ErrUpstreamFailure) as 500.
 		a.log.Error("auth: upstream failure", zap.String("endpoint", endpoint), zap.Error(err))
-		httperr.ResponseErrorL(c, errcode.ErrAuthUpstreamFailed, nil, nil)
+		httperr.ResponseErrorLWithStatus(c, errcode.ErrAuthUpstreamFailed, nil, nil)
 	}
 }

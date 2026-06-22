@@ -163,9 +163,15 @@ func (s *Service) VerifyBot(ctx context.Context, req VerifyBotReq) (*VerifyBotRe
 	if id == nil {
 		return nil, ErrInvalidBotToken
 	}
-	botName := id.BotName
+	// Legacy parity (yujiawei review on #431): prefer the user-table
+	// display name (modules/user.GetUser returned name) over
+	// robot.username, matching the legacy authVerifyBot behaviour where
+	// bot_name was always resolved via userService.GetUser. Falls back
+	// to id.BotName (robot.username from LookupUserBot) when the
+	// user-table name is empty.
+	botName := s.lookupUserName(id.BotUID)
 	if botName == "" {
-		botName = s.lookupUserName(id.BotUID)
+		botName = id.BotName
 	}
 	ownerName := s.lookupUserName(id.OwnerUID)
 	// User Bot "current space" — first active space_member row, matching
