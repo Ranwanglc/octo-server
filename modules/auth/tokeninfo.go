@@ -1,12 +1,11 @@
-// Package auth carries the canonical representation of the value stored under
-// the token cache key (TokenCachePrefix+token) and provides versioned
-// encoding helpers.
+// Token cache encoding helpers.
 //
 // Historically the cache value was a `@`-joined string ("uid@name" or
 // "uid@name@role") split ad-hoc at every call site. i18n 主方案 D10/D21 要求把
 // token cache 真相源收口，并在 payload 中带上用户语言偏好（D20 UserInfo），
 // 因此引入 versioned JSON envelope（v2:）；v1 字符串格式保留为解码 fallback，
 // 灰度期老 token 不会因为升级失效。
+
 package auth
 
 import (

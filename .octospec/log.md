@@ -4,6 +4,15 @@ Change history for this repo's `.octospec/`, following the
 [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
 change-log convention (§7). Newest first.
 
+## 2026-06-22
+
+- **Creation** — Added task `modules-auth-skeleton` (`.octospec/tasks/modules-auth-skeleton/`):
+  brief + context for PR-A1 (octo-server #428). Relocated `pkg/auth/{tokeninfo,parser}` and
+  their tests to the new `modules/auth/` package; `pkg/auth/` becomes a Deprecated alias
+  shim with a `aliases_test.go` guard. First step of the Stage A epic that culminates
+  in `verify` / `verify-bot` / `verify-api-key` HTTP handlers moving out of
+  `modules/user/api.go`. Journal: `.octospec/journal/shared/modules-auth-skeleton.md`.
+
 ## 2026-06-19
 
 - **Update** — Adopted OKF v0.1 compatible frontmatter across all repo rules

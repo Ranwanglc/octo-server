@@ -12,9 +12,9 @@ import (
 
 // LanguageResolver hydrates UserInfo.Language with the freshest user-language
 // preference (Redis cache → DB → ""). It is intentionally a tiny interface
-// shaped at the consumer side so pkg/auth does not need to import the i18n
-// package or know about Redis / DB primitives. The concrete implementation
-// lives in modules/user.
+// shaped at the consumer side so modules/auth does not need to import the
+// i18n package or know about Redis / DB primitives. The concrete
+// implementation lives in modules/user.
 type LanguageResolver interface {
 	Resolve(ctx context.Context, uid string) (string, error)
 }
@@ -26,17 +26,17 @@ type LanguageResolver interface {
 // admin-account removal cannot be honoured promptly. Resolving per request
 // bounds that staleness to the resolver's cache TTL.
 //
-// Like LanguageResolver it is shaped at the consumer side so pkg/auth stays
-// free of DB / Redis imports; the concrete implementation lives in
+// Like LanguageResolver it is shaped at the consumer side so modules/auth
+// stays free of DB / Redis imports; the concrete implementation lives in
 // modules/user (RoleService).
 type RoleResolver interface {
 	ResolveRole(ctx context.Context, uid string) (string, error)
 }
 
 // CacheTokenParser implements octo-lib's wkhttp.TokenParser using the shared
-// pkg/auth codec. It supersedes octo-lib's legacyTokenParser so that octo-server
-// can write v2 JSON envelopes while still decoding any legacy uid@name[@role]
-// values left in cache from older binaries.
+// modules/auth codec. It supersedes octo-lib's legacyTokenParser so that
+// octo-server can write v2 JSON envelopes while still decoding any legacy
+// uid@name[@role] values left in cache from older binaries.
 //
 // When a LanguageResolver is injected via WithLanguageResolver, Parse hits the
 // resolver after Decode to upgrade the token-cache language snapshot to the

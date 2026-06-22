@@ -126,10 +126,10 @@ func TestCacheTokenParserPropagatesCacheError(t *testing.T) {
 }
 
 // stubResolver is used to exercise the LanguageResolver hook without pulling
-// modules/user into pkg/auth's test deps.
+// modules/user into modules/auth's test deps.
 type stubResolver struct {
-	lang string
-	err  error
+	lang   string
+	err    error
 	gotUID string
 }
 
@@ -225,7 +225,7 @@ func TestNewCacheTokenParserPanicsOnNilCache(t *testing.T) {
 }
 
 // stubRoleResolver exercises the RoleResolver hook without pulling modules/user
-// into pkg/auth's test deps.
+// into modules/auth's test deps.
 type stubRoleResolver struct {
 	role   string
 	err    error

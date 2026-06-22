@@ -1,0 +1,88 @@
+# octospec context — records which rules were injected for this task and why.
+# Resolution: brief.md load-bearing tags ∪ touched file paths → matched rules
+# (see .octospec/rules/_index.yaml inject_when).
+schema_version: 1
+task: modules-auth-skeleton
+brief: .octospec/tasks/modules-auth-skeleton/brief.md
+issue: octo-server#428
+
+# Files this change touches (drives path-based injection).
+touched_paths:
+  - modules/auth/tokeninfo.go            # canonical TokenInfo + Encode/Decode (moved from pkg/auth)
+  - modules/auth/tokeninfo_test.go       # canonical tests (moved from pkg/auth)
+  - modules/auth/parser.go               # canonical CacheTokenParser (moved from pkg/auth)
+  - modules/auth/parser_test.go          # canonical tests (moved from pkg/auth)
+  - modules/auth/doc.go                  # package doc + dependency-direction invariant
+  - pkg/auth/aliases.go                  # Deprecated alias shim re-exporting modules/auth surface
+  - pkg/auth/aliases_test.go             # guard test that aliases stay wired
+  # Deletions:
+  - pkg/auth/tokeninfo.go                # DELETE (moved to modules/auth)
+  - pkg/auth/tokeninfo_test.go           # DELETE (moved to modules/auth)
+  - pkg/auth/parser.go                   # DELETE (moved to modules/auth)
+  - pkg/auth/parser_test.go              # DELETE (moved to modules/auth)
+
+# Load-bearing tags declared in the brief.
+load_bearing_tags: [auth, wire-contract, space, isolation]
+
+# Rules injected (full text read and followed). Each entry: why it matched.
+injected_rules:
+  - id: space-isolation
+    priority: 92
+    load_bearing: true
+    matched_by:
+      paths: ["modules/**/*.go"]
+      touches: ["auth", "isolation"]
+    why: >
+      modules/auth becomes the gateway that hydrates wkhttp.UserInfo (uid / role
+      / language) used by every authenticated handler and by Space middleware /
+      per-route ACLs. Any regression in Decode/Parse would silently bypass the
+      downstream isolation boundary. This PR is a pure relocation — wire
+      encoding (v2: prefix + legacy uid@name[@role] fallback), sentinel-error
+      identity, panic-on-nil-cache, resolver fail-open + empty-drops-snapshot
+      semantics, and the unexported field shape (resolver, roleResolver) are all
+      preserved byte-for-byte. No new fail-open path, no widened access — the
+      package move itself cannot weaken Space isolation, and the alias shim
+      ensures the six existing call sites keep getting the exact same
+      UserInfo they get today.
+  - id: error-handling
+    priority: 85
+    load_bearing: true
+    matched_by:
+      paths: ["modules/**/*.go"]
+      touches: ["wire-contract"]
+    why: >
+      Six existing consumers (main.go, modules/{group,message,user,qrcode}/api.go,
+      modules/user/api_manager.go) import the pkg/auth wire surface
+      (TokenInfo / Encode / Decode / NewCacheTokenParser /
+      WithLanguageResolver / WithRoleResolver / ErrEmptyToken /
+      ErrInvalidToken). Aliases re-export every symbol with identical
+      signatures; sentinel errors are re-exported by value so errors.Is keeps
+      working. No httperr / errcode / ResponseError* surface is touched by
+      this PR (verify handlers and their error mapping land in PR-A3+);
+      i18n-extract-check and i18n-lint will run to prove that.
+  - id: testing
+    priority: 70
+    load_bearing: false
+    matched_by:
+      paths: ["**/*_test.go"]
+      touches: ["test"]
+    why: >
+      All existing pkg/auth unit tests (round-trip, legacy decode, sentinel
+      errors, resolver fail-open / empty-drop, panic-on-nil-cache, role
+      resolver demote / fail-open) move with the implementation to
+      modules/auth so they exercise the canonical package. A tiny
+      pkg/auth/aliases_test.go is added to fail loud if any alias drifts
+      (round-trip via shim names + errors.Is on the sentinel). The relocated
+      tests are pure unit tests with no DB/Redis dependency, so they run
+      outside the env-test compose stack; the full suite still runs through
+      `make env-test && go test ./...` to confirm zero collateral damage.
+
+# Rules deliberately NOT injected.
+not_injected:
+  - id: rate-limit
+    why: No HTTP route is added or moved in PR-A1. The new verify-api-key
+      route (which will reuse the existing verifyLimit middleware) lands in
+      PR-A4. PR-A1 touches no rate-limit-relevant code.
+  - id: commit-style
+    why: Always-on convention (English Conventional Commits, Refs #428);
+      followed at PR time, no code-level injection.
