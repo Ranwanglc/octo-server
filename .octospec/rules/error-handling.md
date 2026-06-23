@@ -10,7 +10,7 @@ tier: repo
 priority: 85
 load_bearing: true
 inject_when:
-  paths: ["modules/**/*.go", "base/**/*.go", "pkg/errcode/**", "pkg/**/httperr/**"]
+  paths: ["modules/**/*.go", "modules/base/**/*.go", "pkg/errcode/**", "pkg/**/httperr/**"]
   touches: ["error-response", "i18n", "wire-contract"]
 source: self
 supersedes: []

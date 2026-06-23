@@ -10,7 +10,7 @@ tier: repo
 priority: 80
 load_bearing: true
 inject_when:
-  paths: ["modules/**/*.go", "base/common/service_*.go", "internal/**/*.go"]
+  paths: ["modules/**/*.go", "modules/base/common/service_*.go", "internal/**/*.go"]
   touches: ["rate-limit", "throttle"]
 source: self
 supersedes: []
