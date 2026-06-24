@@ -41,9 +41,39 @@ func TestScrubPath(t *testing.T) {
 			want: "/v1/incoming-webhooks/iwh_abc123",
 		},
 		{
+			name: "alias push path masks token, keeps webhook_id (#455)",
+			in:   "/v1/webhooks/iwh_abc123/deadbeefcafetoken",
+			want: "/v1/webhooks/iwh_abc123/***",
+		},
+		{
+			name: "alias adapter suffix is fully masked after id (#455)",
+			in:   "/v1/webhooks/iwh_abc123/secrettoken/github",
+			want: "/v1/webhooks/iwh_abc123/***",
+		},
+		{
+			name: "alias path with trailing query is fully masked after id (#455)",
+			in:   "/v1/webhooks/iwh_abc123/secrettoken?foo=bar",
+			want: "/v1/webhooks/iwh_abc123/***",
+		},
+		{
+			name: "alias uppercase prefix still masks token, original case kept (#455)",
+			in:   "/V1/WEBHOOKS/iwh_abc123/secrettoken",
+			want: "/V1/WEBHOOKS/iwh_abc123/***",
+		},
+		{
+			name: "alias webhook_id only, no token segment, unchanged (#455)",
+			in:   "/v1/webhooks/iwh_abc123",
+			want: "/v1/webhooks/iwh_abc123",
+		},
+		{
 			name: "management route is not a push path, unchanged",
 			in:   "/v1/groups/g_1/incoming-webhooks",
 			want: "/v1/groups/g_1/incoming-webhooks",
+		},
+		{
+			name: "singular /v1/webhook (different module) is not a push path, unchanged",
+			in:   "/v1/webhook/github",
+			want: "/v1/webhook/github",
 		},
 		{
 			name: "unrelated path unchanged",
@@ -62,6 +92,28 @@ func TestScrubPath(t *testing.T) {
 				t.Fatalf("ScrubPath(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestTokenInText_CoversEveryPrefix pins the single-source invariant flagged in
+// PR #456 review: webhookPushPrefixes (used by ScrubPath) and the panic-dump
+// tokenInText regex independently encode the set of webhook push prefixes. They
+// must stay in sync — a prefix added to the slice but not covered by the regex
+// would silently leak tokens from the gin.Recovery panic dump. This fails loudly
+// if the regex stops covering any prefix in the slice.
+func TestTokenInText_CoversEveryPrefix(t *testing.T) {
+	const token = "SyncGuardTokenMustMask"
+	for _, prefix := range webhookPushPrefixes {
+		line := []byte("POST " + prefix + "wid123/" + token + " HTTP/1.1")
+		got := string(tokenInText.ReplaceAll(line, []byte("${1}***")))
+		if strings.Contains(got, token) {
+			t.Fatalf("prefix %q: panic-dump regex must mask the token but did not "+
+				"(regex out of sync with webhookPushPrefixes); got %q", prefix, got)
+		}
+		want := prefix + "wid123/***"
+		if !strings.Contains(got, want) {
+			t.Fatalf("prefix %q: expected masked path %q in %q", prefix, want, got)
+		}
 	}
 }
 
@@ -116,6 +168,43 @@ func TestErrorWriter_ScrubsUppercasePath(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), token) {
 		t.Fatalf("uppercase-path panic dump leaks token: %q", buf.String())
+	}
+}
+
+// TestErrorWriter_ScrubsAliasPanicDump asserts the panic-dump scrubber masks the
+// token for the /v1/webhooks/ alias too (#455) — the alias reaches the same
+// token-bearing handlers, so a panic while serving it must not leak the token.
+func TestErrorWriter_ScrubsAliasPanicDump(t *testing.T) {
+	const token = "aliasPANICtokenLEAK"
+	var buf bytes.Buffer
+	w := NewErrorWriter(&buf)
+	dump := "[Recovery] panic recovered:\n" +
+		"POST /v1/webhooks/iwh_abc/" + token + " HTTP/1.1\r\n" +
+		"Host: example\r\n"
+	if _, err := w.Write([]byte(dump)); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	got := buf.String()
+	if strings.Contains(got, token) {
+		t.Fatalf("alias panic dump leaks token: %q", got)
+	}
+	if !strings.Contains(got, "/v1/webhooks/iwh_abc/***") {
+		t.Fatalf("expected masked alias path in dump, got: %q", got)
+	}
+}
+
+// TestErrorWriter_DoesNotScrubSingularWebhook guards against a false positive:
+// the singular /v1/webhook* routes (the separate modules/webhook module) carry
+// no path token and must pass through the alias-aware regex unchanged (#455).
+func TestErrorWriter_DoesNotScrubSingularWebhook(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewErrorWriter(&buf)
+	const text = "POST /v1/webhook/github HTTP/1.1\r\nHost: example\r\n"
+	if _, err := w.Write([]byte(text)); err != nil {
+		t.Fatalf("Write error: %v", err)
+	}
+	if buf.String() != text {
+		t.Fatalf("singular /v1/webhook path mutated: got %q want %q", buf.String(), text)
 	}
 }
 
