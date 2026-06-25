@@ -1029,6 +1029,50 @@ func (g *Group) groupUpdate(c *wkhttp.Context) {
 		g.ctx.EventCommit(eventID)
 	}
 
+	// 自定义群头像文字/颜色（二次弹窗保存）：与 name/notice 同级的群信息更新，走专用
+	// Service 落库 + 通知客户端刷新。两者均可选；avatar_text 空串清除自定义文字（回退
+	// 群名），avatar_color "" / "-1" 清除自定义色（回退派生）。超限直接拒绝，不静默截断。
+	avatarTextValue, hasAvatarText := groupMap[attrKeyAvatarText]
+	avatarColorValue, hasAvatarColor := groupMap[attrKeyAvatarColor]
+	if hasAvatarText || hasAvatarColor {
+		serviceReq := &UpdateGroupAvatarCustomServiceReq{
+			GroupNo:      groupNo,
+			OperatorUID:  loginUID,
+			OperatorName: loginName,
+		}
+		if hasAvatarText {
+			if avatarrender.VisibleRuneCount(avatarTextValue) > 4 {
+				respondGroupRequestInvalid(c, attrKeyAvatarText)
+				return
+			}
+			serviceReq.AvatarText = &avatarTextValue
+		}
+		if hasAvatarColor {
+			ci := -1 // "" / "-1" → 清除
+			if raw := strings.TrimSpace(avatarColorValue); raw != "" {
+				parsed, convErr := strconv.Atoi(raw)
+				if convErr != nil {
+					respondGroupRequestInvalid(c, attrKeyAvatarColor)
+					return
+				}
+				ci = parsed
+			}
+			if ci < -1 || ci >= avatarrender.PaletteSize() {
+				respondGroupRequestInvalid(c, attrKeyAvatarColor)
+				return
+			}
+			serviceReq.SetAvatarColor = true
+			if ci >= 0 {
+				serviceReq.AvatarColor = &ci
+			}
+		}
+		if err := g.groupService.UpdateGroupAvatarCustom(serviceReq); err != nil {
+			g.Error("更新群头像自定义失败！", zap.Error(err), zap.String("group_no", groupNo))
+			httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
+			return
+		}
+	}
+
 	c.ResponseOK()
 }
 

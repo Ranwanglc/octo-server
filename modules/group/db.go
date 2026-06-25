@@ -318,6 +318,19 @@ func (d *DB) updateAvatar(avatar string, avatarVersion int64, groupNo string) er
 	return err
 }
 
+// updateAvatarCustom 更新自定义群头像文字/颜色与群版本（不触碰 is_upload_avatar：
+// 自定义文字/色仍是「默认头像」范畴，渲染时实时出图，不同于上传图片）。color 为
+// *int，nil → NULL（清除自定义色，回退按 group_no 派生）。text 为空串表示清除自定义
+// 文字（回退群名前 4 字）。
+func (d *DB) updateAvatarCustom(groupNo string, text string, color *int, version int64) error {
+	_, err := d.session.Update("group").SetMap(map[string]interface{}{
+		"avatar_text":  text,
+		"avatar_color": color,
+		"version":      version,
+	}).Where("group_no=?", groupNo).Exec()
+	return err
+}
+
 // QueryDetailWithGroupNo 查询群详情
 func (d *DB) QueryDetailWithGroupNo(groupNo string, uid string) (*DetailModel, error) {
 	var detailModel *DetailModel

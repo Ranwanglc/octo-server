@@ -124,6 +124,8 @@ type IService interface {
 	RemoveUserFromGroupThreads(groupNo, uid, spaceID string)
 	// UpdateGroupInfo 更新群信息
 	UpdateGroupInfo(req *UpdateGroupInfoServiceReq) error
+	// UpdateGroupAvatarCustom 更新自定义群头像文字/颜色
+	UpdateGroupAvatarCustom(req *UpdateGroupAvatarCustomServiceReq) error
 }
 
 // Service Service
@@ -997,6 +999,19 @@ type UpdateGroupInfoServiceReq struct {
 	OperatorName string  // 操作者名称
 	Name         *string // 新群名（nil 表示不更新）
 	Notice       *string // 新公告（nil 表示不更新）
+}
+
+// UpdateGroupAvatarCustomServiceReq 更新自定义群头像文字/颜色（二次弹窗保存）。
+type UpdateGroupAvatarCustomServiceReq struct {
+	GroupNo      string
+	OperatorUID  string
+	OperatorName string
+	// AvatarText：nil 表示不更新文字；非 nil（含 ""）表示设置，"" 即清除自定义文字（回退群名）。
+	AvatarText *string
+	// SetAvatarColor：是否更新颜色。为 true 时按 AvatarColor 设置：nil 清除（NULL，回退派生），
+	// 非 nil 为色板下标。为 false 时不动颜色。
+	SetAvatarColor bool
+	AvatarColor    *int
 }
 
 // ---------- Service method implementations ----------
@@ -1939,6 +1954,52 @@ func (s *Service) UpdateGroupInfo(req *UpdateGroupInfoServiceReq) error {
 	}
 
 	// 通知客户端刷新频道信息
+	s.ctx.SendChannelUpdateToGroup(req.GroupNo)
+
+	return nil
+}
+
+// UpdateGroupAvatarCustom 更新自定义群头像文字/颜色（二次弹窗保存）。未提供的字段
+// 保持现值；落库后 bump 群版本并通知客户端刷新频道信息——头像 URL 稳定，客户端据此
+// 重新拉取，靠 avatarGet 的内容相关 ETag 取到新图。校验由 API 层完成。
+func (s *Service) UpdateGroupAvatarCustom(req *UpdateGroupAvatarCustomServiceReq) error {
+	if req.GroupNo == "" {
+		return errors.New("group_no is required")
+	}
+	if req.AvatarText == nil && !req.SetAvatarColor {
+		return errors.New("nothing to update")
+	}
+
+	groupModel, err := s.db.QueryWithGroupNo(req.GroupNo)
+	if err != nil {
+		s.Error("query group failed", zap.Error(err))
+		return errors.New("failed to query group")
+	}
+	if groupModel == nil || groupModel.Status == GroupStatusDisband {
+		return errors.New("group not found or disbanded")
+	}
+
+	// 合并改动：未提供的字段保持现值。
+	text := groupModel.AvatarText
+	if req.AvatarText != nil {
+		text = *req.AvatarText
+	}
+	color := groupModel.AvatarColor
+	if req.SetAvatarColor {
+		color = req.AvatarColor
+	}
+
+	version, err := s.ctx.GenSeq(common.GroupSeqKey)
+	if err != nil {
+		s.Error("generate group version failed", zap.Error(err))
+		return errors.New("failed to generate group version")
+	}
+	if err := s.db.updateAvatarCustom(req.GroupNo, text, color, version); err != nil {
+		s.Error("update group avatar custom failed", zap.Error(err))
+		return errors.New("failed to update group avatar")
+	}
+
+	// 通知客户端刷新频道信息 → 重新拉取头像。
 	s.ctx.SendChannelUpdateToGroup(req.GroupNo)
 
 	return nil
