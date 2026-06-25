@@ -22,6 +22,14 @@ change-log convention (§7). Newest first.
   immediately; DB stays authoritative (auth fails safe to DB on Redis error).
   Safety-net TTL via system_settings (`app_bot.auth_cache_ttl_seconds`, no new
   env var). Regression test asserts a revoked token is rejected on a peer replica.
+- **Update** — Task `group-default-avatar` (increment 4, final): removed the
+  member-avatar 9-grid composite chain now that avatarGet renders on demand —
+  all 5 publish sites + `beginAvatarUpdateEvent`, the `GroupAvatarUpdate` event
+  handler/const/db-helpers, `queryGroupAvatarIsUpload`, dead `memberCount`
+  guards, and two obsolete tests. Kept DownloadAndMakeCompose (other use) and
+  the CMDGroupAvatarUpdate client-refresh CMD. Historical composite groups fall
+  through to the rendered default with no backfill. Feature backend complete;
+  only the placeholder group-icon SVG remains to be swapped.
 - **Update** — Task `group-default-avatar` (increment 3): group-info update
   (`PUT /v1/groups/:group_no`) now accepts `avatar_text`/`avatar_color`
   (set/clear, validated), persisted via a dedicated `UpdateGroupAvatarCustom`

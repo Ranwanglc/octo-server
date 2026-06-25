@@ -1509,12 +1509,6 @@ func (g *Group) addMembersTxWithSpace(members []string, groupNo string, operator
 		g.Error("查询成员用户信息失败！", zap.Error(err))
 		return nil, errors.New("查询成员用户信息失败！")
 	}
-	// Use transactional count with FOR UPDATE to prevent concurrent capacity bypass
-	memberCount, err := g.db.QueryMemberCountTx(groupNo, tx)
-	if err != nil {
-		g.Error("查询群成员数量失败！", zap.Error(err))
-		return nil, errors.New("查询群成员数量失败！")
-	}
 	/**
 	 将成员信息存到数据库
 	**/
@@ -1613,45 +1607,6 @@ func (g *Group) addMembersTxWithSpace(members []string, groupNo string, operator
 			return nil, errors.New("开启无法添加到群聊事件失败！")
 		}
 	}
-	/**
-	 根据目前成员数量判断是否需要发布更新头像事件,如果群主更新过群头像则忽略
-	**/
-	var groupAvatarEventID int64
-	groupIsUploadAvatar, err := g.db.queryGroupAvatarIsUpload(groupNo)
-	if err != nil {
-		g.Error("查询群头像是否用户上传过失败！", zap.String("group_no", groupNo), zap.Error(err))
-	}
-	if memberCount < 9 && groupIsUploadAvatar != 1 { // 如果群内已存在群数量小于9且群主未更新过群头像 则需要发布生成群头像的事件
-
-		oldMembers, err := g.db.QueryMembersFirstNine(groupNo)
-		if err != nil {
-			g.Error("查询先存成员信息失败！", zap.String("group_no", groupNo), zap.Error(err))
-			return nil, errors.New("查询先存成员信息失败！")
-		}
-		ninceMembers := make([]string, 0, 9)
-		for _, oldMember := range oldMembers {
-			ninceMembers = append(ninceMembers, oldMember.UID)
-		}
-		for _, userBaseVo := range userBaseVos {
-			if len(ninceMembers) >= 9 {
-				break
-			}
-			ninceMembers = append(ninceMembers, userBaseVo.UID)
-		}
-
-		groupAvatarEventID, err = g.ctx.EventBegin(&wkevent.Data{
-			Event: event.GroupAvatarUpdate,
-			Type:  wkevent.CMD,
-			Data: &config.CMDGroupAvatarUpdateReq{
-				GroupNo: groupNo,
-				Members: ninceMembers,
-			},
-		}, tx)
-		if err != nil {
-			g.Error("开启群成员头像更新事件失败！", zap.Error(err))
-			return nil, errors.New("开启群成员头像更新事件失败！")
-		}
-	}
 	// 调用IM的添加订阅者
 	err = g.ctx.IMAddSubscriber(&config.SubscriberAddReq{
 		ChannelID:   groupNo,
@@ -1677,9 +1632,6 @@ func (g *Group) addMembersTxWithSpace(members []string, groupNo string, operator
 	return func() {
 		// 提交事件
 		g.ctx.EventCommit(eventID)
-		if groupAvatarEventID != 0 {
-			g.ctx.EventCommit(groupAvatarEventID)
-		}
 		if unableAddDestroyAccount != 0 {
 			g.ctx.EventCommit(unableAddDestroyAccount)
 		}
@@ -2256,13 +2208,6 @@ func (g *Group) groupScanJoin(c *wkhttp.Context) {
 		return
 	}
 
-	memberCount, err := g.db.QueryMemberCount(groupNo)
-	if err != nil {
-		g.Error("查询成员数量！", zap.Error(err))
-		httperr.ResponseErrorL(c, errcode.ErrGroupQueryFailed, nil, nil)
-		return
-	}
-
 	version, err := g.ctx.GenSeq(common.GroupMemberSeqKey)
 	if err != nil {
 		g.Error("生成序列号失败", zap.Error(err))
@@ -2367,43 +2312,6 @@ func (g *Group) groupScanJoin(c *wkhttp.Context) {
 		httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
 		return
 	}
-	var groupAvatarEventID int64
-
-	groupIsUploadAvatar, err := g.db.queryGroupAvatarIsUpload(groupNo)
-	if err != nil {
-		g.Error("查询群头像是否用户上传过失败！", zap.String("group_no", groupNo), zap.Error(err))
-	}
-
-	if memberCount < 9 && groupIsUploadAvatar != 1 {
-		oldMembers, err := g.db.QueryMembersFirstNine(groupNo)
-		if err != nil {
-			tx.Rollback()
-			g.Error("查询先存成员信息失败！", zap.String("group_no", groupNo), zap.Error(err))
-			httperr.ResponseErrorL(c, errcode.ErrGroupQueryFailed, nil, nil)
-			return
-		}
-		members := make([]string, 0, len(oldMembers)+1)
-		for _, oldMember := range oldMembers {
-			members = append(members, oldMember.UID)
-		}
-		members = append(members, scanerInfo.UID)
-
-		groupAvatarEventID, err = g.ctx.EventBegin(&wkevent.Data{
-			Event: event.GroupAvatarUpdate,
-			Type:  wkevent.CMD,
-			Data: &config.CMDGroupAvatarUpdateReq{
-				GroupNo: groupNo,
-				Members: members,
-			},
-		}, tx)
-		if err != nil {
-			tx.Rollback()
-			g.Error("开启群成员头像更新事件失败！", zap.Error(err))
-			httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
-			return
-		}
-	}
-
 	existDelete, err := g.db.ExistMemberDelete(scaner, groupNo)
 	if err != nil {
 		tx.Rollback()
@@ -2468,9 +2376,6 @@ func (g *Group) groupScanJoin(c *wkhttp.Context) {
 	g.addUsersToGroupThreads(groupNo, []string{scaner})
 
 	g.ctx.EventCommit(eventID)
-	if groupAvatarEventID != 0 {
-		g.ctx.EventCommit(groupAvatarEventID)
-	}
 
 	// YUJ-170 / dmwork-web#1100：scanjoin 成功响应直接回带群所属 Space 信息。
 	// 替换原 ResponseOK() 的空载，为 H5 join_group.html 提供 crossSpace 判定数据，
@@ -3140,11 +3045,6 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 			return
 		}
 	}
-	// 生成群头像更新事件（best-effort，不阻塞退群）
-	groupAvatarEventID, avatarErr := beginAvatarUpdateEvent(g.ctx, g.db, groupNo, nil, []string{loginUID}, tx)
-	if avatarErr != nil {
-		g.Error("开启群头像更新事件失败！", zap.Error(avatarErr))
-	}
 	if err := tx.Commit(); err != nil {
 		tx.RollbackUnlessCommitted()
 		g.Error("提交事务失败！", zap.Error(err))
@@ -3152,9 +3052,6 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 		return
 	}
 	g.ctx.EventCommit(eventID)
-	if groupAvatarEventID != 0 {
-		g.ctx.EventCommit(groupAvatarEventID)
-	}
 
 	// 外部群标记发生变化时，通知成员刷新频道信息
 	if resetExternalGroup {

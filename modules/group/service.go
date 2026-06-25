@@ -12,14 +12,11 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
-	"github.com/Mininglamp-OSS/octo-lib/pkg/wkevent"
-	"github.com/Mininglamp-OSS/octo-server/modules/base/event"
 	"github.com/Mininglamp-OSS/octo-server/modules/conversation_ext"
 	spacemod "github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-server/pkg/pushcache"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
-	"github.com/gocraft/dbr/v2"
 	"go.uber.org/zap"
 )
 
@@ -1249,29 +1246,10 @@ func (s *Service) CreateGroup(req *CreateGroupServiceReq) (*CreateGroupServiceRe
 		}
 	}
 
-	// 生成群头像事件（事务内）
-	n := len(realMemberUIDs)
-	if n > 9 {
-		n = 9
-	}
-	avatarMembers := make([]string, n)
-	copy(avatarMembers, realMemberUIDs[:n])
-	groupAvatarEventID, err := beginAvatarUpdateEvent(s.ctx, s.db, groupNo, avatarMembers, nil, tx)
-	if err != nil {
-		tx.Rollback()
-		s.Error("begin group avatar update event failed", zap.Error(err))
-		return nil, err
-	}
-
 	// 提交事务
 	if err := tx.Commit(); err != nil {
 		s.Error("commit transaction failed", zap.Error(err))
 		return nil, errors.New("failed to commit transaction")
-	}
-
-	// 提交头像生成事件
-	if groupAvatarEventID != 0 {
-		s.ctx.EventCommit(groupAvatarEventID)
 	}
 
 	// 事务提交后设置 Bot 为 bot_admin
@@ -1787,17 +1765,6 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 		}
 	}
 
-	// 生成群头像更新事件（best-effort，不阻塞踢人）
-	var groupAvatarEventID int64
-	if len(removedUIDs) > 0 {
-		avatarEventID, avatarErr := beginAvatarUpdateEvent(s.ctx, s.db, req.GroupNo, nil, removedUIDs, tx)
-		if avatarErr != nil {
-			s.Error("begin group avatar update event failed", zap.Error(avatarErr))
-		} else {
-			groupAvatarEventID = avatarEventID
-		}
-	}
-
 	// 提交事务
 	if err := tx.Commit(); err != nil {
 		s.Error("commit transaction failed", zap.Error(err))
@@ -1807,11 +1774,6 @@ func (s *Service) RemoveGroupMembers(req *RemoveGroupMembersServiceReq) (*Remove
 	// 外部群标记发生变化时，通知成员刷新频道信息
 	if resetExternalGroup {
 		s.ctx.SendChannelUpdateToGroup(req.GroupNo)
-	}
-
-	// 提交头像生成事件
-	if groupAvatarEventID != 0 {
-		s.ctx.EventCommit(groupAvatarEventID)
 	}
 
 	// IM 操作（事务提交之后）
@@ -2006,63 +1968,6 @@ func (s *Service) UpdateGroupAvatarCustom(req *UpdateGroupAvatarCustomServiceReq
 }
 
 // ---------- Service internal helpers (thread sync, no thread package import) ----------
-
-func contains(slice []string, s string) bool {
-	for _, v := range slice {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}
-
-// beginAvatarUpdateEvent 在事务内创建群头像更新事件（公共逻辑）。
-// memberUIDs 非空时直接使用（新建群场景）；为空时从事务内查询当前成员。
-// excludeUIDs 用于过滤已删除但事务外仍可见的成员。
-// 返回 eventID（0 表示无需更新）和 error。
-func beginAvatarUpdateEvent(ctx *config.Context, db *DB, groupNo string, memberUIDs []string, excludeUIDs []string, tx *dbr.Tx) (int64, error) {
-	if ctx.Event == nil {
-		return 0, nil
-	}
-
-	// 新建群不需要检查 is_upload_avatar
-	if len(memberUIDs) == 0 {
-		isUpload, err := db.queryGroupAvatarIsUpload(groupNo)
-		if err != nil {
-			return 0, nil
-		}
-		if isUpload == 1 {
-			return 0, nil
-		}
-
-		members, err := db.QueryMembersFirstNineTx(groupNo, tx)
-		if err != nil {
-			return 0, nil
-		}
-		for _, m := range members {
-			if !contains(excludeUIDs, m.UID) {
-				memberUIDs = append(memberUIDs, m.UID)
-			}
-		}
-	}
-
-	if len(memberUIDs) == 0 {
-		return 0, nil
-	}
-
-	eventID, err := ctx.EventBegin(&wkevent.Data{
-		Event: event.GroupAvatarUpdate,
-		Type:  wkevent.CMD,
-		Data: &config.CMDGroupAvatarUpdateReq{
-			GroupNo: groupNo,
-			Members: memberUIDs,
-		},
-	}, tx)
-	if err != nil {
-		return 0, fmt.Errorf("begin group avatar update event: %w", err)
-	}
-	return eventID, nil
-}
 
 // removeUserFromGroupThreads 移除用户在某群下所有子区的成员记录、IM 订阅和置顶。
 // 委托给包级 removeUserFromGroupThreadsCleanup（见 thread_cleanup.go，Issue #27）。

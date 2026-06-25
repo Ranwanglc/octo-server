@@ -557,13 +557,6 @@ func (d *DB) queryForbiddenExpirationTimeMembers(limit int64) ([]*MemberModel, e
 	return models, err
 }
 
-// 查询群头像是否已被群主更新过
-func (d *DB) queryGroupAvatarIsUpload(groupNo string) (int, error) {
-	var result int
-	err := d.session.Select("is_upload_avatar").From("`group`").Where("group_no=?", groupNo).LoadOne(&result)
-	return result, err
-}
-
 // 查询用户当天建群数量
 func (d *DB) querySameDayCreateCountWitUID(uid string, day string) (int, error) {
 	var count int

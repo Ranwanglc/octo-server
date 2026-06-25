@@ -106,8 +106,33 @@ i18n-lint + 源码守卫。样张目检 4 字 2×2 / 3 字 1+2 / 拉丁单行均
 `TestGroupUpdateAvatarCustomValidation`（文字超长/颜色越界/非数字 → 400，且不落库）+
 `modules/group` 全套（18.8s 无回归）+ golangci 0 issues + i18n-lint + 源码守卫。
 
-## Follow-ups（后续增量）
-1. ~~`avatarGet` 默认/自定义服务端渲染分支 + 弱 ETag/304 + 群组图标占位~~ ✅ 增量 2。
+## Increment 4 — 拆除九宫格合成事件链路
+默认头像改为 avatarGet 实时渲染后，「成员头像九宫格合成」整条异步链路已冗余（合成图
+`is_upload=0`，新逻辑一律实时渲染、不再读取它），本增量整体移除：
+- **5 个发布点**（2 处 api.go 内联 + 3 处经 `beginAvatarUpdateEvent`：CreateGroup、
+  踢人、退群）连同各自 `EventCommit` 删除；公共助手 `beginAvatarUpdateEvent` 删除。
+- **base/event**：`handleGroupAvatarUpdateEvent` + 注册 + `shouldComposeGroupAvatar`、
+  `queryGroupAvatarState`、`updateGeneratedGroupAvatar`、`groupAvatarState`、
+  `GroupAvatarUpdate` 事件常量、不再使用的 `Event.fileService` 字段（及 `file` import）
+  全部移除。`handleEvent` 对未注册事件本就优雅处理（标记完成 + debug 日志），故即便
+  有遗漏发布也不会 error-loop——但已无任何发布点。
+- **group**：`queryGroupAvatarIsUpload` 及两处仅服务于旧守卫的 `memberCount`
+  （含一处 `QueryMemberCountTx` FOR UPDATE——其结果只喂旧 `<9` 守卫、无其它容量校验
+  消费，移除不丢任何强制）、`contains` 助手、`wkevent`/`event`/`dbr` import 清理。
+- 删除过时测试 `avatar_test.go`/`avatar_db_test.go`（只测被删的合成逻辑）。
+- **保留**：`DownloadAndMakeCompose`/`MakeCompose`（`file/api.go` 另有用途）、
+  `CMDGroupAvatarUpdate`（客户端刷新 CMD，与合成无关）、`QueryMembersFirstNine*`。
+
+**历史群兼容**：已合成群（`is_upload=0, version>0`）请求头像时直接走实时渲染，旧合成
+对象成无害孤儿，无需刷库——满足「历史群不批量更新」。
+
+增量 4 验证：`go build ./...` + golangci 0 issues + `go vet` + `modules/group` 全套
+（19s，建群/加人/扫码入群/踢人/退群核心流无回归）+ `modules/base/event` 全套 +
+i18n-lint + 源码守卫；全仓无残留引用（仅说明性注释）。
+
+## Follow-ups
+1. ~~`avatarGet` 服务端渲染分支 + 弱 ETag/304 + 群组图标占位~~ ✅ 增量 2。
 2. ~~改群 API：`avatar_text`/`avatar_color`~~ ✅ 增量 3。
-3. 拆除九宫格合成事件链路（`handleGroupAvatarUpdateEvent` 等）。
-4. 外部素材：群组图标 SVG、自定义色板精确色值（占位待替换）。
+3. ~~拆除九宫格合成事件链路~~ ✅ 增量 4。
+4. **外部素材待替换**：群组图标正式 SVG（现 `icons/group-placeholder.png` 占位）、
+   自定义色板精确色值（现复用个人色板，已像素比对一致）。
