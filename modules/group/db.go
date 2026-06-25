@@ -585,6 +585,8 @@ type Model struct {
 	Avatar                   string     // 群头像
 	AvatarVersion            int64      // 群头像对象版本，0 表示旧版稳定路径
 	IsUploadAvatar           int        // 群头像是否已经被用户上传
+	AvatarText               string     // 自定义群头像文字，空表示用群名前 4 字派生
+	AvatarColor              *int       // 自定义群头像色板下标，nil(NULL) 表示按 group_no 派生
 	Notice                   string     // 群公告
 	Creator                  string     // 创建者uid
 	Status                   int        // 群状态

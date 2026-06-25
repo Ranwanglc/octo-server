@@ -27,3 +27,17 @@ func ColorForSeed(seed string) color.RGBA {
 	idx := crc32.ChecksumIEEE([]byte(seed)) % uint32(len(palette))
 	return palette[idx]
 }
+
+// PaletteSize 返回固定色板的颜色数，供调用方校验自定义色板下标的取值范围。
+func PaletteSize() int {
+	return len(palette)
+}
+
+// ColorByIndex 返回色板第 i 个颜色（用户在二次弹窗显式选定的自定义色）。
+// i 越界时 ok=false，调用方应回退到 ColorForSeed。
+func ColorByIndex(i int) (color.RGBA, bool) {
+	if i < 0 || i >= len(palette) {
+		return color.RGBA{}, false
+	}
+	return palette[i], true
+}

@@ -945,12 +945,14 @@ func GetGroupMdMaxSize() int {
 
 // CreateGroupServiceReq 创建群请求
 type CreateGroupServiceReq struct {
-	Creator    string   // 创建者 UID
-	Members    []string // 成员 UID 列表（不含创建者，Service 内部会自动加入）
-	Name       string   // 群名称（可为空，Service 会自动生成）
-	SpaceID    string   // Space ID（可为空）
-	BotUID     string   // Bot UID（可为空；非空时自动加入群并设为 bot_admin）
-	CategoryID string   // 群聊分组 ID（可为空；非空时自动设置创建者的 group_setting）
+	Creator     string   // 创建者 UID
+	Members     []string // 成员 UID 列表（不含创建者，Service 内部会自动加入）
+	Name        string   // 群名称（可为空，Service 会自动生成）
+	SpaceID     string   // Space ID（可为空）
+	BotUID      string   // Bot UID（可为空；非空时自动加入群并设为 bot_admin）
+	CategoryID  string   // 群聊分组 ID（可为空；非空时自动设置创建者的 group_setting）
+	AvatarText  string   // 自定义群头像文字（可为空；空=渲染时用群名前 4 字派生）
+	AvatarColor *int     // 自定义群头像色板下标（nil=渲染时按 group_no 派生）
 }
 
 // CreateGroupServiceResp 创建群响应
@@ -1146,6 +1148,8 @@ func (s *Service) CreateGroup(req *CreateGroupServiceReq) (*CreateGroupServiceRe
 		AllowExternal:       1, // 向后兼容：默认允许外部成员
 		AllowNoMention:      1, // 向后兼容：默认允许群级免@
 		IsExternalGroup:     isExternalGroup,
+		AvatarText:          req.AvatarText,  // 空=渲染时回退群名前 4 字
+		AvatarColor:         req.AvatarColor, // nil=渲染时按 group_no 派生
 	}, tx)
 	if err != nil {
 		s.Error("insert group record failed", zap.Error(err))

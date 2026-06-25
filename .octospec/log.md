@@ -22,6 +22,11 @@ change-log convention (§7). Newest first.
   immediately; DB stays authoritative (auth fails safe to DB on Redis error).
   Safety-net TTL via system_settings (`app_bot.auth_cache_ttl_seconds`, no new
   env var). Regression test asserts a revoked token is rejected on a peer replica.
+- **Creation** — Task `group-default-avatar` (increment 1): create-group API gains
+  optional `avatar_text`/`avatar_color` params persisted via new `group` columns;
+  `pkg/avatarrender` gains `GroupText`/`VisibleRuneCount`/`ColorByIndex`. Brief +
+  journal under `.octospec/tasks/group-default-avatar/`. Follow-ups: avatarGet
+  server-render branch, group-update keys, composite-avatar teardown.
 
 ## 2026-06-24
 

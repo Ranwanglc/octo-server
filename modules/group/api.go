@@ -29,6 +29,7 @@ import (
 	spacemod "github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-server/pkg/auth"
+	"github.com/Mininglamp-OSS/octo-server/pkg/avatarrender"
 	"github.com/Mininglamp-OSS/octo-server/pkg/avatarversion"
 	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
 	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
@@ -695,6 +696,10 @@ func (g *Group) groupCreate(c *wkhttp.Context) {
 		respondGroupRequestInvalid(c, "")
 		return
 	}
+	if field, ok := req.checkAvatar(); !ok {
+		respondGroupRequestInvalid(c, field)
+		return
+	}
 
 	// 校验 category_id
 	if req.CategoryID != "" {
@@ -792,11 +797,13 @@ func (g *Group) groupCreate(c *wkhttp.Context) {
 
 	// 调用 Service 创建群
 	createResp, err := g.groupService.CreateGroup(&CreateGroupServiceReq{
-		Creator:    creator,
-		Members:    realUids,
-		Name:       req.Name,
-		SpaceID:    req.SpaceID,
-		CategoryID: req.CategoryID,
+		Creator:     creator,
+		Members:     realUids,
+		Name:        req.Name,
+		SpaceID:     req.SpaceID,
+		CategoryID:  req.CategoryID,
+		AvatarText:  req.AvatarText,
+		AvatarColor: req.AvatarColor,
 	})
 	if err != nil {
 		g.Error("创建群失败！", zap.Error(err))
@@ -4110,10 +4117,12 @@ func (g *Group) fillSpaceRelatedFields(groupNo, groupSpaceID string, resps []mem
 }
 
 type groupReq struct {
-	Name       string   `json:"name"`        // 群名
-	Members    []string `json:"members"`     // 成员uid
-	SpaceID    string   `json:"space_id"`    // Space ID（可选）
-	CategoryID string   `json:"category_id"` // 群聊分组 ID（可选，需配合 space_id 使用）
+	Name        string   `json:"name"`         // 群名
+	Members     []string `json:"members"`      // 成员uid
+	SpaceID     string   `json:"space_id"`     // Space ID（可选）
+	CategoryID  string   `json:"category_id"`  // 群聊分组 ID（可选，需配合 space_id 使用）
+	AvatarText  string   `json:"avatar_text"`  // 自定义群头像文字（可选，最多 4 个中文/英文字符；空=用群名派生）
+	AvatarColor *int     `json:"avatar_color"` // 自定义群头像色板下标（可选，[0,palette)；不传=按 group_no 派生）
 }
 
 func (g groupReq) Check() error {
@@ -4121,6 +4130,19 @@ func (g groupReq) Check() error {
 		return errors.New("群成员不能为空！")
 	}
 	return nil
+}
+
+// checkAvatar 校验二次弹窗的自定义头像参数，返回越界字段名（供 Details.field）。
+// ok=true 表示合法。两者均为可选：avatar_text 空、avatar_color 不传即“未自定义”，
+// 渲染时分别回退到群名前 4 字 / ColorForSeed(group_no)。不静默截断，超限直接拒绝。
+func (g groupReq) checkAvatar() (field string, ok bool) {
+	if avatarrender.VisibleRuneCount(g.AvatarText) > 4 {
+		return "avatar_text", false
+	}
+	if g.AvatarColor != nil && (*g.AvatarColor < 0 || *g.AvatarColor >= avatarrender.PaletteSize()) {
+		return "avatar_color", false
+	}
+	return "", true
 }
 
 // 添加或移除黑名单
