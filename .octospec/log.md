@@ -22,6 +22,12 @@ change-log convention (§7). Newest first.
   immediately; DB stays authoritative (auth fails safe to DB on Redis error).
   Safety-net TTL via system_settings (`app_bot.auth_cache_ttl_seconds`, no new
   env var). Regression test asserts a revoked token is rejected on a peer replica.
+- **Update** — Task `group-default-avatar` (increment 2): `avatarGet` now
+  server-renders the default group avatar (colored circle + group-name initials,
+  2×2 for CJK / single-line for Latin, group-icon fallback) with weak-ETag/304,
+  keyed on `is_upload_avatar`; uploaded avatars still redirect. `pkg/avatarrender`
+  gains `RenderGroup`/`GroupAvatarLines`, `RenderIcon` (+ placeholder glyph), and
+  shared `ETag`/`IfNoneMatch`. Member-avatar composite teardown still pending.
 - **Creation** — Task `group-default-avatar` (increment 1): create-group API gains
   optional `avatar_text`/`avatar_color` params persisted via new `group` columns;
   `pkg/avatarrender` gains `GroupText`/`VisibleRuneCount`/`ColorByIndex`. Brief +

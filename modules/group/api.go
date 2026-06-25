@@ -391,29 +391,94 @@ func (g *Group) avatarGet(c *wkhttp.Context) {
 		c.Writer.Write(avatarBytes)
 		return
 	}
-	var avatarVersion int64
 	groupInfo, err := g.db.QueryWithGroupNo(groupNo)
 	if err != nil {
 		g.Error("查询群资料错误", zap.String("group_no", groupNo), zap.Error(err))
 		c.Writer.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if groupInfo != nil {
-		avatarVersion = groupInfo.AvatarVersion
+
+	// 群主已上传自定义头像：重定向到版本化对象存储（沿用历史逻辑）。
+	if groupInfo != nil && groupInfo.IsUploadAvatar == 1 {
+		path := g.ctx.GetConfig().GetGroupAvatarFilePath(groupNo, groupInfo.AvatarVersion)
+		downloadUrl, err := g.fileService.DownloadURL(path, "")
+		if err != nil {
+			g.Error("获取下载路径失败！", zap.Error(err))
+			c.Writer.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if strings.Contains(downloadUrl, "?") {
+			c.Redirect(http.StatusFound, fmt.Sprintf("%s&v=%s", downloadUrl, v))
+		} else {
+			c.Redirect(http.StatusFound, fmt.Sprintf("%s?v=%s", downloadUrl, v))
+		}
+		return
 	}
-	path := g.ctx.GetConfig().GetGroupAvatarFilePath(groupNo, avatarVersion)
-	downloadUrl, err := g.fileService.DownloadURL(path, "")
-	if err != nil {
-		g.Error("获取下载路径失败！", zap.Error(err))
+
+	// 无自定义上传（含历史合成群、新建群）：服务端实时渲染默认头像——
+	// 色块圆 + 群名前 4 字（或自定义文字），群名为空/不可渲染时回退群组图标。
+	g.writeGroupDefaultAvatar(c, groupNo, groupInfo)
+}
+
+// writeGroupDefaultAvatar 服务端渲染并返回群默认头像（无自定义上传时）。文字优先
+// 自定义 avatar_text，否则群名前 4 字；颜色优先自定义 avatar_color，否则按 group_no
+// 稳定派生（改名不变色、跨页面一致）。群名为空或不可渲染时回退群组图标。
+//
+// URL 稳定为 groups/{group_no}/avatar，内容随群名/自定义变化，故用内容相关弱 ETag +
+// 短缓存 + must-revalidate：改名后最多 5 分钟内 revalidate 到新图，并支持 304 省渲染。
+// ETag 只依赖输入（无需渲染），故先算 ETag 命中 If-None-Match 时直接 304。
+func (g *Group) writeGroupDefaultAvatar(c *wkhttp.Context, groupNo string, groupInfo *Model) {
+	source := ""
+	bg := avatarrender.ColorForSeed(groupNo)
+	colorTag := "seed"
+	if groupInfo != nil {
+		source = groupInfo.Name
+		if groupInfo.AvatarText != "" {
+			source = groupInfo.AvatarText
+		}
+		if groupInfo.AvatarColor != nil {
+			if cc, ok := avatarrender.ColorByIndex(*groupInfo.AvatarColor); ok {
+				bg = cc
+				colorTag = "idx" + strconv.Itoa(*groupInfo.AvatarColor)
+			}
+		}
+	}
+	text := avatarrender.GroupText(source)
+	renderable := avatarrender.Renderable(text)
+
+	// ETag 覆盖决定图像内容的因子：渲染模式版本 + group_no(派生色) + 实际色 + 文字。
+	// 改名/改自定义文字 → text 变 → ETag 变；改自定义色 → colorTag 变 → ETag 变。
+	etag := avatarrender.ETag("group-icon-v1", groupNo, colorTag)
+	if renderable {
+		etag = avatarrender.ETag("group-name-v1", groupNo, colorTag, text)
+	}
+	c.Header("Content-Disposition", "inline; filename=avatar.png")
+	c.Header("ETag", etag)
+	c.Header("Cache-Control", "public, max-age=300, must-revalidate")
+	if avatarrender.IfNoneMatch(c.GetHeader("If-None-Match"), etag) {
+		c.Status(http.StatusNotModified)
+		return
+	}
+
+	if renderable {
+		imageData, genErr := avatarrender.RenderGroup(avatarrender.Options{Text: text, Bg: bg})
+		if genErr == nil {
+			c.Data(http.StatusOK, "image/png", imageData)
+			return
+		}
+		// 渲染失败不直接 500，记录后回退群组图标；ETag 改回 icon 模式与内容一致。
+		g.Error("生成群名默认头像失败，回退群组图标", zap.Error(genErr), zap.String("group_no", groupNo))
+		c.Header("ETag", avatarrender.ETag("group-icon-v1", groupNo, colorTag))
+	}
+
+	// 群名为空 / 不可渲染（如纯 emoji）/ 渲染失败 → 群组图标（当前为占位资产）。
+	iconData, iconErr := avatarrender.RenderIcon(bg)
+	if iconErr != nil {
+		g.Error("生成群组图标头像失败", zap.Error(iconErr), zap.String("group_no", groupNo))
 		c.Writer.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if strings.Contains(downloadUrl, "?") {
-		c.Redirect(http.StatusFound, fmt.Sprintf("%s&v=%s", downloadUrl, v))
-	} else {
-		c.Redirect(http.StatusFound, fmt.Sprintf("%s?v=%s", downloadUrl, v))
-	}
-
+	c.Data(http.StatusOK, "image/png", iconData)
 }
 
 func (g *Group) avatarUpload(c *wkhttp.Context) {

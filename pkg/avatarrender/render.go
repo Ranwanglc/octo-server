@@ -214,3 +214,62 @@ func drawCenteredText(img *image.RGBA, fnt *sfnt.Font, text string, size int) er
 	d.DrawString(text)
 	return nil
 }
+
+// groupIconData 是群默认头像在「群名为空/取不出字」时的兜底群组图标（白色双人剪影、
+// 透明底）。**当前为占位资产**——设计稿正式图标（Figma 导出）到位后，直接替换
+// icons/group-placeholder.png 即可，无需改动渲染逻辑或调用方。
+//
+//go:embed icons/group-placeholder.png
+var groupIconData []byte
+
+var (
+	groupIconOnce sync.Once
+	groupIconImg  image.Image
+	groupIconErr  error
+)
+
+func loadGroupIcon() (image.Image, error) {
+	groupIconOnce.Do(func() {
+		groupIconImg, groupIconErr = png.Decode(bytes.NewReader(groupIconData))
+	})
+	return groupIconImg, groupIconErr
+}
+
+// RenderIcon 渲染「白底 + 纯色圆 + 居中白色群组图标」的 PNG，用于群名为空或无法
+// 取字时的兜底（PRD：群名称为空或无法取字时，显示群组图标）。与 Render 一样输出
+// 不透明 PNG。bg 为圆的背景色（自定义色或按 group_no 派生）。
+func RenderIcon(bg color.RGBA) ([]byte, error) {
+	return renderIconSized(bg, DefaultSize)
+}
+
+func renderIconSized(bg color.RGBA, size int) ([]byte, error) {
+	if size <= 0 {
+		size = DefaultSize
+	}
+	icon, err := loadGroupIcon()
+	if err != nil {
+		return nil, fmt.Errorf("avatarrender: decode group icon: %w", err)
+	}
+
+	big := size * supersample
+	canvas := image.NewRGBA(image.Rect(0, 0, big, big))
+	draw.Draw(canvas, canvas.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
+	drawCircle(canvas, bg)
+
+	// 图标缩放到圆内约 58%，居中叠加；图标自带 alpha，xdraw.Over 只在剪影处覆盖白色，
+	// 圆其余部分保留 bg。
+	const glyphRatio = 0.58
+	gs := int(float64(big) * glyphRatio)
+	off := (big - gs) / 2
+	dstRect := image.Rect(off, off, off+gs, off+gs)
+	xdraw.CatmullRom.Scale(canvas, dstRect, icon, icon.Bounds(), xdraw.Over, nil)
+
+	out := image.NewRGBA(image.Rect(0, 0, size, size))
+	xdraw.CatmullRom.Scale(out, out.Bounds(), canvas, canvas.Bounds(), xdraw.Over, nil)
+
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, out); err != nil {
+		return nil, fmt.Errorf("avatarrender: encode png: %w", err)
+	}
+	return buf.Bytes(), nil
+}
