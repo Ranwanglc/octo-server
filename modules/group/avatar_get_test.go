@@ -121,3 +121,14 @@ func TestGroupAvatarGetUploadedRedirects(t *testing.T) {
 	require.Equal(t, http.StatusFound, w.Code, "uploaded avatar must redirect, not render")
 	require.NotEmpty(t, w.Header().Get("Location"))
 }
+
+// TestGroupAvatarGetNonexistentReturns404 回归 Fix5:不存在的群不再渲染默认图,返回 404
+// (与 UserAvatar 对未知用户一致),消除枚举/无谓渲染面。
+func TestGroupAvatarGetNonexistentReturns404(t *testing.T) {
+	s, ctx := newTestServer(t)
+	require.NoError(t, testutil.CleanAllTables(ctx))
+
+	w := doAvatarGet(t, s.GetRoute(), "no_such_group_xyz", "")
+	require.Equal(t, http.StatusNotFound, w.Code, "nonexistent group must 404, not render a default avatar")
+	require.Empty(t, w.Body.Bytes())
+}

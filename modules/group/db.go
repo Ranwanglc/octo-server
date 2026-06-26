@@ -322,12 +322,18 @@ func (d *DB) updateAvatar(avatar string, avatarVersion int64, groupNo string) er
 // 自定义文字/色仍是「默认头像」范畴，渲染时实时出图，不同于上传图片）。color 为
 // *int，nil → NULL（清除自定义色，回退按 group_no 派生）。text 为空串表示清除自定义
 // 文字（回退群名前 4 字）。
-func (d *DB) updateAvatarCustom(groupNo string, text string, color *int, version int64) error {
-	_, err := d.session.Update("group").SetMap(map[string]interface{}{
-		"avatar_text":  text,
-		"avatar_color": color,
-		"version":      version,
-	}).Where("group_no=?", groupNo).Exec()
+// updateAvatarCustom 只更新本次实际提供的列：text 非 nil 时写 avatar_text，setColor
+// 为 true 时写 avatar_color（*int，nil → NULL 清除自定义色）；始终 bump version。
+// 列级更新避免「读-改-写」竞态——并发只改文字 / 只改色不会互相覆盖对方的列。
+func (d *DB) updateAvatarCustom(groupNo string, text *string, setColor bool, color *int, version int64) error {
+	setMap := map[string]interface{}{"version": version}
+	if text != nil {
+		setMap["avatar_text"] = *text
+	}
+	if setColor {
+		setMap["avatar_color"] = color
+	}
+	_, err := d.session.Update("group").SetMap(setMap).Where("group_no=?", groupNo).Exec()
 	return err
 }
 
@@ -474,13 +480,6 @@ func (d *DB) QueryMembersFirstNine(groupNo string) ([]*MemberModel, error) {
 	return memberModels, err
 }
 
-// QueryMembersFirstNineTx 事务内查询最先加入群聊的九位群成员
-func (d *DB) QueryMembersFirstNineTx(groupNo string, tx *dbr.Tx) ([]*MemberModel, error) {
-	var memberModels []*MemberModel
-	_, err := tx.Select("*").From("group_member").Where("group_no=? and is_deleted=0", groupNo).OrderDir("created_at", true).Limit(9).Load(&memberModels)
-	return memberModels, err
-}
-
 // QueryMembersFirstNineExclude 查询最先加入群聊的九位群成员 【excludeUIDs】为排除的用户
 func (d *DB) QueryMembersFirstNineExclude(groupNo string, excludeUIDs []string) ([]*MemberModel, error) {
 	if len(excludeUIDs) <= 0 {
@@ -505,13 +504,6 @@ func (d *DB) membersInFirstNine(groupNo string, uids []string) (bool, error) {
 func (d *DB) QueryMemberCount(groupNo string) (int64, error) {
 	var count int64
 	_, err := d.session.Select("count(*)").From("group_member").Where("group_no=? and is_deleted=0", groupNo).Load(&count)
-	return count, err
-}
-
-// QueryMemberCountTx queries member count within a transaction using FOR UPDATE to prevent concurrent bypass.
-func (d *DB) QueryMemberCountTx(groupNo string, tx *dbr.Tx) (int64, error) {
-	var count int64
-	_, err := tx.SelectBySql("SELECT count(*) FROM group_member WHERE group_no=? AND is_deleted=0 FOR UPDATE", groupNo).Load(&count)
 	return count, err
 }
 

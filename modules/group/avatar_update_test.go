@@ -106,3 +106,90 @@ func TestGroupUpdateAvatarCustomValidation(t *testing.T) {
 	require.Equal(t, "", got.AvatarText)
 	require.Nil(t, got.AvatarColor)
 }
+
+// TestGroupUpdatePartialWriteRejected 回归:混合 payload(合法 name + 非法 avatar)
+// 必须整体拒绝(400)且**不**部分写入群名——校验已前置到任何 mutation 之前。
+func TestGroupUpdatePartialWriteRejected(t *testing.T) {
+	s, ctx := newTestServer(t)
+	require.NoError(t, testutil.CleanAllTables(ctx))
+	g := New(ctx)
+
+	const groupNo = "avatar_upd_partial_1"
+	const origName = "原始群名"
+	seedCreatorGroup(t, g, groupNo, origName)
+
+	cases := []struct {
+		name string
+		body map[string]string
+	}{
+		{"valid name + non-numeric color", map[string]string{"name": "新名字", attrKeyAvatarColor: "abc"}},
+		{"valid name + out-of-range color", map[string]string{"name": "新名字", attrKeyAvatarColor: "99"}},
+		{"valid name + over-long text", map[string]string{"name": "新名字", attrKeyAvatarText: "一二三四五"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := putGroupUpdate(t, s.GetRoute(), groupNo, tc.body)
+			require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+
+			got, err := g.db.QueryWithGroupNo(groupNo)
+			require.NoError(t, err)
+			require.Equal(t, origName, got.Name, "群名不得在 avatar 校验失败时被部分写入")
+		})
+	}
+}
+
+// TestGroupUpdateAvatarColumnScoped 回归 Fix2:只更新本次提供的列——只改文字不动颜色、
+// 只改颜色不动文字(列级 UPDATE,无读-改-写竞态)。并覆盖 avatar_color 空串清除路径。
+func TestGroupUpdateAvatarColumnScoped(t *testing.T) {
+	s, ctx := newTestServer(t)
+	require.NoError(t, testutil.CleanAllTables(ctx))
+	g := New(ctx)
+
+	const groupNo = "avatar_upd_scoped_1"
+	seedCreatorGroup(t, g, groupNo, "范围群")
+
+	// 先设文字+色。
+	require.Equal(t, http.StatusOK, putGroupUpdate(t, s.GetRoute(), groupNo, map[string]string{
+		attrKeyAvatarText: "研发", attrKeyAvatarColor: "5",
+	}).Code)
+
+	// 只改文字 → 颜色保持 5。
+	require.Equal(t, http.StatusOK, putGroupUpdate(t, s.GetRoute(), groupNo, map[string]string{
+		attrKeyAvatarText: "产品",
+	}).Code)
+	got, err := g.db.QueryWithGroupNo(groupNo)
+	require.NoError(t, err)
+	require.Equal(t, "产品", got.AvatarText)
+	require.NotNil(t, got.AvatarColor)
+	require.Equal(t, 5, *got.AvatarColor, "只改文字时颜色列不得被动")
+
+	// avatar_color 空串 → 清除颜色，文字保持。
+	require.Equal(t, http.StatusOK, putGroupUpdate(t, s.GetRoute(), groupNo, map[string]string{
+		attrKeyAvatarColor: "",
+	}).Code)
+	got, err = g.db.QueryWithGroupNo(groupNo)
+	require.NoError(t, err)
+	require.Equal(t, "产品", got.AvatarText, "只改颜色时文字列不得被动")
+	require.Nil(t, got.AvatarColor, "空串应清除自定义色")
+}
+
+// TestGroupUpdateAvatarTextCleaned 回归 Fix3:存清洗后的文字(剔除不可见字符),避免
+// 零宽/格式字符撑爆 avatar_text VARCHAR(16)。
+func TestGroupUpdateAvatarTextCleaned(t *testing.T) {
+	s, ctx := newTestServer(t)
+	require.NoError(t, testutil.CleanAllTables(ctx))
+	g := New(ctx)
+
+	const groupNo = "avatar_upd_clean_1"
+	seedCreatorGroup(t, g, groupNo, "清洗群")
+
+	zwsp := string(rune(0x200B))
+	// 2 个可见字 + 大量零宽字符:可见 rune 数 ≤4 过校验,但原始串远超 16 字符。
+	padded := "研" + zwsp + "发" + zwsp + zwsp + zwsp + zwsp + zwsp + zwsp + zwsp + zwsp + zwsp + zwsp + zwsp + zwsp + zwsp + zwsp + zwsp + zwsp
+	require.Equal(t, http.StatusOK, putGroupUpdate(t, s.GetRoute(), groupNo, map[string]string{
+		attrKeyAvatarText: padded,
+	}).Code)
+	got, err := g.db.QueryWithGroupNo(groupNo)
+	require.NoError(t, err)
+	require.Equal(t, "研发", got.AvatarText, "应存清洗后的可见文字,不含零宽字符")
+}

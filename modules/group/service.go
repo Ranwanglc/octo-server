@@ -796,6 +796,8 @@ type GroupResp struct {
 	GroupType                GroupType `json:"group_type"`                  // 群类型
 	Category                 string    `json:"category"`                    // 群分类
 	Name                     string    `json:"name"`                        // 群名称
+	AvatarText               string    `json:"avatar_text"`                 // 自定义群头像文字（空=用群名前 4 字派生）
+	AvatarColor              *int      `json:"avatar_color"`                // 自定义群头像色板下标（null=按 group_no 派生）
 	Remark                   string    `json:"remark"`                      // 群备注
 	Notice                   string    `json:"notice"`                      // 群公告
 	Mute                     int       `json:"mute"`                        // 免打扰
@@ -840,6 +842,8 @@ func (g *GroupResp) from(model *DetailModel) *GroupResp {
 		GroupType:                GroupType(model.GroupType),
 		Category:                 model.Category,
 		Name:                     model.Name,
+		AvatarText:               model.AvatarText,
+		AvatarColor:              model.AvatarColor,
 		Notice:                   model.Notice,
 		Mute:                     model.Mute,
 		Top:                      model.Top,
@@ -882,6 +886,8 @@ func (g *GroupResp) fromModel(model *Model) *GroupResp {
 		GroupType:                GroupType(model.GroupType),
 		Category:                 model.Category,
 		Name:                     model.Name,
+		AvatarText:               model.AvatarText,
+		AvatarColor:              model.AvatarColor,
 		Notice:                   model.Notice,
 		Forbidden:                model.Forbidden,
 		Invite:                   model.Invite,
@@ -1941,22 +1947,14 @@ func (s *Service) UpdateGroupAvatarCustom(req *UpdateGroupAvatarCustomServiceReq
 		return errors.New("group not found or disbanded")
 	}
 
-	// 合并改动：未提供的字段保持现值。
-	text := groupModel.AvatarText
-	if req.AvatarText != nil {
-		text = *req.AvatarText
-	}
-	color := groupModel.AvatarColor
-	if req.SetAvatarColor {
-		color = req.AvatarColor
-	}
-
 	version, err := s.ctx.GenSeq(common.GroupSeqKey)
 	if err != nil {
 		s.Error("generate group version failed", zap.Error(err))
 		return errors.New("failed to generate group version")
 	}
-	if err := s.db.updateAvatarCustom(req.GroupNo, text, color, version); err != nil {
+	// 只更新本次实际提供的列（不读回未提供字段再整体写），避免「读-改-写」竞态：并发
+	// 「只改文字」与「只改色」不会互相覆盖。existence/disband 检查的读不回写，故无竞态。
+	if err := s.db.updateAvatarCustom(req.GroupNo, req.AvatarText, req.SetAvatarColor, req.AvatarColor, version); err != nil {
 		s.Error("update group avatar custom failed", zap.Error(err))
 		return errors.New("failed to update group avatar")
 	}

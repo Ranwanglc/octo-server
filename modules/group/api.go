@@ -397,9 +397,16 @@ func (g *Group) avatarGet(c *wkhttp.Context) {
 		c.Writer.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+	// 群不存在 → 404（与 UserAvatar 对未知用户一致），不再为任意 group_no 渲染默认图，
+	// 避免把「不存在」变成「可渲染内容」的枚举/无谓渲染面。系统群 / org_ / dept_ 已在
+	// 上方静态分支处理，到这里必为普通群。
+	if groupInfo == nil {
+		c.Writer.WriteHeader(http.StatusNotFound)
+		return
+	}
 
 	// 群主已上传自定义头像：重定向到版本化对象存储（沿用历史逻辑）。
-	if groupInfo != nil && groupInfo.IsUploadAvatar == 1 {
+	if groupInfo.IsUploadAvatar == 1 {
 		path := g.ctx.GetConfig().GetGroupAvatarFilePath(groupNo, groupInfo.AvatarVersion)
 		downloadUrl, err := g.fileService.DownloadURL(path, "")
 		if err != nil {
@@ -765,6 +772,9 @@ func (g *Group) groupCreate(c *wkhttp.Context) {
 		respondGroupRequestInvalid(c, field)
 		return
 	}
+	// 存清洗后的自定义头像文字（剔除不可见字符、上限 4 可见 rune），与校验口径一致，避免
+	// 零宽/格式字符撑爆 avatar_text VARCHAR(16) 导致 MySQL 截断。
+	req.AvatarText = avatarrender.GroupText(req.AvatarText)
 
 	// 校验 category_id
 	if req.CategoryID != "" {
@@ -952,6 +962,51 @@ func (g *Group) groupUpdate(c *wkhttp.Context) {
 	nameValue, hasName := groupMap[common.GroupAttrKeyName]
 	noticeValue, hasNotice := groupMap[common.GroupAttrKeyNotice]
 
+	// 自定义群头像文字/颜色（二次弹窗保存）：先在任何 mutation 之前完成解析与校验，构造
+	// avatarReq。这样非法的 avatar 字段会在 name/notice/invite 落库之前返回 400，避免
+	// 「返回 400 却已部分写入群名」的非原子部分写入。avatar_text 空串清除自定义文字（回退
+	// 群名），avatar_color "" / "-1" 清除自定义色（回退派生）。超限直接拒绝，不静默截断。
+	avatarTextValue, hasAvatarText := groupMap[attrKeyAvatarText]
+	avatarColorValue, hasAvatarColor := groupMap[attrKeyAvatarColor]
+	var avatarReq *UpdateGroupAvatarCustomServiceReq
+	if hasAvatarText || hasAvatarColor {
+		avatarReq = &UpdateGroupAvatarCustomServiceReq{
+			GroupNo:      groupNo,
+			OperatorUID:  loginUID,
+			OperatorName: loginName,
+		}
+		if hasAvatarText {
+			if avatarrender.VisibleRuneCount(avatarTextValue) > 4 {
+				respondGroupRequestInvalid(c, attrKeyAvatarText)
+				return
+			}
+			// 存清洗后的文本（剔除不可见字符、上限 4 可见 rune），与校验口径一致，避免零宽/
+			// 格式字符撑爆 avatar_text VARCHAR(16) 导致 MySQL 截断。
+			cleaned := avatarrender.GroupText(avatarTextValue)
+			avatarReq.AvatarText = &cleaned
+		}
+		if hasAvatarColor {
+			ci := -1 // "" / "-1" → 清除
+			if raw := strings.TrimSpace(avatarColorValue); raw != "" {
+				parsed, convErr := strconv.Atoi(raw)
+				if convErr != nil {
+					respondGroupRequestInvalid(c, attrKeyAvatarColor)
+					return
+				}
+				ci = parsed
+			}
+			if ci < -1 || ci >= avatarrender.PaletteSize() {
+				respondGroupRequestInvalid(c, attrKeyAvatarColor)
+				return
+			}
+			avatarReq.SetAvatarColor = true
+			if ci >= 0 {
+				avatarReq.AvatarColor = &ci
+			}
+		}
+	}
+
+	// 校验全部通过后再执行各项写入。
 	// 如果有 name 或 notice，走 Service
 	if hasName || hasNotice {
 		serviceReq := &UpdateGroupInfoServiceReq{
@@ -1029,44 +1084,9 @@ func (g *Group) groupUpdate(c *wkhttp.Context) {
 		g.ctx.EventCommit(eventID)
 	}
 
-	// 自定义群头像文字/颜色（二次弹窗保存）：与 name/notice 同级的群信息更新，走专用
-	// Service 落库 + 通知客户端刷新。两者均可选；avatar_text 空串清除自定义文字（回退
-	// 群名），avatar_color "" / "-1" 清除自定义色（回退派生）。超限直接拒绝，不静默截断。
-	avatarTextValue, hasAvatarText := groupMap[attrKeyAvatarText]
-	avatarColorValue, hasAvatarColor := groupMap[attrKeyAvatarColor]
-	if hasAvatarText || hasAvatarColor {
-		serviceReq := &UpdateGroupAvatarCustomServiceReq{
-			GroupNo:      groupNo,
-			OperatorUID:  loginUID,
-			OperatorName: loginName,
-		}
-		if hasAvatarText {
-			if avatarrender.VisibleRuneCount(avatarTextValue) > 4 {
-				respondGroupRequestInvalid(c, attrKeyAvatarText)
-				return
-			}
-			serviceReq.AvatarText = &avatarTextValue
-		}
-		if hasAvatarColor {
-			ci := -1 // "" / "-1" → 清除
-			if raw := strings.TrimSpace(avatarColorValue); raw != "" {
-				parsed, convErr := strconv.Atoi(raw)
-				if convErr != nil {
-					respondGroupRequestInvalid(c, attrKeyAvatarColor)
-					return
-				}
-				ci = parsed
-			}
-			if ci < -1 || ci >= avatarrender.PaletteSize() {
-				respondGroupRequestInvalid(c, attrKeyAvatarColor)
-				return
-			}
-			serviceReq.SetAvatarColor = true
-			if ci >= 0 {
-				serviceReq.AvatarColor = &ci
-			}
-		}
-		if err := g.groupService.UpdateGroupAvatarCustom(serviceReq); err != nil {
+	// 自定义群头像文字/颜色落库（avatarReq 已在 mutation 前校验通过）。
+	if avatarReq != nil {
+		if err := g.groupService.UpdateGroupAvatarCustom(avatarReq); err != nil {
 			g.Error("更新群头像自定义失败！", zap.Error(err), zap.String("group_no", groupNo))
 			httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
 			return

@@ -136,3 +136,18 @@ i18n-lint + 源码守卫；全仓无残留引用（仅说明性注释）。
 3. ~~拆除九宫格合成事件链路~~ ✅ 增量 4。
 4. **外部素材待替换**：群组图标正式 SVG（现 `icons/group-placeholder.png` 占位）、
    自定义色板精确色值（现复用个人色板，已像素比对一致）。
+
+## Review round 1 fixes (PR #478)
+评审(Jerry-Xin / yujiawei 🔴, Octo-Q ✅)后修复,本轮范围 = P1 + 同源正确性 + 便宜整洁:
+1. **P1 非原子部分写入**(`groupUpdate`):avatar 字段解析+校验**前置**到 name/notice/invite
+   任何 mutation 之前,非法即 400、不再部分写入群名。+ `TestGroupUpdatePartialWriteRejected`。
+2. **Lost-update 竞态**(`UpdateGroupAvatarCustom`/`updateAvatarCustom`):去掉读-改-写合并,
+   改为**只 UPDATE 本次提供的列**;并发只改文字/只改色互不覆盖。+ `TestGroupUpdateAvatarColumnScoped`。
+3. **存原始串截断**:`avatar_text` 落库前归一化为 `GroupText`(剔除不可见字符、≤4 可见 rune),
+   create + update 两路一致,避免零宽字符撑爆 VARCHAR(16)。+ `TestGroupUpdateAvatarTextCleaned`。
+4. **GroupResp 暴露** `avatar_text`/`avatar_color`(`from`/`fromModel`)。+ `TestGroupRespExposesAvatarFields`。
+5. **不存在群 → 404**(`avatarGet`),与 UserAvatar 一致,消除枚举/无谓渲染面。+ `TestGroupAvatarGetNonexistentReturns404`。
+6. 删死代码 `QueryMemberCountTx`、`QueryMembersFirstNineTx`(拆合成后无调用者)。
+
+未纳入本轮(已与维护者对齐,单独处理):公开渲染端点限流(与 UserAvatar 一致,两端点一起)、
+权限不对称(manager vs creator,加注释)、渲染失败 ETag 模式、CRC32→SHA 等 nit。
