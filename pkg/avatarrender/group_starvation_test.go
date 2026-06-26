@@ -2,6 +2,7 @@ package avatarrender
 
 import (
 	"fmt"
+	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -122,6 +123,14 @@ func TestGroupRenderCacheCollapsesRenders(t *testing.T) {
 func TestGroupRenderCacheEliminatesStarvation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skip starvation validation in -short")
+	}
+	// 本测断言 wall-clock 放大倍数（under/base ratio），它**演示**饿死消除、但不能**钉死**
+	// 并发安全；在共享/受压 CI runner 上该比值会抖动误报（评审实测 1.9x/3.5x，见 #478
+	// review）。故默认跳过，仅在显式 OCTO_TIMING_TESTS=1 时运行（手动复现/演示）。渲染
+	// 经缓存收敛这一**确定性**证明由 TestGroupRenderCacheCollapsesRenders 承担，恒在 CI 跑。
+	// 注：#481 的同型 TestCacheEliminatesStarvation 共享同一脆弱断言，属其范畴，本 PR 不动。
+	if os.Getenv("OCTO_TIMING_TESTS") != "1" {
+		t.Skip("set OCTO_TIMING_TESTS=1 to run the wall-clock starvation demonstration (timing-fragile on shared runners; the deterministic proof is TestGroupRenderCacheCollapsesRenders)")
 	}
 	prev := runtime.GOMAXPROCS(2)
 	defer runtime.GOMAXPROCS(prev)

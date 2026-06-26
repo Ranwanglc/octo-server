@@ -173,6 +173,50 @@ func TestGroupUpdateAvatarColumnScoped(t *testing.T) {
 	require.Nil(t, got.AvatarColor, "空串应清除自定义色")
 }
 
+// TestGroupUpdateAvatarCustomSkipsDisbanded 回归 disband TOCTOU 关闭:updateAvatarCustom
+// 的 WHERE 带 status<>disband——对已解散的群命中 0 行,不写 avatar 列、不 bump version。
+// 这正是服务层「读到未解散」之后、写入之前群被并发解散时的兜底:0 行 → not-found/disbanded。
+func TestGroupUpdateAvatarCustomSkipsDisbanded(t *testing.T) {
+	_, ctx := newTestServer(t)
+	require.NoError(t, testutil.CleanAllTables(ctx))
+	g := New(ctx)
+
+	const groupNo = "avatar_disband_toctou_1"
+	require.NoError(t, g.db.Insert(&Model{
+		GroupNo: groupNo, Name: "已解散群", Creator: "c1",
+		Status: GroupStatusDisband, Version: 100,
+	}))
+
+	text := "研发"
+	affected, err := g.db.updateAvatarCustom(groupNo, &text, true, intPtr(3), 200)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), affected, "已解散群必须命中 0 行")
+
+	// 行未被改:avatar 列仍空、version 未 bump。
+	got, err := g.db.QueryWithGroupNo(groupNo)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, "", got.AvatarText, "已解散群的 avatar_text 不得被写入")
+	require.Nil(t, got.AvatarColor, "已解散群的 avatar_color 不得被写入")
+	require.Equal(t, int64(100), got.Version, "已解散群的 version 不得被 bump")
+
+	// 正对照:未解散群正常命中 1 行并落库（version 每次都是新值，匹配行必然变更）。
+	const liveNo = "avatar_disband_toctou_live_1"
+	require.NoError(t, g.db.Insert(&Model{
+		GroupNo: liveNo, Name: "正常群", Creator: "c1",
+		Status: GroupStatusNormal, Version: 100,
+	}))
+	affected, err = g.db.updateAvatarCustom(liveNo, &text, true, intPtr(3), 200)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), affected, "未解散群应命中 1 行")
+	got, err = g.db.QueryWithGroupNo(liveNo)
+	require.NoError(t, err)
+	require.Equal(t, "研发", got.AvatarText)
+	require.NotNil(t, got.AvatarColor)
+	require.Equal(t, 3, *got.AvatarColor)
+	require.Equal(t, int64(200), got.Version)
+}
+
 // TestGroupUpdateAvatarTextCleaned 回归 Fix3:存清洗后的文字(剔除不可见字符),避免
 // 零宽/格式字符撑爆 avatar_text VARCHAR(16)。
 func TestGroupUpdateAvatarTextCleaned(t *testing.T) {

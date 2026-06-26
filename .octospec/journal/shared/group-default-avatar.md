@@ -179,3 +179,25 @@ i18n-lint + 源码守卫；全仓无残留引用（仅说明性注释）。
   `TestGroupRenderCost`(RenderGroup ≈36ms / RenderIcon ≈163ms)、
   `TestGroupRenderCacheCollapsesRenders`(确定性:64 并发×6 轮/4 key → 仅 4 次真渲染)、
   `TestGroupRenderCacheEliminatesStarvation`(GOMAXPROCS=2 扇出下受害者放大 ≈1.5x,≤1.8x)。
+
+## Review round 3 fixes (PR #478)
+四位 reviewer 在 head `28aa56d8` 全部 APPROVE(Jerry-Xin、OctoBoooot、Octo-Q、yujiawei)。
+本轮收尾:1 必修(我引入的 flaky 测试)+ 2 项 reviewer 一致推荐的便宜加固。
+1. **flaky 测试 env-gate**(必修):`TestGroupRenderCacheEliminatesStarvation` 断言 wall-clock
+   放大倍数(under/base ratio),在共享/受压 runner 上抖动误报(评审实测 1.9x/3.5x)。它
+   **演示**饿死消除、但不能**钉死**并发安全。改为默认跳过,仅 `OCTO_TIMING_TESTS=1` 时跑
+   (手动复现/演示);渲染收敛的**确定性**证明由 `TestGroupRenderCacheCollapsesRenders`
+   承担,恒在 CI 跑。(#481 的同型 `TestCacheEliminatesStarvation` 共享同一脆弱断言,属其
+   范畴,本 PR 不动,仅在注释中标注。)
+2. **disband TOCTOU 关闭**(Jerry-Xin + yujiawei 一致推荐):`updateAvatarCustom` 的 WHERE
+   加 `status<>disband` 并返回 `RowsAffected`;`UpdateGroupAvatarCustom` 据 `affected==0`
+   返回 not-found/disbanded。关闭服务层「读到未解散」之后、写入之前群被并发解散的窗口
+   (version 每次新值 → 匹配行必变更,RowsAffected 真实反映命中)。+ db 层回归
+   `TestGroupUpdateAvatarCustomSkipsDisbanded`(已解散→0 行不写不 bump;正常→1 行落库)。
+3. **Swagger 同步**(Octo-Q/yujiawei 🔵):`modules/group/swagger/api.yaml` create/update body
+   补 `avatar_text`/`avatar_color`,`group` 响应定义补两字段,GET `/groups/{group_no}/avatar`
+   契约更新为 image/png(原 stale `application/json`)+ If-None-Match/304/302/404。
+延后(reviewer 一致非阻断,需人决策):**公开端点渲染群名前缀的产品政策**——yujiawei 将其
+判为非阻断(group_no 是不可枚举 UUID;与已上线的 user-avatar 渲染昵称同型;本 PR 反而以
+disband/不存在→404 收紧了面),但因 security-sensitive 标签,留待人类显式 ack。其余延后项
+同前(groupUpdate 跨步原子性、强 ETag、公开端点限流与 UserAvatar 一起做)。

@@ -325,7 +325,7 @@ func (d *DB) updateAvatar(avatar string, avatarVersion int64, groupNo string) er
 // updateAvatarCustom 只更新本次实际提供的列：text 非 nil 时写 avatar_text，setColor
 // 为 true 时写 avatar_color（*int，nil → NULL 清除自定义色）；始终 bump version。
 // 列级更新避免「读-改-写」竞态——并发只改文字 / 只改色不会互相覆盖对方的列。
-func (d *DB) updateAvatarCustom(groupNo string, text *string, setColor bool, color *int, version int64) error {
+func (d *DB) updateAvatarCustom(groupNo string, text *string, setColor bool, color *int, version int64) (int64, error) {
 	// updated_at 列是 DEFAULT CURRENT_TIMESTAMP 但**无** ON UPDATE，列级 UPDATE 不会自动
 	// 刷新，故显式写入，保证 GroupResp.updated_at 反映本次自定义头像变更。
 	setMap := map[string]interface{}{
@@ -338,8 +338,16 @@ func (d *DB) updateAvatarCustom(groupNo string, text *string, setColor bool, col
 	if setColor {
 		setMap["avatar_color"] = color
 	}
-	_, err := d.session.Update("group").SetMap(setMap).Where("group_no=?", groupNo).Exec()
-	return err
+	// status 入 WHERE，与服务层读取时的 disband 守卫对称：读到「未解散」之后、写入之前群
+	// 被并发解散时，这里命中 0 行而非把自定义头像写到已解散的死行上（关闭 TOCTOU）。
+	// version 每次都是新 GenSeq 值，匹配行必然变更，故 RowsAffected 反映的是「是否命中未
+	// 解散的群」；调用方据 RowsAffected==0 返回 not-found/disbanded。
+	res, err := d.session.Update("group").SetMap(setMap).
+		Where("group_no=? AND status<>?", groupNo, GroupStatusDisband).Exec()
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // QueryDetailWithGroupNo 查询群详情

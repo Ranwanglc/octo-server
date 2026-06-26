@@ -1954,9 +1954,16 @@ func (s *Service) UpdateGroupAvatarCustom(req *UpdateGroupAvatarCustomServiceReq
 	}
 	// 只更新本次实际提供的列（不读回未提供字段再整体写），避免「读-改-写」竞态：并发
 	// 「只改文字」与「只改色」不会互相覆盖。existence/disband 检查的读不回写，故无竞态。
-	if err := s.db.updateAvatarCustom(req.GroupNo, req.AvatarText, req.SetAvatarColor, req.AvatarColor, version); err != nil {
+	// updateAvatarCustom 的 WHERE 带 status<>disband：若读到未解散之后、写入之前群被并发
+	// 解散，则命中 0 行——据此返回 not-found/disbanded，不把 version/通知误发到死行（关闭
+	// 上面 read-check 与本次 write 之间的 TOCTOU）。
+	affected, err := s.db.updateAvatarCustom(req.GroupNo, req.AvatarText, req.SetAvatarColor, req.AvatarColor, version)
+	if err != nil {
 		s.Error("update group avatar custom failed", zap.Error(err))
 		return errors.New("failed to update group avatar")
+	}
+	if affected == 0 {
+		return errors.New("group not found or disbanded")
 	}
 
 	// 通知客户端刷新频道信息 → 重新拉取头像。
