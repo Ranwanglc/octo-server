@@ -468,8 +468,17 @@ func (g *Group) writeGroupDefaultAvatar(c *wkhttp.Context, groupNo string, group
 		return
 	}
 
+	// 非条件 GET（disable-cache / 首屏 / 共享缓存 miss）绕过上面的 304 快路径，落到这里
+	// 真渲染。成员/会话列表扇出下大量并发非条件 GET 会把 CPU 打满、饿死同机其它请求
+	// （issue#480）。渲染统一走进程级共享缓存 GetOrRender（与 user 同一 LRU + 同一渲染
+	// 信号量）：命中复用字节、singleflight 合并冷渲染、信号量限并发，确保一次扇出最多渲
+	// 一张。缓存 key 用 CacheKey（完整原始因子，与 ETag 同因子但**非** CRC32 弱指纹），
+	// 避免 32 位碰撞跨群串图。
 	if renderable {
-		imageData, genErr := avatarrender.RenderGroup(text, style, avatarrender.DefaultSize)
+		nameKey := avatarrender.CacheKey("group-name-v2", groupNo, colorTag, text)
+		imageData, genErr := avatarrender.GetOrRender(nameKey, func() ([]byte, error) {
+			return avatarrender.RenderGroup(text, style, avatarrender.DefaultSize)
+		})
 		if genErr == nil {
 			c.Data(http.StatusOK, "image/png", imageData)
 			return
@@ -480,7 +489,10 @@ func (g *Group) writeGroupDefaultAvatar(c *wkhttp.Context, groupNo string, group
 	}
 
 	// 群名为空 / 不可渲染（如纯 emoji）/ 渲染失败 → 群组图标。
-	iconData, iconErr := avatarrender.RenderIcon(style)
+	iconKey := avatarrender.CacheKey("group-icon-v2", groupNo, colorTag)
+	iconData, iconErr := avatarrender.GetOrRender(iconKey, func() ([]byte, error) {
+		return avatarrender.RenderIcon(style)
+	})
 	if iconErr != nil {
 		g.Error("生成群组图标头像失败", zap.Error(iconErr), zap.String("group_no", groupNo))
 		c.Writer.WriteHeader(http.StatusInternalServerError)

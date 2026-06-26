@@ -163,3 +163,19 @@ i18n-lint + 源码守卫；全仓无残留引用（仅说明性注释）。
 4. **哨兵不对称**(nit):`checkAvatar` 注释说明创建拒 -1、改群收 -1/"" 清除的刻意差异。
 延后(reviewer 认可非阻断):version 并发单调性、渲染失败 304、VARCHAR(32) 留头、公开端点
 限流(与 UserAvatar 一起)、强 ETag。
+
+## Rebase onto #481 + shared render cache (PR #478 coordination)
+#481(`46184555`,issue#480 修复)在 main 落了**进程级共享头像渲染缓存**
+`avatarrender.GetOrRender`(LRU + singleflight + 单一渲染并发信号量)。群 avatarGet 同样
+按需渲染,必须接入同一个缓存(共用那**一个**信号量才是真正的全机渲染上限;per-endpoint
+各限 N 会变 2N、等于没限)。
+- rebase `feat/group-default-avatar` 到含 #481 的 main(干净,#481 文件独立)。
+- `writeGroupDefaultAvatar` 两处渲染(RenderGroup / RenderIcon)包进 `GetOrRender`,
+  404/解散/304 仍在渲染**之前**。
+- 缓存 key 用新导出的 `avatarrender.CacheKey`(长度分帧 injective,与 ETag 同因子但
+  **非** CRC32——32 位碰撞会跨群串图;文字因子用户可控)。user 的私有 `avatarCacheKey`
+  暂留,后续 extraction PR 统一(协调评论已约定)。
+- 压测对标 #481 的 starvation repro,延伸到群路径(`pkg/avatarrender/group_starvation_test.go`):
+  `TestGroupRenderCost`(RenderGroup ≈36ms / RenderIcon ≈163ms)、
+  `TestGroupRenderCacheCollapsesRenders`(确定性:64 并发×6 轮/4 key → 仅 4 次真渲染)、
+  `TestGroupRenderCacheEliminatesStarvation`(GOMAXPROCS=2 扇出下受害者放大 ≈1.5x,≤1.8x)。
