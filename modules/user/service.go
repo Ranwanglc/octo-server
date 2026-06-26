@@ -8,14 +8,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Mininglamp-OSS/octo-server/modules/botfather/cmdmenu"
-	"github.com/Mininglamp-OSS/octo-server/modules/source"
-	"github.com/Mininglamp-OSS/octo-server/modules/space"
-	octoi18n "github.com/Mininglamp-OSS/octo-server/pkg/i18n"
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
+	"github.com/Mininglamp-OSS/octo-server/modules/botfather/cmdmenu"
+	"github.com/Mininglamp-OSS/octo-server/modules/source"
+	"github.com/Mininglamp-OSS/octo-server/modules/space"
+	octoi18n "github.com/Mininglamp-OSS/octo-server/pkg/i18n"
 	"go.uber.org/zap"
 )
 
@@ -81,6 +81,14 @@ type IService interface {
 	GetOnlineCount() (int64, error)
 	// 存在黑明单
 	ExistBlacklist(uid string, toUID string) (bool, error)
+	// QueryPeerRobotInfo 返回目标用户是否为 bot 及其创建者 UID。
+	// 实现委托给 PinnedDB（user/db_pinned.go），与置顶频道访问校验共用同一 SQL 真源。
+	// 用于 messages_search 等模块的 p2p 访问门禁区分本人 bot / 他人 bot / 真人。
+	QueryPeerRobotInfo(peerUID string) (isRobot bool, creatorUID string, err error)
+	// AreSpaceMembers 校验两个 uid 是否同属一个在籍 Space。
+	// 实现委托给 PinnedDB（user/db_pinned.go），底层调用 pkg/space.CheckBothMembers。
+	// 用于 Space 模式下放行同 Space 成员间的 p2p 交互（无需互加好友）。
+	AreSpaceMembers(spaceID, uid1, uid2 string) (bool, error)
 	// 更新用户消息过期时长
 	UpdateUserMsgExpireSecond(uid string, msgExpireSecond int64) error
 	// 搜索好友
@@ -219,6 +227,7 @@ type Service struct {
 	extLogin         externalLoginHandler
 	bindHandler      oidcBindHandler
 	verificationDB   *verificationDB
+	pinnedDB         *PinnedDB
 }
 
 // SetExternalLoginHandler 注入外部 IdP 登录 handler（在 user.New 内部调用,生产路径下保证非空）
@@ -376,6 +385,7 @@ func NewService(ctx *config.Context) IService {
 		Log:              log.NewTLog("userService"),
 		onlineService:    NewOnlineService(ctx),
 		verificationDB:   newVerificationDB(ctx),
+		pinnedDB:         NewPinnedDB(ctx),
 	}
 }
 
@@ -1240,6 +1250,16 @@ func (s *Service) ExistBlacklist(uid string, toUID string) (bool, error) {
 	return s.friendDB.existBlacklist(uid, toUID)
 }
 
+// QueryPeerRobotInfo 委托 PinnedDB，详见 IService 注释。
+func (s *Service) QueryPeerRobotInfo(peerUID string) (bool, string, error) {
+	return s.pinnedDB.QueryPeerRobotInfo(peerUID)
+}
+
+// AreSpaceMembers 委托 PinnedDB，详见 IService 注释。
+func (s *Service) AreSpaceMembers(spaceID, uid1, uid2 string) (bool, error) {
+	return s.pinnedDB.AreSpaceMembers(spaceID, uid1, uid2)
+}
+
 func (s *Service) UpdateUserMsgExpireSecond(uid string, msgExpireSecond int64) error {
 	return s.db.updateUserMsgExpireSecond(uid, msgExpireSecond)
 }
@@ -1271,8 +1291,8 @@ type Resp struct {
 	Zone            string
 	Phone           string
 	Email           string
-	Status         int // 用户状态 1 正常 2:黑名单 0 禁用
-	IsUploadAvatar int
+	Status          int // 用户状态 1 正常 2:黑名单 0 禁用
+	IsUploadAvatar  int
 	NewMsgNotice    int
 	MsgShowDetail   int //显示消息通知详情0.否1.是
 	MsgExpireSecond int64
@@ -1288,8 +1308,8 @@ func newResp(m *Model) *Resp {
 		Zone:            m.Zone,
 		Phone:           m.Phone,
 		Email:           m.Email,
-		Status:         m.Status,
-		IsUploadAvatar: m.IsUploadAvatar,
+		Status:          m.Status,
+		IsUploadAvatar:  m.IsUploadAvatar,
 		NewMsgNotice:    m.NewMsgNotice,
 		MsgShowDetail:   m.MsgShowDetail,
 		MsgExpireSecond: m.MsgExpireSecond,
@@ -1325,7 +1345,7 @@ type AddUserReq struct {
 	Phone    string
 	Email    string
 	Password string
-	Robot    int    // 机器人 0.否 1.是
+	Robot    int // 机器人 0.否 1.是
 }
 
 type UserUpdateReq struct {
@@ -1379,46 +1399,46 @@ type UserDetailResp struct {
 	UID                 string            `json:"uid"`
 	Name                string            `json:"name"`
 	Username            string            `json:"username"`
-	Email               string            `json:"email,omitempty"`        // email（仅自己能看）
-	Zone                string            `json:"zone,omitempty"`         // 手机区号（仅自己能看）
-	Phone               string            `json:"phone,omitempty"`        // 手机号（仅自己能看）
-	Mute                int               `json:"mute"`                   // 免打扰
-	Top                 int               `json:"top"`                    // 置顶
-	Sex                 int               `json:"sex"`                    //性别1:男
-	Category            string            `json:"category"`               //用户分类 '客服'
-	ShortNo             string            `json:"short_no"`               // 用户唯一短编号
-	ChatPwdOn           int               `json:"chat_pwd_on"`            //是否开启聊天密码
-	Screenshot          int               `json:"screenshot"`             //截屏通知
-	RevokeRemind        int               `json:"revoke_remind"`          //撤回提醒
-	Receipt             int               `json:"receipt"`                //消息是否回执
-	Online              int               `json:"online"`                 //是否在线
-	LastOffline         int               `json:"last_offline"`           //最后一次离线时间
-	DeviceFlag          config.DeviceFlag `json:"device_flag"`            // 在线设备标记
-	Follow              int               `json:"follow"`                 //是否是好友
-	BeDeleted           int               `json:"be_deleted"`             // 被删除
-	BeBlacklist         int               `json:"be_blacklist"`           // 被拉黑
-	Code                string            `json:"code"`                   //加好友所需vercode TODO: code不再使用 请使用Vercode
-	Vercode             string            `json:"vercode"`                //
-	SourceDesc          string            `json:"source_desc"`            // 好友来源
-	Remark              string            `json:"remark"`                 //好友备注
-	IsUploadAvatar      int               `json:"is_upload_avatar"`       // 是否上传头像
-	Status              int               `json:"status"`                 //用户状态 1 正常 2:黑名单
-	Robot               int               `json:"robot"`                  // 机器人0.否1.是
-	BotCommands         string            `json:"bot_commands,omitempty"`    // 机器人命令列表JSON
-	BotDescription      string            `json:"bot_description,omitempty"` // Bot 简介
-	BotCreatorUID       string            `json:"bot_creator_uid,omitempty"` // Bot 创建者 UID
-	BotCreatorName      string            `json:"bot_creator_name,omitempty"` // Bot 创建者昵称
-	BotAutoApprove      int               `json:"bot_auto_approve,omitempty"` // 是否自动通过好友 0:否 1:是
+	Email               string            `json:"email,omitempty"`              // email（仅自己能看）
+	Zone                string            `json:"zone,omitempty"`               // 手机区号（仅自己能看）
+	Phone               string            `json:"phone,omitempty"`              // 手机号（仅自己能看）
+	Mute                int               `json:"mute"`                         // 免打扰
+	Top                 int               `json:"top"`                          // 置顶
+	Sex                 int               `json:"sex"`                          //性别1:男
+	Category            string            `json:"category"`                     //用户分类 '客服'
+	ShortNo             string            `json:"short_no"`                     // 用户唯一短编号
+	ChatPwdOn           int               `json:"chat_pwd_on"`                  //是否开启聊天密码
+	Screenshot          int               `json:"screenshot"`                   //截屏通知
+	RevokeRemind        int               `json:"revoke_remind"`                //撤回提醒
+	Receipt             int               `json:"receipt"`                      //消息是否回执
+	Online              int               `json:"online"`                       //是否在线
+	LastOffline         int               `json:"last_offline"`                 //最后一次离线时间
+	DeviceFlag          config.DeviceFlag `json:"device_flag"`                  // 在线设备标记
+	Follow              int               `json:"follow"`                       //是否是好友
+	BeDeleted           int               `json:"be_deleted"`                   // 被删除
+	BeBlacklist         int               `json:"be_blacklist"`                 // 被拉黑
+	Code                string            `json:"code"`                         //加好友所需vercode TODO: code不再使用 请使用Vercode
+	Vercode             string            `json:"vercode"`                      //
+	SourceDesc          string            `json:"source_desc"`                  // 好友来源
+	Remark              string            `json:"remark"`                       //好友备注
+	IsUploadAvatar      int               `json:"is_upload_avatar"`             // 是否上传头像
+	Status              int               `json:"status"`                       //用户状态 1 正常 2:黑名单
+	Robot               int               `json:"robot"`                        // 机器人0.否1.是
+	BotCommands         string            `json:"bot_commands,omitempty"`       // 机器人命令列表JSON
+	BotDescription      string            `json:"bot_description,omitempty"`    // Bot 简介
+	BotCreatorUID       string            `json:"bot_creator_uid,omitempty"`    // Bot 创建者 UID
+	BotCreatorName      string            `json:"bot_creator_name,omitempty"`   // Bot 创建者昵称
+	BotAutoApprove      int               `json:"bot_auto_approve,omitempty"`   // 是否自动通过好友 0:否 1:是
 	BotAgentPlatform    string            `json:"bot_agent_platform,omitempty"` // Agent 平台名称
 	BotAgentVersion     string            `json:"bot_agent_version,omitempty"`  // Agent 平台版本号
 	BotPluginVersion    string            `json:"bot_plugin_version,omitempty"` // DMWork 插件版本号
-	IsDestroy           int               `json:"is_destroy"`             // 注销状态 0.正常 1.注销申请中（冷静期，仍可正常通信） 2.已注销
-	Flame               int               `json:"flame"`                  // 是否开启阅后即焚
-	FlameSecond         int               `json:"flame_second"`           // 阅后即焚秒数
-	JoinGroupInviteUID  string            `json:"join_group_invite_uid"`  // 加入群聊邀请人UID
-	JoinGroupInviteName string            `json:"join_group_invite_name"` // 加入群聊邀请人名称
-	JoinGroupTime       string            `json:"join_group_time"`        // 加入群聊时间
-	GroupMember         *GroupMemberResp  `json:"group_member,omitempty"` // 群成员信息
+	IsDestroy           int               `json:"is_destroy"`                   // 注销状态 0.正常 1.注销申请中（冷静期，仍可正常通信） 2.已注销
+	Flame               int               `json:"flame"`                        // 是否开启阅后即焚
+	FlameSecond         int               `json:"flame_second"`                 // 阅后即焚秒数
+	JoinGroupInviteUID  string            `json:"join_group_invite_uid"`        // 加入群聊邀请人UID
+	JoinGroupInviteName string            `json:"join_group_invite_name"`       // 加入群聊邀请人名称
+	JoinGroupTime       string            `json:"join_group_time"`              // 加入群聊时间
+	GroupMember         *GroupMemberResp  `json:"group_member,omitempty"`       // 群成员信息
 	// OCTO 实名认证（YUJ-354 / GH#1300）
 	// RealnameVerified：该用户是否已完成 OCTO 实名认证（user_verification 有记录）。
 	// RealName：已认证时返回实名姓名；未认证留空。
