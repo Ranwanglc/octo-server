@@ -57,14 +57,13 @@ func isWideRune(r rune) bool {
 		(r >= 0xFF00 && r <= 0xFF60) // 全角 ASCII 变体
 }
 
-// RenderGroup 渲染群默认头像「白底 + 纯色圆 + 居中白色文字」，文字按 GroupAvatarLines
-// 决定单行或两行（2×2）。输出与 Render 一致：不透明 PNG、白色文字。个人头像继续走
-// Render（单行），本函数仅供群头像使用，故可独立调整两行排版而不影响个人头像。
-func RenderGroup(opts Options) ([]byte, error) {
-	if opts.Text == "" {
+// RenderGroup 渲染群默认头像「白底 + 浅底描边圆 + 居中主题色文字」，文字按
+// GroupAvatarLines 决定单行或两行（2×2）。个人头像继续走 Render（单行实心圆），
+// 本函数仅供群头像使用，故可独立调整视觉而不影响个人头像。
+func RenderGroup(text string, style GroupStyle, size int) ([]byte, error) {
+	if text == "" {
 		return nil, fmt.Errorf("avatarrender: empty text")
 	}
-	size := opts.Size
 	if size <= 0 {
 		size = DefaultSize
 	}
@@ -72,14 +71,14 @@ func RenderGroup(opts Options) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("avatarrender: parse font: %w", err)
 	}
-	lines := GroupAvatarLines(opts.Text)
+	lines := GroupAvatarLines(text)
 
 	big := size * supersample
 	canvas := image.NewRGBA(image.Rect(0, 0, big, big))
 	draw.Draw(canvas, canvas.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
-	drawCircle(canvas, opts.Bg)
+	drawCircleFilledStroked(canvas, style.Fill, style.Main, groupCircleStrokeRatio)
 
-	if err := drawCenteredLines(canvas, fnt, lines, big); err != nil {
+	if err := drawCenteredLines(canvas, fnt, lines, big, style.Main); err != nil {
 		return nil, err
 	}
 
@@ -124,7 +123,7 @@ func fitFontPxLines(fnt *sfnt.Font, lines []string, size int) float64 {
 }
 
 // drawCenteredLines 在 size×size 画布上水平居中渲染每一行、并使整块文字垂直居中。
-func drawCenteredLines(img *image.RGBA, fnt *sfnt.Font, lines []string, size int) error {
+func drawCenteredLines(img *image.RGBA, fnt *sfnt.Font, lines []string, size int, textColor color.RGBA) error {
 	fontPx := fitFontPxLines(fnt, lines, size)
 	face, err := opentype.NewFace(fnt, &opentype.FaceOptions{Size: fontPx, DPI: 72, Hinting: font.HintingFull})
 	if err != nil {
@@ -132,7 +131,7 @@ func drawCenteredLines(img *image.RGBA, fnt *sfnt.Font, lines []string, size int
 	}
 	defer face.Close()
 
-	d := &font.Drawer{Dst: img, Src: image.NewUniform(color.White), Face: face}
+	d := &font.Drawer{Dst: img, Src: image.NewUniform(textColor), Face: face}
 	lineH := fixed.Int26_6(int(fontPx * groupLineHeightEm * 64))
 
 	// 用首行墨迹上沿与末行墨迹下沿求整块墨迹包围盒，使其垂直居中（对齐 drawCenteredText

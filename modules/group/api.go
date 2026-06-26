@@ -416,7 +416,7 @@ func (g *Group) avatarGet(c *wkhttp.Context) {
 	}
 
 	// 无自定义上传（含历史合成群、新建群）：服务端实时渲染默认头像——
-	// 色块圆 + 群名前 4 字（或自定义文字），群名为空/不可渲染时回退群组图标。
+	// 浅底描边圆 + 群名前 4 字（或自定义文字），群名为空/不可渲染时回退群组图标。
 	g.writeGroupDefaultAvatar(c, groupNo, groupInfo)
 }
 
@@ -429,7 +429,7 @@ func (g *Group) avatarGet(c *wkhttp.Context) {
 // ETag 只依赖输入（无需渲染），故先算 ETag 命中 If-None-Match 时直接 304。
 func (g *Group) writeGroupDefaultAvatar(c *wkhttp.Context, groupNo string, groupInfo *Model) {
 	source := ""
-	bg := avatarrender.ColorForSeed(groupNo)
+	style := avatarrender.GroupStyleForSeed(groupNo)
 	colorTag := "seed"
 	if groupInfo != nil {
 		source = groupInfo.Name
@@ -437,8 +437,8 @@ func (g *Group) writeGroupDefaultAvatar(c *wkhttp.Context, groupNo string, group
 			source = groupInfo.AvatarText
 		}
 		if groupInfo.AvatarColor != nil {
-			if cc, ok := avatarrender.ColorByIndex(*groupInfo.AvatarColor); ok {
-				bg = cc
+			if customStyle, ok := avatarrender.GroupStyleByIndex(*groupInfo.AvatarColor); ok {
+				style = customStyle
 				colorTag = "idx" + strconv.Itoa(*groupInfo.AvatarColor)
 			}
 		}
@@ -448,9 +448,9 @@ func (g *Group) writeGroupDefaultAvatar(c *wkhttp.Context, groupNo string, group
 
 	// ETag 覆盖决定图像内容的因子：渲染模式版本 + group_no(派生色) + 实际色 + 文字。
 	// 改名/改自定义文字 → text 变 → ETag 变；改自定义色 → colorTag 变 → ETag 变。
-	etag := avatarrender.ETag("group-icon-v1", groupNo, colorTag)
+	etag := avatarrender.ETag("group-icon-v2", groupNo, colorTag)
 	if renderable {
-		etag = avatarrender.ETag("group-name-v1", groupNo, colorTag, text)
+		etag = avatarrender.ETag("group-name-v2", groupNo, colorTag, text)
 	}
 	c.Header("Content-Disposition", "inline; filename=avatar.png")
 	c.Header("ETag", etag)
@@ -461,18 +461,18 @@ func (g *Group) writeGroupDefaultAvatar(c *wkhttp.Context, groupNo string, group
 	}
 
 	if renderable {
-		imageData, genErr := avatarrender.RenderGroup(avatarrender.Options{Text: text, Bg: bg})
+		imageData, genErr := avatarrender.RenderGroup(text, style, avatarrender.DefaultSize)
 		if genErr == nil {
 			c.Data(http.StatusOK, "image/png", imageData)
 			return
 		}
 		// 渲染失败不直接 500，记录后回退群组图标；ETag 改回 icon 模式与内容一致。
 		g.Error("生成群名默认头像失败，回退群组图标", zap.Error(genErr), zap.String("group_no", groupNo))
-		c.Header("ETag", avatarrender.ETag("group-icon-v1", groupNo, colorTag))
+		c.Header("ETag", avatarrender.ETag("group-icon-v2", groupNo, colorTag))
 	}
 
-	// 群名为空 / 不可渲染（如纯 emoji）/ 渲染失败 → 群组图标（当前为占位资产）。
-	iconData, iconErr := avatarrender.RenderIcon(bg)
+	// 群名为空 / 不可渲染（如纯 emoji）/ 渲染失败 → 群组图标。
+	iconData, iconErr := avatarrender.RenderIcon(style)
 	if iconErr != nil {
 		g.Error("生成群组图标头像失败", zap.Error(iconErr), zap.String("group_no", groupNo))
 		c.Writer.WriteHeader(http.StatusInternalServerError)

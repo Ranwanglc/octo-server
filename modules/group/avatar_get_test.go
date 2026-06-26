@@ -26,8 +26,8 @@ func doAvatarGet(t *testing.T, h http.Handler, groupNo, ifNoneMatch string) *htt
 }
 
 // TestGroupAvatarGetDefaultRender 覆盖无自定义上传、有群名时 avatarGet 的服务端
-// 渲染：返回「色块圆 + 群名前 4 字」PNG（200，非重定向），内容等于
-// Render(GroupText(name), ColorForSeed(group_no))，并带弱 ETag + must-revalidate；
+// 渲染：返回「浅底描边圆 + 群名前 4 字」PNG（200，非重定向），内容等于
+// RenderGroup(GroupText(name), GroupStyleForSeed(group_no))，并带弱 ETag + must-revalidate；
 // 命中 If-None-Match 时 304。
 func TestGroupAvatarGetDefaultRender(t *testing.T) {
 	s, ctx := newTestServer(t)
@@ -51,10 +51,11 @@ func TestGroupAvatarGetDefaultRender(t *testing.T) {
 	require.Equal(t, avatarrender.DefaultSize, img.Bounds().Dx())
 
 	// 正确性：取前 4 字「后端架构」+ 按 group_no 派生色。
-	want, err := avatarrender.RenderGroup(avatarrender.Options{
-		Text: avatarrender.GroupText("后端架构讨论"),
-		Bg:   avatarrender.ColorForSeed(groupNo),
-	})
+	want, err := avatarrender.RenderGroup(
+		avatarrender.GroupText("后端架构讨论"),
+		avatarrender.GroupStyleForSeed(groupNo),
+		avatarrender.DefaultSize,
+	)
 	require.NoError(t, err)
 	require.Equal(t, want, w.Body.Bytes(), "rendered avatar must be first-4-chars + seed color")
 
@@ -77,7 +78,7 @@ func TestGroupAvatarGetIconFallback(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Equal(t, "image/png", w.Header().Get("Content-Type"))
 
-	wantIcon, err := avatarrender.RenderIcon(avatarrender.ColorForSeed(groupNo))
+	wantIcon, err := avatarrender.RenderIcon(avatarrender.GroupStyleForSeed(groupNo))
 	require.NoError(t, err)
 	require.Equal(t, wantIcon, w.Body.Bytes(), "empty name must fall back to group icon")
 }
@@ -97,9 +98,9 @@ func TestGroupAvatarGetCustomOverrides(t *testing.T) {
 	w := doAvatarGet(t, s.GetRoute(), groupNo, "")
 	require.Equal(t, http.StatusOK, w.Code)
 
-	cc, ok := avatarrender.ColorByIndex(5)
+	style, ok := avatarrender.GroupStyleByIndex(5)
 	require.True(t, ok)
-	want, err := avatarrender.RenderGroup(avatarrender.Options{Text: "研发", Bg: cc})
+	want, err := avatarrender.RenderGroup("研发", style, avatarrender.DefaultSize)
 	require.NoError(t, err)
 	require.Equal(t, want, w.Body.Bytes(), "custom text+color must override name/seed")
 }

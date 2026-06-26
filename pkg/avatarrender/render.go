@@ -83,6 +83,10 @@ const (
 	maxFontEmRatio    = 0.46
 	// baseFontEmRatio 是墨迹测量失败时的兜底字号（设计稿 32px 容器内 10px）。
 	baseFontEmRatio = 10.0 / 32.0
+
+	// groupCircleStrokeRatio 是群头像描边宽度相对圆直径的比例。设计稿头像约 31px
+	// 直径配 1px 描边；服务端输出 200px 后通常由客户端缩小展示，所以按直径比例绘制。
+	groupCircleStrokeRatio = 1.0 / 31.0
 )
 
 // Options 描述一次头像渲染。
@@ -155,6 +159,38 @@ func drawCircle(img *image.RGBA, c color.RGBA) {
 	}
 }
 
+// drawCircleFilledStroked 在 img 上绘制群头像专用圆：浅色填充 + 主题色描边。
+// img 应由调用方先铺白底；本函数只改圆内像素，圆外保持原底色。
+func drawCircleFilledStroked(img *image.RGBA, fill, stroke color.RGBA, strokeRatio float64) {
+	b := img.Bounds()
+	d := float64(b.Dx())
+	cx, cy := d/2, d/2
+	radius := d/2 - 1
+	strokeWidth := d * strokeRatio
+	if strokeWidth < 1 {
+		strokeWidth = 1
+	}
+	innerRadius := radius - strokeWidth
+	if innerRadius < 0 {
+		innerRadius = 0
+	}
+	radiusSq := radius * radius
+	innerRadiusSq := innerRadius * innerRadius
+	for y := 0; y < b.Dy(); y++ {
+		for x := 0; x < b.Dx(); x++ {
+			dx := float64(x) - cx + 0.5
+			dy := float64(y) - cy + 0.5
+			distSq := dx*dx + dy*dy
+			switch {
+			case distSq <= innerRadiusSq:
+				img.SetRGBA(x, y, fill)
+			case distSq <= radiusSq:
+				img.SetRGBA(x, y, stroke)
+			}
+		}
+	}
+}
+
 // fitFontPx 返回 text 在 size×size 画布上应使用的字号（像素）：在参考字号下
 // 测量墨迹包围盒，线性缩放到目标墨迹盒（maxInkWidthRatio × maxInkHeightRatio）
 // 内，再施加 maxFontEmRatio 硬上限。CJK 双字先触宽度约束（结果≈设计稿的
@@ -215,54 +251,54 @@ func drawCenteredText(img *image.RGBA, fnt *sfnt.Font, text string, size int) er
 	return nil
 }
 
-// groupIconData 是群默认头像在「群名为空/取不出字」时的兜底群组图标（白色双人剪影、
-// 透明底）。**当前为占位资产**——设计稿正式图标（Figma 导出）到位后，直接替换
-// icons/group-placeholder.png 即可，无需改动渲染逻辑或调用方。
-//
-//go:embed icons/group-placeholder.png
-var groupIconData []byte
+//go:embed icons/group-person-front.png
+var groupIconFrontData []byte
+
+//go:embed icons/group-person-back.png
+var groupIconBackData []byte
 
 var (
-	groupIconOnce sync.Once
-	groupIconImg  image.Image
-	groupIconErr  error
+	groupIconOnce     sync.Once
+	groupIconFrontImg image.Image
+	groupIconBackImg  image.Image
+	groupIconErr      error
 )
 
-func loadGroupIcon() (image.Image, error) {
+func loadGroupIconMasks() (image.Image, image.Image, error) {
 	groupIconOnce.Do(func() {
-		groupIconImg, groupIconErr = png.Decode(bytes.NewReader(groupIconData))
+		groupIconFrontImg, groupIconErr = png.Decode(bytes.NewReader(groupIconFrontData))
+		if groupIconErr != nil {
+			return
+		}
+		groupIconBackImg, groupIconErr = png.Decode(bytes.NewReader(groupIconBackData))
 	})
-	return groupIconImg, groupIconErr
+	return groupIconFrontImg, groupIconBackImg, groupIconErr
 }
 
-// RenderIcon 渲染「白底 + 纯色圆 + 居中白色群组图标」的 PNG，用于群名为空或无法
-// 取字时的兜底（PRD：群名称为空或无法取字时，显示群组图标）。与 Render 一样输出
-// 不透明 PNG。bg 为圆的背景色（自定义色或按 group_no 派生）。
-func RenderIcon(bg color.RGBA) ([]byte, error) {
-	return renderIconSized(bg, DefaultSize)
+// RenderIcon 渲染「白底 + 浅底描边圆 + 双色群组图标」的 PNG，用于群名为空或
+// 无法取字时的兜底。style 来自群头像专用色板，不影响个人头像 Render。
+func RenderIcon(style GroupStyle) ([]byte, error) {
+	return renderIconSized(style, DefaultSize)
 }
 
-func renderIconSized(bg color.RGBA, size int) ([]byte, error) {
+func renderIconSized(style GroupStyle, size int) ([]byte, error) {
 	if size <= 0 {
 		size = DefaultSize
 	}
-	icon, err := loadGroupIcon()
+	front, back, err := loadGroupIconMasks()
 	if err != nil {
-		return nil, fmt.Errorf("avatarrender: decode group icon: %w", err)
+		return nil, fmt.Errorf("avatarrender: decode group icon masks: %w", err)
 	}
 
 	big := size * supersample
 	canvas := image.NewRGBA(image.Rect(0, 0, big, big))
 	draw.Draw(canvas, canvas.Bounds(), image.NewUniform(color.White), image.Point{}, draw.Src)
-	drawCircle(canvas, bg)
+	drawCircleFilledStroked(canvas, style.Fill, style.Main, groupCircleStrokeRatio)
 
-	// 图标缩放到圆内约 58%，居中叠加；图标自带 alpha，xdraw.Over 只在剪影处覆盖白色，
-	// 圆其余部分保留 bg。
-	const glyphRatio = 0.58
-	gs := int(float64(big) * glyphRatio)
-	off := (big - gs) / 2
-	dstRect := image.Rect(off, off, off+gs, off+gs)
-	xdraw.CatmullRom.Scale(canvas, dstRect, icon, icon.Bounds(), xdraw.Over, nil)
+	backTint := tintMask(back, style.IconBack)
+	frontTint := tintMask(front, style.Main)
+	xdraw.CatmullRom.Scale(canvas, canvas.Bounds(), backTint, backTint.Bounds(), xdraw.Over, nil)
+	xdraw.CatmullRom.Scale(canvas, canvas.Bounds(), frontTint, frontTint.Bounds(), xdraw.Over, nil)
 
 	out := image.NewRGBA(image.Rect(0, 0, size, size))
 	xdraw.CatmullRom.Scale(out, out.Bounds(), canvas, canvas.Bounds(), xdraw.Over, nil)
@@ -272,4 +308,27 @@ func renderIconSized(bg color.RGBA, size int) ([]byte, error) {
 		return nil, fmt.Errorf("avatarrender: encode png: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+func tintMask(mask image.Image, c color.RGBA) *image.RGBA {
+	bounds := mask.Bounds()
+	out := image.NewRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r, g, b, _ := mask.At(x, y).RGBA()
+			alpha := uint8(max16(r, g, b) >> 8)
+			out.SetRGBA(x-bounds.Min.X, y-bounds.Min.Y, color.RGBA{R: c.R, G: c.G, B: c.B, A: alpha})
+		}
+	}
+	return out
+}
+
+func max16(a, b, c uint32) uint32 {
+	if b > a {
+		a = b
+	}
+	if c > a {
+		a = c
+	}
+	return a
 }

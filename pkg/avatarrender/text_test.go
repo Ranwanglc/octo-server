@@ -117,6 +117,35 @@ func TestColorByIndex(t *testing.T) {
 	}
 }
 
+func TestGroupStylePalette(t *testing.T) {
+	if len(groupFillPalette) != len(palette) {
+		t.Fatalf("groupFillPalette len = %d, want %d", len(groupFillPalette), len(palette))
+	}
+	if len(groupIconBackPalette) != len(palette) {
+		t.Fatalf("groupIconBackPalette len = %d, want %d", len(groupIconBackPalette), len(palette))
+	}
+	for i := range palette {
+		style, ok := GroupStyleByIndex(i)
+		if !ok {
+			t.Fatalf("GroupStyleByIndex(%d) ok=false, want true", i)
+		}
+		if style.Main != palette[i] {
+			t.Fatalf("GroupStyleByIndex(%d).Main = %v, want %v", i, style.Main, palette[i])
+		}
+		if style.Fill != groupFillPalette[i] {
+			t.Fatalf("GroupStyleByIndex(%d).Fill = %v, want %v", i, style.Fill, groupFillPalette[i])
+		}
+		if style.IconBack != groupIconBackPalette[i] {
+			t.Fatalf("GroupStyleByIndex(%d).IconBack = %v, want %v", i, style.IconBack, groupIconBackPalette[i])
+		}
+	}
+	for _, bad := range []int{-1, len(palette), len(palette) + 1} {
+		if _, ok := GroupStyleByIndex(bad); ok {
+			t.Fatalf("GroupStyleByIndex(%d) ok=true, want false", bad)
+		}
+	}
+}
+
 func TestRenderable(t *testing.T) {
 	tests := []struct {
 		name string

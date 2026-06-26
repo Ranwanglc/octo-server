@@ -31,7 +31,7 @@ func TestGenerateGroupSamples(t *testing.T) {
 	}
 	for _, s := range samples {
 		text := GroupText(s.name)
-		data, err := RenderGroup(Options{Text: text, Bg: ColorForSeed(s.groupNo), Size: 200})
+		data, err := RenderGroup(text, GroupStyleForSeed(s.groupNo), 200)
 		if err != nil {
 			t.Fatalf("render %s: %v", s.name, err)
 		}
@@ -41,7 +41,7 @@ func TestGenerateGroupSamples(t *testing.T) {
 	}
 	// 图标兜底样张（群名为空），覆盖几个色板色。
 	for _, gno := range []string{"icon_a", "icon_b", "icon_c"} {
-		data, err := RenderIcon(ColorForSeed(gno))
+		data, err := RenderIcon(GroupStyleForSeed(gno))
 		if err != nil {
 			t.Fatalf("render icon %s: %v", gno, err)
 		}

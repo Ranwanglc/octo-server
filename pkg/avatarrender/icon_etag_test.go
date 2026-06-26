@@ -7,7 +7,7 @@ import (
 )
 
 func TestRenderIconProducesValidPNG(t *testing.T) {
-	data, err := RenderIcon(ColorForSeed("g1"))
+	data, err := RenderIcon(GroupStyleForSeed("g1"))
 	if err != nil {
 		t.Fatalf("RenderIcon: %v", err)
 	}
@@ -20,12 +20,32 @@ func TestRenderIconProducesValidPNG(t *testing.T) {
 	}
 }
 
-func TestRenderIconDeterministic(t *testing.T) {
-	a, err := RenderIcon(ColorForSeed("g2"))
+func TestRenderIconUsesGroupStyleAndTwoToneGlyph(t *testing.T) {
+	style := groupStyleByIndexForTest(t, 0)
+	data, err := RenderIcon(style)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := RenderIcon(ColorForSeed("g2"))
+	img, err := png.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCloseColor(t, img.At(100, 20), style.Fill, "icon circle fill")
+	assertCloseColor(t, img.At(100, 2), style.Main, "icon circle stroke")
+	if got := countClosePixels(img, style.IconBack); got < 30 {
+		t.Fatalf("icon back color pixels = %d, want >= 30", got)
+	}
+	if got := countClosePixels(img, style.Main); got < 30 {
+		t.Fatalf("icon main color pixels = %d, want >= 30", got)
+	}
+}
+
+func TestRenderIconDeterministic(t *testing.T) {
+	a, err := RenderIcon(GroupStyleForSeed("g2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := RenderIcon(GroupStyleForSeed("g2"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,20 +56,20 @@ func TestRenderIconDeterministic(t *testing.T) {
 
 func TestETag(t *testing.T) {
 	// 弱验证符格式：W/"xxxxxxxx"。
-	e := ETag("group-name-v1", "g1", "seed", "研发")
+	e := ETag("group-name-v2", "g1", "seed", "研发")
 	if len(e) < 4 || e[:3] != `W/"` || e[len(e)-1] != '"' {
 		t.Fatalf("ETag format = %q, want W/\"...\"", e)
 	}
 	// 稳定：同输入同 ETag。
-	if e2 := ETag("group-name-v1", "g1", "seed", "研发"); e != e2 {
+	if e2 := ETag("group-name-v2", "g1", "seed", "研发"); e != e2 {
 		t.Fatalf("ETag not stable: %q vs %q", e, e2)
 	}
 	// 任一因子变化 → ETag 变化（文字、颜色、seed、版本）。
 	for _, diff := range [][]string{
-		{"group-name-v1", "g1", "seed", "产品"}, // 文字
-		{"group-name-v1", "g1", "idx3", "研发"}, // 颜色
-		{"group-name-v1", "gX", "seed", "研发"}, // seed
-		{"group-icon-v1", "g1", "seed", "研发"}, // 渲染模式版本
+		{"group-name-v2", "g1", "seed", "产品"}, // 文字
+		{"group-name-v2", "g1", "idx3", "研发"}, // 颜色
+		{"group-name-v2", "gX", "seed", "研发"}, // seed
+		{"group-icon-v2", "g1", "seed", "研发"}, // 渲染模式版本
 	} {
 		if got := ETag(diff...); got == e {
 			t.Fatalf("ETag collision for %v", diff)
@@ -58,7 +78,7 @@ func TestETag(t *testing.T) {
 }
 
 func TestIfNoneMatch(t *testing.T) {
-	etag := ETag("group-name-v1", "g1", "seed", "研发")
+	etag := ETag("group-name-v2", "g1", "seed", "研发")
 	tests := []struct {
 		name   string
 		header string
