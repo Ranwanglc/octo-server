@@ -300,6 +300,11 @@ func (rb *Robot) Route(r *wkhttp.WKHttp) {
 	if err := rb.insertSystemRobot(); err != nil {
 		rb.Error("初始化系统机器人失败", zap.Error(err))
 	}
+
+	// OCT-5: 自举独立的"总结助手"账号（幂等；未配置 SUMMARY_BOT_* 时静默跳过）。
+	if err := rb.insertSummaryRobot(); err != nil {
+		rb.Error("初始化总结助手失败", zap.Error(err))
+	}
 }
 
 func (rb *Robot) streamStart(c *wkhttp.Context) {

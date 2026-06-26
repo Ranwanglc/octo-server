@@ -207,6 +207,9 @@ func (ba *BotAPI) Route(r *wkhttp.WKHttp) {
 	botAPI := r.Group("/v1/bot", ba.authBot())
 	{
 		botAPI.POST("/sendMessage", ba.sendMessage)
+		// OCT-5: 总结助手好友关系 ensure（DM 可达前置）。端点内部按 UID 白名单
+		// 仅放行配置中的总结助手 bot；其余 bot 调用返回 403。
+		botAPI.POST("/ensureFriend", ba.ensureFriend)
 		botAPI.POST("/typing", ba.typing)
 		botAPI.POST("/readReceipt", ba.readReceipt)
 		botAPI.POST("/events", ba.getEvents)

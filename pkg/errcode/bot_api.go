@@ -189,6 +189,17 @@ var (
 		HTTPStatus:     http.StatusForbidden,
 		DefaultMessage: "The bot is not available.",
 	})
+	// ErrBotAPIEnsureFriendForbidden covers the /v1/bot/ensureFriend UID gate:
+	// the endpoint provisions a forced (no opt-in) bidirectional friendship, so
+	// it is restricted to the single configured summary-assistant bot UID. Any
+	// other authenticated bot calling it is rejected here (anti-abuse — without
+	// this gate any valid bot token could force-friend arbitrary users). The
+	// calling robot_id is logged at the call site, never returned.
+	ErrBotAPIEnsureFriendForbidden = register(codes.Code{
+		ID:             "err.server.bot_api.ensure_friend_forbidden",
+		HTTPStatus:     http.StatusForbidden,
+		DefaultMessage: "This bot is not allowed to ensure friendships.",
+	})
 
 	// ---- not found (404) -----------------------------------------------------
 

@@ -993,6 +993,9 @@ other = "无权代表该用户操作。"
 ["err.server.bot_api.bot_unavailable"]
 other = "机器人不可用。"
 
+["err.server.bot_api.ensure_friend_forbidden"]
+other = "该机器人无权建立好友关系。"
+
 ["err.server.bot_api.group_not_found"]
 other = "群组不存在。"
 
