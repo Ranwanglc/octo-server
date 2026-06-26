@@ -132,3 +132,20 @@ func TestGroupAvatarGetNonexistentReturns404(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, w.Code, "nonexistent group must 404, not render a default avatar")
 	require.Empty(t, w.Body.Bytes())
 }
+
+// TestGroupAvatarGetDisbandedReturns404 回归:已解散的群(行仍在但 Status=Disband)同样
+// 必须 404,不得在公开端点把其群名渲成 PNG(信息泄露 + 「已解散」vs「从未存在」枚举)。
+func TestGroupAvatarGetDisbandedReturns404(t *testing.T) {
+	s, ctx := newTestServer(t)
+	require.NoError(t, testutil.CleanAllTables(ctx))
+	g := New(ctx)
+
+	const groupNo = "avatar_get_disbanded_1"
+	require.NoError(t, g.db.Insert(&Model{
+		GroupNo: groupNo, Name: "已解散群", Creator: "c1", Status: GroupStatusDisband,
+	}))
+
+	w := doAvatarGet(t, s.GetRoute(), groupNo, "")
+	require.Equal(t, http.StatusNotFound, w.Code, "disbanded group must 404, not render its name")
+	require.Empty(t, w.Body.Bytes())
+}

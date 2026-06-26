@@ -151,3 +151,15 @@ i18n-lint + 源码守卫；全仓无残留引用（仅说明性注释）。
 
 未纳入本轮(已与维护者对齐,单独处理):公开渲染端点限流(与 UserAvatar 一致,两端点一起)、
 权限不对称(manager vs creator,加注释)、渲染失败 ETag 模式、CRC32→SHA 等 nit。
+
+## Review round 2 fixes (PR #478)
+两位人类 reviewer 在 round-1 修复后又发现一个新 P1(及若干 nit):
+1. **P1 解散群泄露**(`avatarGet`):404 条件由 `groupInfo==nil` 扩为
+   `|| Status==GroupStatusDisband`——否则公开端点会把已解散群的群名渲成 PNG(信息泄露 +
+   「已解散」vs「从未存在」枚举)。沿用本 PR service 写路径已用的 disband 守卫。
+   + `TestGroupAvatarGetDisbandedReturns404`。
+3. **updated_at**(nit):`group.updated_at` 是 DEFAULT 但无 ON UPDATE,列级 UPDATE 不自动
+   刷新,故 `updateAvatarCustom` 显式写 `updated_at=time.Now()`。
+4. **哨兵不对称**(nit):`checkAvatar` 注释说明创建拒 -1、改群收 -1/"" 清除的刻意差异。
+延后(reviewer 认可非阻断):version 并发单调性、渲染失败 304、VARCHAR(32) 留头、公开端点
+限流(与 UserAvatar 一起)、强 ETag。

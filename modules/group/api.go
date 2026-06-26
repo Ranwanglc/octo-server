@@ -397,10 +397,11 @@ func (g *Group) avatarGet(c *wkhttp.Context) {
 		c.Writer.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	// 群不存在 → 404（与 UserAvatar 对未知用户一致），不再为任意 group_no 渲染默认图，
-	// 避免把「不存在」变成「可渲染内容」的枚举/无谓渲染面。系统群 / org_ / dept_ 已在
-	// 上方静态分支处理，到这里必为普通群。
-	if groupInfo == nil {
+	// 群不存在或已解散 → 404（与 UserAvatar 对未知用户、以及本模块 getGroupInfo /
+	// UpdateGroupAvatarCustom 等对 GroupStatusDisband 的处理一致），不再为其渲染默认图：
+	// 否则公开未鉴权端点会把已解散群的群名前 4 字渲成 PNG（信息泄露 + 可区分「已解散」与
+	// 「从未存在」的枚举面）。系统群 / org_ / dept_ 已在上方静态分支处理，到这里必为普通群。
+	if groupInfo == nil || groupInfo.Status == GroupStatusDisband {
 		c.Writer.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -4161,6 +4162,10 @@ func (g groupReq) Check() error {
 // checkAvatar 校验二次弹窗的自定义头像参数，返回越界字段名（供 Details.field）。
 // ok=true 表示合法。两者均为可选：avatar_text 空、avatar_color 不传即“未自定义”，
 // 渲染时分别回退到群名前 4 字 / ColorForSeed(group_no)。不静默截断，超限直接拒绝。
+//
+// 哨兵约定（创建 vs 改群刻意不对称）：创建无既有值可清除，故 avatar_color 仅接受
+// [0,palette)（-1 在此被拒）；改群额外接受 "-1" / "" 表示清除自定义色回退派生。
+// 客户端把已清除状态回灌到创建/克隆流程时需注意：传 -1 会被创建接口拒绝，应改为不传。
 func (g groupReq) checkAvatar() (field string, ok bool) {
 	if avatarrender.VisibleRuneCount(g.AvatarText) > 4 {
 		return "avatar_text", false

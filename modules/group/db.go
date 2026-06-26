@@ -326,7 +326,12 @@ func (d *DB) updateAvatar(avatar string, avatarVersion int64, groupNo string) er
 // 为 true 时写 avatar_color（*int，nil → NULL 清除自定义色）；始终 bump version。
 // 列级更新避免「读-改-写」竞态——并发只改文字 / 只改色不会互相覆盖对方的列。
 func (d *DB) updateAvatarCustom(groupNo string, text *string, setColor bool, color *int, version int64) error {
-	setMap := map[string]interface{}{"version": version}
+	// updated_at 列是 DEFAULT CURRENT_TIMESTAMP 但**无** ON UPDATE，列级 UPDATE 不会自动
+	// 刷新，故显式写入，保证 GroupResp.updated_at 反映本次自定义头像变更。
+	setMap := map[string]interface{}{
+		"version":    version,
+		"updated_at": time.Now(),
+	}
 	if text != nil {
 		setMap["avatar_text"] = *text
 	}
