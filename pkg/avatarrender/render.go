@@ -313,6 +313,27 @@ func renderIconSized(style GroupStyle, size int) ([]byte, error) {
 func tintMask(mask image.Image, c color.RGBA) *image.RGBA {
 	bounds := mask.Bounds()
 	out := image.NewRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
+	if nm, ok := mask.(*image.NRGBA); ok {
+		// 快路径：直读 NRGBA.Pix，避免 mask.At() 每像素把颜色装箱进 color.Color
+		// 接口（800×800 mask ≈ 64 万次/张分配）。复刻 color.NRGBA.RGBA() 的预乘后
+		// max(r,g,b) 作为覆盖 alpha，输出与通用路径逐字节一致。
+		w, h := bounds.Dx(), bounds.Dy()
+		for y := 0; y < h; y++ {
+			si := nm.PixOffset(bounds.Min.X, bounds.Min.Y+y)
+			di := out.PixOffset(0, y)
+			for x := 0; x < w; x++ {
+				alpha := premulMax(uint32(nm.Pix[si]), uint32(nm.Pix[si+1]), uint32(nm.Pix[si+2]), uint32(nm.Pix[si+3]))
+				out.Pix[di] = c.R
+				out.Pix[di+1] = c.G
+				out.Pix[di+2] = c.B
+				out.Pix[di+3] = uint8(alpha >> 8)
+				si += 4
+				di += 4
+			}
+		}
+		return out
+	}
+	// 通用回退路径（非 NRGBA 解码结果）：行为与历史一致。
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
 			r, g, b, _ := mask.At(x, y).RGBA()
@@ -321,6 +342,18 @@ func tintMask(mask image.Image, c color.RGBA) *image.RGBA {
 		}
 	}
 	return out
+}
+
+// premulMax 复刻 color.NRGBA.RGBA() 的「预乘 alpha 后取 max(r,g,b)」，返回 16-bit。
+// 用于从非预乘 NRGBA 字节直接求白色/灰度剪影的覆盖 alpha，避免接口装箱。
+func premulMax(r8, g8, b8, a8 uint32) uint32 {
+	r := r8 | r8<<8
+	r = r * a8 / 0xff
+	g := g8 | g8<<8
+	g = g * a8 / 0xff
+	b := b8 | b8<<8
+	b = b * a8 / 0xff
+	return max16(r, g, b)
 }
 
 func max16(a, b, c uint32) uint32 {
