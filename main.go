@@ -193,6 +193,10 @@ func runAPI(ctx *config.Context) {
 	// scrape 时读取的 Collector,不起后台 goroutine。此处 rlRedis 与 ctx.DB().DB
 	// 均已就绪,且在 api.Route 之前完成注册。
 	metrics.NewDependencyMetrics(prometheus.DefaultRegisterer)
+	// 头像渲染缓存指标(issue#480):命中率 / 渲染耗时 / inflight / 信号量等待 /
+	// singleflight 合并 / 304。由 modules/user 的 avatarCache 经包级 Observe 函数灌入;
+	// 此处注册即可,未注册前这些 Observe 为 no-op,不影响已构造的 cache。
+	metrics.NewAvatarMetrics(prometheus.DefaultRegisterer)
 	// 把 octo-lib 客户端接缝的耗时回调接到 DependencyMetrics:
 	//   - MySQL: db.NewMySQL 的 connect/query 计时 → dependency="mysql"
 	//   - Redis: pkg/redis 客户端每条命令计时 → dependency="redis"

@@ -143,10 +143,10 @@ func TestRenderFanoutStarvesVictim(t *testing.T) {
 	}
 }
 
-// TestBytesCacheEliminatesStarvation 验证修复方向:同样的扇出,但渲染结果走一次性
-// bytes 缓存(render-once + 复用,等价于 LRU cache + singleflight 的效果)后,
-// CPU 不再被反复渲染占满,受害者基本回到基线。证明「缓存/singleflight」能闭环。
-func TestBytesCacheEliminatesStarvation(t *testing.T) {
+// TestCacheEliminatesStarvation 验证修复:同样的扇出,但渲染走真实的 avatarrender.Cache
+// (LRU + singleflight + 渲染信号量)后,CPU 不再被反复渲染占满,受害者基本回到基线。
+// 这测的是实际发布的修复代码,而非临时缓存桩。
+func TestCacheEliminatesStarvation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skip cache validation in -short")
 	}
@@ -162,22 +162,17 @@ func TestBytesCacheEliminatesStarvation(t *testing.T) {
 
 	base := medianVictim(samples, ioRounds, ioRTT)
 
-	// 模拟服务端 bytes 缓存:每个 key 只渲染一次,之后所有请求复用字节(零 CPU)。
-	var mu sync.Mutex
-	cache := map[string][]byte{}
-	getCached := func(seed, text string) []byte {
-		key := text + "|" + seed
-		mu.Lock()
-		b := cache[key]
-		mu.Unlock()
-		if b != nil {
-			return b
-		}
-		out, _ := Render(Options{Text: text, Bg: ColorForSeed(seed)})
-		mu.Lock()
-		cache[key] = out
-		mu.Unlock()
-		return out
+	// 真实修复路径:头像经 Cache.GetOrRender,相同内容 key 命中复用字节、并发冷渲染
+	// 由 singleflight 合并、渲染并发由信号量限制(模拟 2 核留 1 核给其它流量)。
+	cache, err := NewCache(Config{MaxConcurrentRenders: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	getCached := func(seed, text string) {
+		key := text + "|" + seed // 与 ETag 同源的内容 key(此处简化)
+		_, _ = cache.GetOrRender(key, func() ([]byte, error) {
+			return Render(Options{Text: text, Bg: ColorForSeed(seed)})
+		})
 	}
 
 	var done int32
@@ -192,7 +187,7 @@ func TestBytesCacheEliminatesStarvation(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for atomic.LoadInt32(&done) == 0 {
-				_ = getCached(seed, text)
+				getCached(seed, text)
 				atomic.AddInt64(&served, 1)
 			}
 		}()
@@ -203,11 +198,11 @@ func TestBytesCacheEliminatesStarvation(t *testing.T) {
 	wg.Wait()
 
 	ratio := float64(under) / float64(base)
-	t.Logf("带 bytes 缓存的扇出:")
+	t.Logf("经 avatarrender.Cache 的扇出:")
 	t.Logf("  基线                 = %v", base)
 	t.Logf("  缓存扇出下           = %v", under)
 	t.Logf("  放大倍数             = %.1fx (期望接近 1x)", ratio)
-	t.Logf("  缓存命中服务次数     = %d (仅首次每 key 渲染)", atomic.LoadInt64(&served))
+	t.Logf("  缓存命中服务次数     = %d (仅首次每 key 渲染, 共 %d 个 key)", atomic.LoadInt64(&served), cache.Len())
 
 	// 缓存后扇出几乎零 CPU,受害者不应被显著放大。给宽松上限避免抖动误报。
 	if ratio > 1.8 {
