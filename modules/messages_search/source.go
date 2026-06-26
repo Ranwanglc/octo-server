@@ -1,6 +1,9 @@
 package messages_search
 
-import "strconv"
+import (
+	"encoding/json"
+	"strconv"
+)
 
 // Doc mirrors the OpenSearch `_source` shape produced by
 // wukongim-message-indexer (see indexer-os-changes.md §3.2). We only
@@ -63,6 +66,15 @@ type Doc struct {
 	// indexer write — see CONSTRAINTS-2026-06-12 for the transient
 	// fail-open while the field is unwritten.
 	Visibles []string `json:"visibles,omitempty"`
+	// PayloadRaw carries the indexer-preserved original message payload blob
+	// (wukongim-message-indexer writes the full source payload under
+	// `_source.payloadRaw` with mapping `enabled:false`, see indexer
+	// transform/doc.go). It is only consumed by the typed rich-text (type=14)
+	// projection in buildRichTextDetail — the legacy structured `payload.*`
+	// fields above stay authoritative for everything else. Absent on docs
+	// indexed before the indexer started writing the field; downstream
+	// projectors must fail-soft (nil RichText, snippet fallback) in that case.
+	PayloadRaw json.RawMessage `json:"payloadRaw,omitempty"`
 }
 
 // Payload is the structured projection of the message payload. Each typed
@@ -219,6 +231,97 @@ func payloadType(p *Payload) int {
 		return 0
 	}
 	return *p.Type
+}
+
+// RichTextBlock mirrors a single block in a payload.type=14 rich-text
+// message's `content[]`. The JSON tags are aligned with octo-web's
+// RichTextContent.ts / octo-lib common/richtext.go so the search projection
+// returns the same shape the existing channel/sync renderer already consumes.
+// Image/file-specific fields (extension/mime/caption) follow the octo-web
+// schema which extends octo-lib's MVP shape; unknown / unused fields stay
+// omitempty so unrelated block types serialise to the minimal `{type,text}`
+// or `{type,url,...}` form.
+type RichTextBlock struct {
+	Type      string `json:"type"`
+	Text      string `json:"text,omitempty"`
+	URL       string `json:"url,omitempty"`
+	Width     int    `json:"width,omitempty"`
+	Height    int    `json:"height,omitempty"`
+	Size      int64  `json:"size,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Extension string `json:"extension,omitempty"`
+	Mime      string `json:"mime,omitempty"`
+	Caption   string `json:"caption,omitempty"`
+}
+
+// RichTextMentionEntity is one @-mention anchor inside a text block, used by
+// the renderer to highlight the matching `[offset, offset+length)` rune range
+// of the surrounding text.
+type RichTextMentionEntity struct {
+	UID    string `json:"uid"`
+	Offset int    `json:"offset"`
+	Length int    `json:"length"`
+}
+
+// RichTextMention is the payload.mention object: per-user entities plus the
+// three @-all tri-state flags (all / humans / ais). Whole object is optional
+// and missing when the message has no @ mentions.
+type RichTextMention struct {
+	Entities []RichTextMentionEntity `json:"entities,omitempty"`
+	All      int                     `json:"all,omitempty"`
+	Humans   int                     `json:"humans,omitempty"`
+	Ais      int                     `json:"ais,omitempty"`
+}
+
+// RichTextDetail is the typed projection of a rich-text payload exposed under
+// MessageHit.rich_text. Shape matches the channel/sync payload contract so the
+// client can render search hits with the same components as the timeline.
+type RichTextDetail struct {
+	Content []RichTextBlock  `json:"content"`
+	Plain   string           `json:"plain,omitempty"`
+	Mention *RichTextMention `json:"mention,omitempty"`
+}
+
+// buildRichTextDetail extracts the rich-text projection from the indexer's
+// preserved `_source.payloadRaw` blob. Caller must guard with
+// payloadType(...) == payloadTypeRichText — this function does not re-check.
+//
+// Fail-soft contract: returns nil for the empty / unparseable / pre-payloadRaw
+// cases so the caller silently falls back to the existing snippet path:
+//
+//   - raw == nil / len(raw)==0  → nil  (legacy doc indexed before the field)
+//   - json.Unmarshal fails      → nil  (corrupt or unexpected envelope)
+//
+// Backwards compatibility: the rich-text payload's `content` was historically a
+// plain JSON string. New payloads emit an array of RichTextBlock. We branch on
+// the first non-space byte ('[' = array, anything else = string) and normalise
+// the legacy string form into a single `{type:"text", text:<s>}` block. Empty
+// strings collapse to a nil Content slice so the renderer doesn't get a
+// `{type:"text", text:""}` ghost block.
+func buildRichTextDetail(raw json.RawMessage) *RichTextDetail {
+	if len(raw) == 0 {
+		return nil
+	}
+	var p struct {
+		Content json.RawMessage  `json:"content"`
+		Plain   string           `json:"plain"`
+		Mention *RichTextMention `json:"mention"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil
+	}
+	d := &RichTextDetail{Plain: p.Plain, Mention: p.Mention}
+	if len(p.Content) > 0 {
+		if p.Content[0] == '[' {
+			_ = json.Unmarshal(p.Content, &d.Content)
+		} else {
+			var s string
+			if json.Unmarshal(p.Content, &s) == nil && s != "" {
+				d.Content = []RichTextBlock{{Type: "text", Text: s}}
+			}
+		}
+	}
+	return d
 }
 
 // InnerMessage is the per-child shape surfaced under MessageHit.inner_messages

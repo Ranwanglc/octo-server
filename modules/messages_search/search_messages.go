@@ -36,6 +36,12 @@ type MessageHit struct {
 	Width           int            `json:"width,omitempty"`
 	Height          int            `json:"height,omitempty"`
 	DurationMs      int64          `json:"duration_ms,omitempty"`
+	// RichText is the typed projection of a payload.type=14 rich-text message,
+	// emitted only when the hit is rich-text AND the indexer preserved
+	// `_source.payloadRaw`. Older docs (pre-payloadRaw indexer) leave it nil,
+	// in which case the client renders the existing snippet/text fallback.
+	// Non-richtext hits never carry this field.
+	RichText *RichTextDetail `json:"rich_text,omitempty"`
 }
 
 func init() {
@@ -267,6 +273,13 @@ func (h *Handler) singleMessageHit(doc Doc, reqChannelID string, hl map[string][
 		ChannelID:     encodeChannelID(reqChannelID),
 	}
 	applyMediaProjection(&mh, doc.Payload)
+	// Rich-text projection runs as an additive layer: message_kind stays "text"
+	// (the swagger enum is locked at ["text","forward"]) and snippet remains
+	// the highlight/text fallback. A non-nil rich_text signals the client to
+	// render via the structured pipeline; nil falls back to snippet.
+	if payloadType(doc.Payload) == payloadTypeRichText {
+		mh.RichText = buildRichTextDetail(doc.PayloadRaw)
+	}
 	return mh
 }
 

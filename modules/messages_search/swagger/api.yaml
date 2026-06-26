@@ -541,6 +541,15 @@ definitions:
           Only present when message_kind="video" — i.e. on /_search_all
           browse mode (no keyword) and /_search_around video hits. Omitted
           on image / text / forward hits.
+      rich_text:
+        $ref: "#/definitions/RichTextDetail"
+        description: |
+          Typed projection of a payload.type=14 rich-text message, extracted
+          from the indexer-preserved `_source.payloadRaw` blob. Emitted ONLY
+          when the hit is rich-text AND payloadRaw is present; older docs
+          (indexed before the field existed) leave it absent and the client
+          falls back to `snippet`. message_kind stays "text" on rich-text
+          hits so the swagger enum is unchanged.
 
   MediaHit:
     type: object
@@ -636,6 +645,114 @@ definitions:
         $ref: "#/definitions/MessageHit"
       file:
         $ref: "#/definitions/FileHit"
+
+  RichTextDetail:
+    type: object
+    description: |
+      Typed projection of a payload.type=14 rich-text message payload,
+      mirroring the channel/sync rendering contract. Returned under
+      MessageHit.rich_text on rich-text hits whose OS source preserved the
+      original `payloadRaw` blob.
+    required:
+      - content
+    properties:
+      content:
+        type: array
+        description: |
+          Ordered blocks (text / image / file). Block order is the rendered
+          interleave order. Legacy docs with a string `content` are normalised
+          into a single `{type:"text", text:<s>}` block server-side.
+        items:
+          $ref: "#/definitions/RichTextBlock"
+      plain:
+        type: string
+        description: |
+          Server-authoritative plain-text projection of the blocks (with
+          `[图片]` / `[文件]` placeholders), used for quote previews, copy
+          fallback, summarisation, etc. Distinct from the search-side
+          `snippet` — `snippet` is the highlight fragment, `plain` is the
+          payload's own plain string.
+      mention:
+        $ref: "#/definitions/RichTextMention"
+
+  RichTextBlock:
+    type: object
+    required:
+      - type
+    properties:
+      type:
+        type: string
+        description: |
+          Block kind. "text" / "image" / "file" today; renderers must tolerate
+          unknown values (forward-compatible — future block kinds may appear
+          without an API bump).
+      text:
+        type: string
+        description: "Text content (text block)."
+      url:
+        type: string
+        description: |
+          Resource reference (image src / file download). Passed through
+          verbatim from the payload — clients are responsible for resolving it
+          via the auth-aware file URL pipeline.
+      width:
+        type: integer
+        description: "Image width in pixels (image block)."
+      height:
+        type: integer
+        description: "Image height in pixels (image block)."
+      size:
+        type: integer
+        format: int64
+        description: "File size in bytes (file block; optional on image)."
+      name:
+        type: string
+        description: "Original filename / image alt text."
+      extension:
+        type: string
+        description: "File extension (file block) for icon / badge rendering."
+      mime:
+        type: string
+        description: "MIME type (file block, forward-compat)."
+      caption:
+        type: string
+        description: "Inline caption for image / file blocks."
+
+  RichTextMention:
+    type: object
+    description: |
+      @-mention metadata for a rich-text message. Absent when the payload
+      carries no mentions.
+    properties:
+      entities:
+        type: array
+        items:
+          $ref: "#/definitions/RichTextMentionEntity"
+      all:
+        type: integer
+        description: "Legacy @-all flag (compat with the per-channel @all)."
+      humans:
+        type: integer
+        description: "@all-humans tri-state flag."
+      ais:
+        type: integer
+        description: "@all-AIs tri-state flag."
+
+  RichTextMentionEntity:
+    type: object
+    required:
+      - uid
+      - offset
+      - length
+    properties:
+      uid:
+        type: string
+      offset:
+        type: integer
+        description: "Rune offset into the surrounding text block."
+      length:
+        type: integer
+        description: "Rune length of the @-anchor in the surrounding text."
 
   CursorList_MessageHit:
     type: object
