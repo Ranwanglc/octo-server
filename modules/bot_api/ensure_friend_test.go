@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Mininglamp-OSS/octo-lib/config"
+	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/testutil"
 	"github.com/stretchr/testify/assert"
@@ -122,3 +123,105 @@ func TestEnsureFriend_NonSpaceMemberForbidden(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "Not a member of this space")
 	assert.False(t, friendExists(t, ctx, efSummaryBotUID, efOutsiderUID), "non-member must not be force-friended")
 }
+
+// TestEnsureFriend_E2E_SpaceMemberLanded 闭环 PR#483 Jerry-Xin 提的 🔴 blocker：
+// ensureFriend(space_id) 通过 target 成员校验后，必须为 summary bot 在该 Space
+// 落下 space_member 行（role=0 最小权限，status=1 active）。这是后续
+// /v1/bot/sendMessage 的 resolveBotActiveSpaceID 能解析到权威 Space 上下文的
+// 唯一前提（querySpaceIDsByRobotID 走的就是这张表）。
+func TestEnsureFriend_E2E_SpaceMemberLanded(t *testing.T) {
+	t.Setenv("SUMMARY_BOT_UID", efSummaryBotUID)
+	handler, ctx := setupEnsureFriendEnv(t)
+
+	w := doBot(handler, botReq(t, "POST", "/v1/bot/ensureFriend", efSummaryBotToken,
+		map[string]interface{}{"target_uid": efTargetUID, "space_id": efSpaceID}))
+	require.Equalf(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var count int
+	err := ctx.DB().SelectBySql(
+		"SELECT COUNT(*) FROM space_member WHERE space_id=? AND uid=? AND status=1",
+		efSpaceID, efSummaryBotUID,
+	).LoadOne(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "summary bot must have a space_member row in the ensureFriend-validated Space (PR#483 blocker fix)")
+
+	// target 行不受影响（ensureFriend 不动 user 的 space_member）。
+	err = ctx.DB().SelectBySql(
+		"SELECT COUNT(*) FROM space_member WHERE space_id=? AND uid=? AND status=1",
+		efSpaceID, efTargetUID,
+	).LoadOne(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "target user's pre-existing space_member row must remain untouched")
+}
+
+// TestEnsureFriend_E2E_SpaceMemberIdempotent 重复 ensureFriend 不重复插入也不
+// 把已被运维移除的成员行复活（INSERT IGNORE 语义）。
+func TestEnsureFriend_E2E_SpaceMemberIdempotent(t *testing.T) {
+	t.Setenv("SUMMARY_BOT_UID", efSummaryBotUID)
+	handler, ctx := setupEnsureFriendEnv(t)
+
+	for i := 0; i < 3; i++ {
+		w := doBot(handler, botReq(t, "POST", "/v1/bot/ensureFriend", efSummaryBotToken,
+			map[string]interface{}{"target_uid": efTargetUID, "space_id": efSpaceID}))
+		require.Equalf(t, http.StatusOK, w.Code, "call %d body: %s", i, w.Body.String())
+	}
+
+	var count int
+	err := ctx.DB().SelectBySql(
+		"SELECT COUNT(*) FROM space_member WHERE space_id=? AND uid=?",
+		efSpaceID, efSummaryBotUID,
+	).LoadOne(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "repeated ensureFriend calls must not duplicate the summary bot's space_member row")
+}
+
+// TestEnsureFriend_E2E_SendPathPreservesAuthoritativeSpaceID is the contract test
+// Jerry-Xin asked for: ensureFriend(space_id) followed by the bot_api send-path
+// space-injection helpers MUST preserve the authoritative space_id, instead of
+// stripping it because the summary bot has no app_bot row and (before this fix)
+// no space_member row either.
+//
+// We exercise the real resolver + enricher on a real DB session (no stubs) so
+// the test fails exactly the way production would have: stripped payload →
+// missing Space attribution. Both paths are checked:
+//   - X-Space-ID header → isBotSpaceAuthorized (uses space_member query 1)
+//   - no header → querySpaceIDsByRobotID fallback
+func TestEnsureFriend_E2E_SendPathPreservesAuthoritativeSpaceID(t *testing.T) {
+	t.Setenv("SUMMARY_BOT_UID", efSummaryBotUID)
+	handler, ctx := setupEnsureFriendEnv(t)
+
+	w := doBot(handler, botReq(t, "POST", "/v1/bot/ensureFriend", efSummaryBotToken,
+		map[string]interface{}{"target_uid": efTargetUID, "space_id": efSpaceID}))
+	require.Equalf(t, http.StatusOK, w.Code, "ensureFriend pre-step body: %s", w.Body.String())
+
+	// Build a real BotAPI bound to the same test DB so resolveBotActiveSpaceID
+	// and enrichBotPayloadWithSpaceID exercise production SQL — not a fake.
+	ba := &BotAPI{
+		ctx: ctx,
+		db:  newBotAPIDB(ctx),
+		Log: log.NewTLog("BotAPI-ef-e2e"),
+	}
+
+	// Path A: X-Space-ID header (the most likely smart-summary send shape).
+	cHeader := fakeWkContextWithHeader("X-Space-ID", efSpaceID)
+	gotHeader := ba.resolveBotActiveSpaceID(cHeader, efSummaryBotUID)
+	assert.Equalf(t, efSpaceID, gotHeader,
+		"X-Space-ID header path must be honored after ensureFriend lands the space_member row (PR#483 blocker)")
+
+	payloadHeader := map[string]interface{}{"content": "hi", "space_id": "spaceForged"}
+	enrichedHeader := ba.enrichBotPayloadWithSpaceID(cHeader, efSummaryBotUID, payloadHeader)
+	assert.Equalf(t, efSpaceID, enrichedHeader["space_id"],
+		"enrich must overwrite any client-supplied space_id with the server-authoritative one")
+
+	// Path B: no header → fallback to querySpaceIDsByRobotID (the bare send path).
+	cNoHeader := fakeWkContext()
+	gotFallback := ba.resolveBotActiveSpaceID(cNoHeader, efSummaryBotUID)
+	assert.Equalf(t, efSpaceID, gotFallback,
+		"DB fallback path must also resolve the Space after ensureFriend lands the space_member row")
+
+	payloadFallback := map[string]interface{}{"content": "hi"}
+	enrichedFallback := ba.enrichBotPayloadWithSpaceID(cNoHeader, efSummaryBotUID, payloadFallback)
+	assert.Equalf(t, efSpaceID, enrichedFallback["space_id"],
+		"enrich must inject the resolved Space on the no-header path (no fail-closed strip)")
+}
+
