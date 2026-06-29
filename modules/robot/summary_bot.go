@@ -1,12 +1,18 @@
 package robot
 
 import (
+	"context"
+	"fmt"
+	"hash/crc32"
+	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
+	"github.com/Mininglamp-OSS/octo-server/pkg/avatarversion"
 	"go.uber.org/zap"
 )
 
@@ -119,6 +125,12 @@ func (rb *Robot) insertSummaryRobot() error {
 		return err
 	}
 
+	// PR#483 review (Jerry-Xin + OctoBoooot 复核确认 🟡)：SUMMARY_BOT_AVATAR 在
+	// 之前的版本读了但没应用 —— 这一步把配置的 avatar URL 下载并落到对象存储，
+	// 同时把 user 表的 is_upload_avatar / avatar_version 标记好，后续 /users/{uid}/avatar
+	// 取头像能命中 octo 内置 avatar 字节流。best-effort：失败仅 warn，不阻断自举。
+	rb.applySummaryBotAvatar(cfg)
+
 	rb.Info("总结助手自举完成", zap.String("uid", cfg.UID))
 	return nil
 }
@@ -139,14 +151,66 @@ func (rb *Robot) reconcileSummaryRobot(cfg summaryBotConfig, existing *robot) er
 		rb.Warn("总结助手 status 非启用，纠正为启用", zap.String("uid", cfg.UID))
 	}
 
-	if len(fields) == 0 {
-		// 配置一致，无需改动。
-		return nil
+	if len(fields) != 0 {
+		if err := rb.db.updateRobotInfo(cfg.UID, fields); err != nil {
+			rb.Error("总结助手配置纠偏 UPDATE 失败", zap.Error(err))
+			return err
+		}
 	}
 
-	if err := rb.db.updateRobotInfo(cfg.UID, fields); err != nil {
-		rb.Error("总结助手配置纠偏 UPDATE 失败", zap.Error(err))
-		return err
-	}
+	// PR#483 review (Jerry-Xin 🟡)：reconcile 也以配置为准应用 avatar —— 漂移时
+	// （配置改了，部署重启）旧 avatar 会被替换。best-effort：失败仅 warn。
+	rb.applySummaryBotAvatar(cfg)
 	return nil
+}
+
+// applySummaryBotAvatar 把 cfg.Avatar（远程 URL）下载并落到 octo 头像对象存储，
+// 标记对应 user 行 is_upload_avatar=1 / avatar_version=<新版本>。avatar 路径
+// 沿用 modules/user/avatar_path.go 的 `avatar/{crc32(uid)%partition}/{uid}/{ver}.png`
+// 公式（与 api_github.go 创建用户走的同一路径），保证后续
+// /users/{uid}/avatar 取头像能命中。
+//
+// 失败语义：best-effort。任何一步出错（空配置、下载失败、上传失败、DB update 失败）
+// 只 warn，不影响 bot 自举主链路；漂移路径下次启动还会重试。
+func (rb *Robot) applySummaryBotAvatar(cfg summaryBotConfig) {
+	if strings.TrimSpace(cfg.Avatar) == "" {
+		return
+	}
+	downloadCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	imgReader, err := rb.fileService.DownloadImage(cfg.Avatar, downloadCtx)
+	if err != nil || imgReader == nil {
+		rb.Warn("总结助手 avatar 下载失败（best-effort，跳过）",
+			zap.String("uid", cfg.UID), zap.Error(err))
+		return
+	}
+	defer imgReader.Close()
+
+	avatarVersion := avatarversion.New()
+	partition := rb.ctx.GetConfig().Avatar.Partition
+	if partition <= 0 {
+		// 与 modules/user/avatar_path.go 一致的兜底（partition 必须 >0 取模）。
+		partition = 1
+	}
+	avatarID := crc32.ChecksumIEEE([]byte(cfg.UID)) % uint32(partition)
+	objPath := fmt.Sprintf("avatar/%d/%s/%d.png", avatarID, cfg.UID, avatarVersion)
+
+	if _, err := rb.fileService.UploadFile(objPath, "image/png", "", func(w io.Writer) error {
+		_, copyErr := io.Copy(w, imgReader)
+		return copyErr
+	}); err != nil {
+		rb.Warn("总结助手 avatar 上传对象存储失败（best-effort，跳过）",
+			zap.String("uid", cfg.UID), zap.Error(err))
+		return
+	}
+
+	if _, err := rb.ctx.DB().Update("user").SetMap(map[string]interface{}{
+		"is_upload_avatar": 1,
+		"avatar_version":   avatarVersion,
+	}).Where("uid=?", cfg.UID).Exec(); err != nil {
+		rb.Warn("总结助手 avatar user 表标记失败（best-effort，跳过）",
+			zap.String("uid", cfg.UID), zap.Error(err))
+		return
+	}
+	rb.Info("总结助手 avatar 已落库", zap.String("uid", cfg.UID), zap.Int64("avatar_version", avatarVersion))
 }
