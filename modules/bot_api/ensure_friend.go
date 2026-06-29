@@ -11,6 +11,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
 	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
+	pkgspace "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"go.uber.org/zap"
 )
 
@@ -69,6 +70,25 @@ func (ba *BotAPI) ensureFriend(c *wkhttp.Context) {
 	}
 
 	spaceID := strings.TrimSpace(req.SpaceID)
+
+	// P1-3：space 成员校验 —— 当请求带 space_id 时，target_uid 必须是该 Space 的活跃
+	// 成员，否则拒绝。复用发送/可见性路径同款 pkg/space.CheckMembership（与
+	// category/api.go、voice_adapter 等一致），防止借总结助手向非本 Space 用户强制建立
+	// 好友（跨 Space 钓鱼/打扰向量）。spaceID 为空（单 Space/平台级）时跳过，与裸 uid
+	// 发送路径语义一致。
+	if spaceID != "" {
+		isMember, err := pkgspace.CheckMembership(ba.db.session, spaceID, targetUID)
+		if err != nil {
+			ba.Error("ensureFriend space 成员校验失败", zap.String("space_id", spaceID), zap.Error(err))
+			httperr.ResponseErrorL(c, errcode.ErrBotAPIStoreFailed, nil, nil)
+			return
+		}
+		if !isMember {
+			ba.Warn("ensureFriend 目标用户非 space 成员，拒绝", zap.String("space_id", spaceID), zap.String("target_uid", targetUID))
+			httperr.ResponseErrorLWithStatus(c, errcode.ErrBotAPINotSpaceMember, nil, nil)
+			return
+		}
+	}
 
 	// 1. friend 表双向（幂等 InsertOrUpdate）。
 	if err := ba.userService.AddFriend(targetUID, &user.FriendReq{

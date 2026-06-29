@@ -66,6 +66,9 @@ other = "The content exceeds the maximum allowed size."
 ["err.server.bot_api.conversation_not_started"]
 other = "The user has not started a conversation with this bot."
 
+["err.server.bot_api.ensure_friend_forbidden"]
+other = "This bot is not allowed to ensure friendships."
+
 ["err.server.bot_api.file_too_large"]
 other = "The file exceeds the maximum allowed size."
 
