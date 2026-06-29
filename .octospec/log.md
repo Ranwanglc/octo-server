@@ -4,6 +4,19 @@ Change history for this repo's `.octospec/`, following the
 [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
 change-log convention (§7). Newest first.
 
+## 2026-06-27
+
+- **Add** — Task `default-avatar-text-rule`: script-aware 2-glyph text rule for
+  group + personal default avatars. Mixed script → Han only; pure English →
+  initials (camelCase/sep split, ≤2, upper); pure digits → 2; empty/symbol/emoji
+  → icon (group two-person) / ascii (personal) fallback. New
+  `avatarrender.GroupNameText` (前2) + rewritten `IndividualText` (后2) over a
+  shared core; `GroupText` kept as the custom-`avatar_text` normalizer (≤4) and
+  `writeGroupDefaultAvatar` splits custom-text vs auto-name. Cache-version bumped
+  `group-name-v3→v4` and `name-v4→v5` (ETag + CacheKey). Brief + context under
+  `.octospec/tasks/default-avatar-text-rule/`, journal
+  `.octospec/journal/shared/default-avatar-text-rule.md`.
+
 ## 2026-06-25
 
 - **Add** — Task `incoming-webhook-mention-config`: moved the incoming-webhook
@@ -22,6 +35,30 @@ change-log convention (§7). Newest first.
   immediately; DB stays authoritative (auth fails safe to DB on Redis error).
   Safety-net TTL via system_settings (`app_bot.auth_cache_ttl_seconds`, no new
   env var). Regression test asserts a revoked token is rejected on a peer replica.
+- **Update** — Task `group-default-avatar` (increment 4, final): removed the
+  member-avatar 9-grid composite chain now that avatarGet renders on demand —
+  all 5 publish sites + `beginAvatarUpdateEvent`, the `GroupAvatarUpdate` event
+  handler/const/db-helpers, `queryGroupAvatarIsUpload`, dead `memberCount`
+  guards, and two obsolete tests. Kept DownloadAndMakeCompose (other use) and
+  the CMDGroupAvatarUpdate client-refresh CMD. Historical composite groups fall
+  through to the rendered default with no backfill. Feature backend complete;
+  only the placeholder group-icon SVG remains to be swapped.
+- **Update** — Task `group-default-avatar` (increment 3): group-info update
+  (`PUT /v1/groups/:group_no`) now accepts `avatar_text`/`avatar_color`
+  (set/clear, validated), persisted via a dedicated `UpdateGroupAvatarCustom`
+  service + `db.updateAvatarCustom`; clients refreshed via
+  `SendChannelUpdateToGroup`. Composite teardown still pending.
+- **Update** — Task `group-default-avatar` (increment 2): `avatarGet` now
+  server-renders the default group avatar (colored circle + group-name initials,
+  2×2 for CJK / single-line for Latin, group-icon fallback) with weak-ETag/304,
+  keyed on `is_upload_avatar`; uploaded avatars still redirect. `pkg/avatarrender`
+  gains `RenderGroup`/`GroupAvatarLines`, `RenderIcon` (+ placeholder glyph), and
+  shared `ETag`/`IfNoneMatch`. Member-avatar composite teardown still pending.
+- **Creation** — Task `group-default-avatar` (increment 1): create-group API gains
+  optional `avatar_text`/`avatar_color` params persisted via new `group` columns;
+  `pkg/avatarrender` gains `GroupText`/`VisibleRuneCount`/`ColorByIndex`. Brief +
+  journal under `.octospec/tasks/group-default-avatar/`. Follow-ups: avatarGet
+  server-render branch, group-update keys, composite-avatar teardown.
 
 ## 2026-06-24
 

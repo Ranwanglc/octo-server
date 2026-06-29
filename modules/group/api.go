@@ -29,6 +29,7 @@ import (
 	spacemod "github.com/Mininglamp-OSS/octo-server/modules/space"
 	"github.com/Mininglamp-OSS/octo-server/modules/user"
 	"github.com/Mininglamp-OSS/octo-server/pkg/auth"
+	"github.com/Mininglamp-OSS/octo-server/pkg/avatarrender"
 	"github.com/Mininglamp-OSS/octo-server/pkg/avatarversion"
 	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
 	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
@@ -149,10 +150,10 @@ func (g *Group) Route(r *wkhttp.WKHttp) {
 	//   - DM_API_GROUP_INVITE_RPS   每秒填充速率（float，缺省 60.0）
 	//   - DM_API_GROUP_INVITE_BURST 桶容量（int，缺省 200）
 	// 生产环境如需收紧，在部署时设置 env（如 RPS=0.1667 / BURST=5 恢复到 10 req/min）。
-	rlRedis := redis.NewClient(octoredis.MustBuildOptions(g.ctx.GetConfig(), func(o *redis.Options) {
+	rlRedis := octoredis.NewInstrumentedClient(g.ctx.GetConfig(), func(o *redis.Options) {
 		o.MaxRetries = 1
 		o.PoolSize = 10
-	}))
+	})
 	inviteRPS := wkhttp.ParseRPSFromEnv("DM_API_GROUP_INVITE_RPS", 60.0) // 默认 60 rps ≈ 3600 req/min
 	inviteBurst := wkhttp.ParseBurstFromEnv("DM_API_GROUP_INVITE_BURST", 200)
 	groupInviteLimit := r.StrictIPRateLimitMiddleware(context.Background(), rlRedis, "group_invite", inviteRPS, inviteBurst)
@@ -163,6 +164,7 @@ func (g *Group) Route(r *wkhttp.WKHttp) {
 		openGroup.POST("invite/sure", g.groupMemberInviteSure)                 // 确认邀请
 		openGroup.GET("/invite", groupInviteLimit, g.groupInvitePage)          // H5 邀请落地页（公开）
 		openGroup.GET("/invite/detail", groupInviteLimit, g.groupInviteDetail) // 群邀请预览信息（公开）
+		openGroup.GET("/avatar_palette", g.avatarPalette)                      // 群头像色板（公开静态设计色，供前端本地预览/色圈与服务端渲染一致）
 	}
 	// 邀请详情需要认证
 	group.GET("/invites/:invite_no", g.groupMemberInviteDetail) // 获取邀请详情
@@ -390,29 +392,164 @@ func (g *Group) avatarGet(c *wkhttp.Context) {
 		c.Writer.Write(avatarBytes)
 		return
 	}
-	var avatarVersion int64
 	groupInfo, err := g.db.QueryWithGroupNo(groupNo)
 	if err != nil {
 		g.Error("查询群资料错误", zap.String("group_no", groupNo), zap.Error(err))
 		c.Writer.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if groupInfo != nil {
-		avatarVersion = groupInfo.AvatarVersion
+	// 群不存在或已解散 → 404（与 UserAvatar 对未知用户、以及本模块 getGroupInfo /
+	// UpdateGroupAvatarCustom 等对 GroupStatusDisband 的处理一致），不再为其渲染默认图：
+	// 否则公开未鉴权端点会把已解散群的群名前 2 字渲成 PNG（信息泄露 + 可区分「已解散」与
+	// 「从未存在」的枚举面）。系统群 / org_ / dept_ 已在上方静态分支处理，到这里必为普通群。
+	if groupInfo == nil || groupInfo.Status == GroupStatusDisband {
+		c.Writer.WriteHeader(http.StatusNotFound)
+		return
 	}
-	path := g.ctx.GetConfig().GetGroupAvatarFilePath(groupNo, avatarVersion)
-	downloadUrl, err := g.fileService.DownloadURL(path, "")
-	if err != nil {
-		g.Error("获取下载路径失败！", zap.Error(err))
+
+	// 群主已上传自定义头像：重定向到版本化对象存储（沿用历史逻辑）。
+	if groupInfo.IsUploadAvatar == 1 {
+		path := g.ctx.GetConfig().GetGroupAvatarFilePath(groupNo, groupInfo.AvatarVersion)
+		downloadUrl, err := g.fileService.DownloadURL(path, "")
+		if err != nil {
+			g.Error("获取下载路径失败！", zap.Error(err))
+			c.Writer.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if strings.Contains(downloadUrl, "?") {
+			c.Redirect(http.StatusFound, fmt.Sprintf("%s&v=%s", downloadUrl, v))
+		} else {
+			c.Redirect(http.StatusFound, fmt.Sprintf("%s?v=%s", downloadUrl, v))
+		}
+		return
+	}
+
+	// 无自定义上传（含历史合成群、新建群）：服务端实时渲染默认头像——有自定义文字则渲染
+	// 该文字；否则命名群（is_named=1）取群名前 2 字，自动名群（is_named=0）回退双人图标。
+	g.writeGroupDefaultAvatar(c, groupNo, groupInfo)
+}
+
+// writeGroupDefaultAvatar 服务端渲染并返回群默认头像（无自定义上传时）。文字优先级：
+// 自定义 avatar_text > 命名群（is_named=1）的群名前 2 字 > 空（自动名群 → 双人图标）。
+// 颜色优先自定义 avatar_color，否则按 group_no 稳定派生（改名不变色、跨页面一致）。
+//
+// URL 稳定为 groups/{group_no}/avatar，内容随群名/自定义变化，故用内容相关弱 ETag +
+// 短缓存 + must-revalidate：改名后最多 5 分钟内 revalidate 到新图，并支持 304 省渲染。
+// ETag 只依赖输入（无需渲染），故先算 ETag 命中 If-None-Match 时直接 304。
+func (g *Group) writeGroupDefaultAvatar(c *wkhttp.Context, groupNo string, groupInfo *Model) {
+	style := avatarrender.GroupStyleForSeed(groupNo)
+	colorTag := "seed"
+	var text string
+	if groupInfo != nil {
+		// 默认头像取字规则(产品 2026-06-29 定稿)：
+		//   1. 用户在「修改头像」显式设了自定义文字 → 原样渲染(写入时已 ≤4 规范化、不取字);
+		//   2. 否则群是用户**显式起名**(is_named=1) → 取群名前 2 字(script 感知);
+		//   3. 否则(成员名拼接的自动默认名 is_named=0) → text 留空 → 回退双人图标
+		//      (不把「张三、李四、王五」这类拼接名渲成头像文字)。
+		if groupInfo.AvatarText != "" {
+			text = avatarrender.GroupText(groupInfo.AvatarText)
+		} else if groupInfo.IsNamed == 1 {
+			text = avatarrender.GroupNameText(groupInfo.Name)
+		}
+		if groupInfo.AvatarColor != nil {
+			if customStyle, ok := avatarrender.GroupStyleByIndex(*groupInfo.AvatarColor); ok {
+				style = customStyle
+				colorTag = "idx" + strconv.Itoa(*groupInfo.AvatarColor)
+			}
+		}
+	}
+	renderable := avatarrender.Renderable(text)
+
+	// ETag 覆盖决定图像内容的因子：渲染模式版本 + group_no(派生色) + 实际色 + 文字。
+	// 改名/改自定义文字/改 is_named → text 变(或在 name 模式与 icon 模式间切换) → ETag 变；
+	// 改自定义色 → colorTag 变 → ETag 变。命名群走 group-name-v4(+text)、自动名群走
+	// group-icon-v3(无 text)，模式不同因子串天然不同，故两类切换无需 bump 版本。渲染
+	// **视觉**改动(像素变但因子不变，如 #486 透明四角)才必须 bump 版本段。
+
+	etag := avatarrender.ETag("group-icon-v3", groupNo, colorTag)
+	if renderable {
+		etag = avatarrender.ETag("group-name-v4", groupNo, colorTag, text)
+	}
+	c.Header("Content-Disposition", "inline; filename=avatar.png")
+	c.Header("ETag", etag)
+	c.Header("Cache-Control", "public, max-age=300, must-revalidate")
+	if avatarrender.IfNoneMatch(c.GetHeader("If-None-Match"), etag) {
+		c.Status(http.StatusNotModified)
+		return
+	}
+
+	// 非条件 GET（disable-cache / 首屏 / 共享缓存 miss）绕过上面的 304 快路径，落到这里
+	// 真渲染。成员/会话列表扇出下大量并发非条件 GET 会把 CPU 打满、饿死同机其它请求
+	// （issue#480）。渲染统一走进程级共享缓存 GetOrRender（与 user 同一 LRU + 同一渲染
+	// 信号量）：命中复用字节、singleflight 合并冷渲染、信号量限并发，确保一次扇出最多渲
+	// 一张。缓存 key 用 CacheKey（完整原始因子，与 ETag 同因子但**非** CRC32 弱指纹），
+	// 避免 32 位碰撞跨群串图。
+	if renderable {
+		nameKey := avatarrender.CacheKey("group-name-v4", groupNo, colorTag, text)
+		imageData, genErr := avatarrender.GetOrRender(nameKey, func() ([]byte, error) {
+			return avatarrender.RenderGroup(text, style, avatarrender.DefaultSize)
+		})
+		if genErr == nil {
+			c.Data(http.StatusOK, "image/png", imageData)
+			return
+		}
+		// 渲染失败不直接 500，记录后回退群组图标；ETag 改回 icon 模式与内容一致。
+		g.Error("生成群名默认头像失败，回退群组图标", zap.Error(genErr), zap.String("group_no", groupNo))
+		c.Header("ETag", avatarrender.ETag("group-icon-v3", groupNo, colorTag))
+	}
+
+	// 无自定义文字 / 自定义文字不可渲染（如纯 emoji）/ 渲染失败 → 双人图标。
+	iconKey := avatarrender.CacheKey("group-icon-v3", groupNo, colorTag)
+	iconData, iconErr := avatarrender.GetOrRender(iconKey, func() ([]byte, error) {
+		return avatarrender.RenderIcon(style)
+	})
+	if iconErr != nil {
+		g.Error("生成群组图标头像失败", zap.Error(iconErr), zap.String("group_no", groupNo))
 		c.Writer.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	if strings.Contains(downloadUrl, "?") {
-		c.Redirect(http.StatusFound, fmt.Sprintf("%s&v=%s", downloadUrl, v))
-	} else {
-		c.Redirect(http.StatusFound, fmt.Sprintf("%s?v=%s", downloadUrl, v))
-	}
+	c.Data(http.StatusOK, "image/png", iconData)
+}
 
+// avatarPaletteColorResp 是单档群头像配色的对外（JSON）形式，字段下划线命名，与
+// avatarrender.GroupColorHex 一一对应。
+type avatarPaletteColorResp struct {
+	Index    int    `json:"index"`     // 色板下标，与 avatar_color 取值一致
+	Main     string `json:"main"`      // 主题主色 #RRGGBB
+	Fill     string `json:"fill"`      // 圆填充浅色 #RRGGBB
+	IconBack string `json:"icon_back"` // 双人图标后景人浅色 #RRGGBB
+}
+
+// avatarPaletteResp 是 GET /v1/group/avatar_palette 的响应：固定色板的对外契约。
+type avatarPaletteResp struct {
+	Size   int                      `json:"size"`   // 色板档数（= avatar_color 合法上界）
+	Colors []avatarPaletteColorResp `json:"colors"` // 按下标 0..Size 有序
+}
+
+// avatarPalette 返回固定的群头像色板（公开、静态设计 token）。前端用它渲染「修改头像」
+// 的色圈与本地实时预览，使预览与建群/改群后服务端渲染的 PNG 配色完全一致——色板的
+// **唯一数据源**在服务端 avatarrender.palette，前端不再硬编码、不会漂移。公开（不鉴权）：
+// 与已公开的 /v1/groups/:group_no/avatar 渲染端点同级，内容非敏感且需在登录前即可取用。
+func (g *Group) avatarPalette(c *wkhttp.Context) {
+	hex := avatarrender.PaletteHex()
+	colors := make([]avatarPaletteColorResp, len(hex))
+	// 内容相关弱 ETag：把色板版本段 + 全部色值作为因子，色板任意改动即 ETag 变 → 已缓存
+	// 客户端 revalidate 到新色（不会被长缓存钉死旧色，对齐「单一数据源、不漂移」目标）。
+	etagParts := make([]string, 0, len(hex)*3+1)
+	etagParts = append(etagParts, "avatar-palette-v1")
+	for i, h := range hex {
+		colors[i] = avatarPaletteColorResp{Index: h.Index, Main: h.Main, Fill: h.Fill, IconBack: h.IconBack}
+		etagParts = append(etagParts, h.Main, h.Fill, h.IconBack)
+	}
+	etag := avatarrender.ETag(etagParts...)
+	// 固定设计 token：可缓存，但带内容 ETag + must-revalidate，色板变更可及时失效。
+	c.Header("ETag", etag)
+	c.Header("Cache-Control", "public, max-age=300, must-revalidate")
+	if avatarrender.IfNoneMatch(c.GetHeader("If-None-Match"), etag) {
+		c.Status(http.StatusNotModified)
+		return
+	}
+	c.Response(avatarPaletteResp{Size: len(colors), Colors: colors})
 }
 
 func (g *Group) avatarUpload(c *wkhttp.Context) {
@@ -695,6 +832,13 @@ func (g *Group) groupCreate(c *wkhttp.Context) {
 		respondGroupRequestInvalid(c, "")
 		return
 	}
+	if field, ok := req.checkAvatar(); !ok {
+		respondGroupRequestInvalid(c, field)
+		return
+	}
+	// 存清洗后的自定义头像文字（剔除不可见字符、上限 4 可见 rune），与校验口径一致，避免
+	// 零宽/格式字符撑爆 avatar_text VARCHAR(16) 导致 MySQL 截断。
+	req.AvatarText = avatarrender.GroupText(req.AvatarText)
 
 	// 校验 category_id
 	if req.CategoryID != "" {
@@ -792,11 +936,13 @@ func (g *Group) groupCreate(c *wkhttp.Context) {
 
 	// 调用 Service 创建群
 	createResp, err := g.groupService.CreateGroup(&CreateGroupServiceReq{
-		Creator:    creator,
-		Members:    realUids,
-		Name:       req.Name,
-		SpaceID:    req.SpaceID,
-		CategoryID: req.CategoryID,
+		Creator:     creator,
+		Members:     realUids,
+		Name:        req.Name,
+		SpaceID:     req.SpaceID,
+		CategoryID:  req.CategoryID,
+		AvatarText:  req.AvatarText,
+		AvatarColor: req.AvatarColor,
 	})
 	if err != nil {
 		g.Error("创建群失败！", zap.Error(err))
@@ -857,9 +1003,9 @@ func (g *Group) groupUpdate(c *wkhttp.Context) {
 		respondGroupRequestInvalid(c, "")
 		return
 	}
-	// 查询群信息
-	group, err := g.getGroupInfo(groupNo)
-	if err != nil {
+	// 群存在性 + 状态检查（不缓存整行：下方 invite 分支改用列级写，避免用旧快照全列回写
+	// 覆盖掉 name 分支刚提交的 name/is_named，见 DB.UpdateInviteTx 注释）。
+	if _, err := g.getGroupInfo(groupNo); err != nil {
 		respondGroupInfoError(c, err)
 		return
 	}
@@ -880,6 +1026,51 @@ func (g *Group) groupUpdate(c *wkhttp.Context) {
 	nameValue, hasName := groupMap[common.GroupAttrKeyName]
 	noticeValue, hasNotice := groupMap[common.GroupAttrKeyNotice]
 
+	// 自定义群头像文字/颜色（二次弹窗保存）：先在任何 mutation 之前完成解析与校验，构造
+	// avatarReq。这样非法的 avatar 字段会在 name/notice/invite 落库之前返回 400，避免
+	// 「返回 400 却已部分写入群名」的非原子部分写入。avatar_text 空串清除自定义文字（回退
+	// 群名），avatar_color "" / "-1" 清除自定义色（回退派生）。超限直接拒绝，不静默截断。
+	avatarTextValue, hasAvatarText := groupMap[attrKeyAvatarText]
+	avatarColorValue, hasAvatarColor := groupMap[attrKeyAvatarColor]
+	var avatarReq *UpdateGroupAvatarCustomServiceReq
+	if hasAvatarText || hasAvatarColor {
+		avatarReq = &UpdateGroupAvatarCustomServiceReq{
+			GroupNo:      groupNo,
+			OperatorUID:  loginUID,
+			OperatorName: loginName,
+		}
+		if hasAvatarText {
+			if avatarrender.VisibleRuneCount(avatarTextValue) > 4 {
+				respondGroupRequestInvalid(c, attrKeyAvatarText)
+				return
+			}
+			// 存清洗后的文本（剔除不可见字符、上限 4 可见 rune），与校验口径一致，避免零宽/
+			// 格式字符撑爆 avatar_text VARCHAR(16) 导致 MySQL 截断。
+			cleaned := avatarrender.GroupText(avatarTextValue)
+			avatarReq.AvatarText = &cleaned
+		}
+		if hasAvatarColor {
+			ci := -1 // "" / "-1" → 清除
+			if raw := strings.TrimSpace(avatarColorValue); raw != "" {
+				parsed, convErr := strconv.Atoi(raw)
+				if convErr != nil {
+					respondGroupRequestInvalid(c, attrKeyAvatarColor)
+					return
+				}
+				ci = parsed
+			}
+			if ci < -1 || ci >= avatarrender.PaletteSize() {
+				respondGroupRequestInvalid(c, attrKeyAvatarColor)
+				return
+			}
+			avatarReq.SetAvatarColor = true
+			if ci >= 0 {
+				avatarReq.AvatarColor = &ci
+			}
+		}
+	}
+
+	// 校验全部通过后再执行各项写入。
 	// 如果有 name 或 notice，走 Service
 	if hasName || hasNotice {
 		serviceReq := &UpdateGroupInfoServiceReq{
@@ -900,17 +1091,16 @@ func (g *Group) groupUpdate(c *wkhttp.Context) {
 		}
 	}
 
-	// invite 属性单独处理（保留原有事务逻辑）
+	// invite 属性单独处理（保留原有事务逻辑）。列级写仅更新 invite/version，避免覆盖
+	// name 分支刚提交的 name/is_named（见 DB.UpdateInviteTx）。
 	if hasInvite {
 		invite, _ := strconv.ParseInt(inviteValue, 10, 64)
-		group.Invite = int(invite)
 		version, err := g.ctx.GenSeq(common.GroupSeqKey)
 		if err != nil {
 			g.Error("生成序列号失败", zap.Error(err))
 			httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
 			return
 		}
-		group.Version = version
 
 		tx, err := g.ctx.DB().Begin()
 		if err != nil {
@@ -924,10 +1114,10 @@ func (g *Group) groupUpdate(c *wkhttp.Context) {
 				fmt.Fprintf(os.Stderr, "recovered panic in goroutine: %v\n%s\n", err, debug.Stack())
 			}
 		}()
-		err = g.db.UpdateTx(group, tx)
+		err = g.db.UpdateInviteTx(groupNo, int(invite), version, tx)
 		if err != nil {
 			tx.Rollback()
-			g.Error("更新群信息失败！", zap.Error(err), zap.String("group_no", group.GroupNo))
+			g.Error("更新群信息失败！", zap.Error(err), zap.String("group_no", groupNo))
 			httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
 			return
 		}
@@ -955,6 +1145,15 @@ func (g *Group) groupUpdate(c *wkhttp.Context) {
 			return
 		}
 		g.ctx.EventCommit(eventID)
+	}
+
+	// 自定义群头像文字/颜色落库（avatarReq 已在 mutation 前校验通过）。
+	if avatarReq != nil {
+		if err := g.groupService.UpdateGroupAvatarCustom(avatarReq); err != nil {
+			g.Error("更新群头像自定义失败！", zap.Error(err), zap.String("group_no", groupNo))
+			httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
+			return
+		}
 	}
 
 	c.ResponseOK()
@@ -1393,12 +1592,6 @@ func (g *Group) addMembersTxWithSpace(members []string, groupNo string, operator
 		g.Error("查询成员用户信息失败！", zap.Error(err))
 		return nil, errors.New("查询成员用户信息失败！")
 	}
-	// Use transactional count with FOR UPDATE to prevent concurrent capacity bypass
-	memberCount, err := g.db.QueryMemberCountTx(groupNo, tx)
-	if err != nil {
-		g.Error("查询群成员数量失败！", zap.Error(err))
-		return nil, errors.New("查询群成员数量失败！")
-	}
 	/**
 	 将成员信息存到数据库
 	**/
@@ -1497,45 +1690,6 @@ func (g *Group) addMembersTxWithSpace(members []string, groupNo string, operator
 			return nil, errors.New("开启无法添加到群聊事件失败！")
 		}
 	}
-	/**
-	 根据目前成员数量判断是否需要发布更新头像事件,如果群主更新过群头像则忽略
-	**/
-	var groupAvatarEventID int64
-	groupIsUploadAvatar, err := g.db.queryGroupAvatarIsUpload(groupNo)
-	if err != nil {
-		g.Error("查询群头像是否用户上传过失败！", zap.String("group_no", groupNo), zap.Error(err))
-	}
-	if memberCount < 9 && groupIsUploadAvatar != 1 { // 如果群内已存在群数量小于9且群主未更新过群头像 则需要发布生成群头像的事件
-
-		oldMembers, err := g.db.QueryMembersFirstNine(groupNo)
-		if err != nil {
-			g.Error("查询先存成员信息失败！", zap.String("group_no", groupNo), zap.Error(err))
-			return nil, errors.New("查询先存成员信息失败！")
-		}
-		ninceMembers := make([]string, 0, 9)
-		for _, oldMember := range oldMembers {
-			ninceMembers = append(ninceMembers, oldMember.UID)
-		}
-		for _, userBaseVo := range userBaseVos {
-			if len(ninceMembers) >= 9 {
-				break
-			}
-			ninceMembers = append(ninceMembers, userBaseVo.UID)
-		}
-
-		groupAvatarEventID, err = g.ctx.EventBegin(&wkevent.Data{
-			Event: event.GroupAvatarUpdate,
-			Type:  wkevent.CMD,
-			Data: &config.CMDGroupAvatarUpdateReq{
-				GroupNo: groupNo,
-				Members: ninceMembers,
-			},
-		}, tx)
-		if err != nil {
-			g.Error("开启群成员头像更新事件失败！", zap.Error(err))
-			return nil, errors.New("开启群成员头像更新事件失败！")
-		}
-	}
 	// 调用IM的添加订阅者
 	err = g.ctx.IMAddSubscriber(&config.SubscriberAddReq{
 		ChannelID:   groupNo,
@@ -1561,9 +1715,6 @@ func (g *Group) addMembersTxWithSpace(members []string, groupNo string, operator
 	return func() {
 		// 提交事件
 		g.ctx.EventCommit(eventID)
-		if groupAvatarEventID != 0 {
-			g.ctx.EventCommit(groupAvatarEventID)
-		}
 		if unableAddDestroyAccount != 0 {
 			g.ctx.EventCommit(unableAddDestroyAccount)
 		}
@@ -2140,13 +2291,6 @@ func (g *Group) groupScanJoin(c *wkhttp.Context) {
 		return
 	}
 
-	memberCount, err := g.db.QueryMemberCount(groupNo)
-	if err != nil {
-		g.Error("查询成员数量！", zap.Error(err))
-		httperr.ResponseErrorL(c, errcode.ErrGroupQueryFailed, nil, nil)
-		return
-	}
-
 	version, err := g.ctx.GenSeq(common.GroupMemberSeqKey)
 	if err != nil {
 		g.Error("生成序列号失败", zap.Error(err))
@@ -2251,43 +2395,6 @@ func (g *Group) groupScanJoin(c *wkhttp.Context) {
 		httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
 		return
 	}
-	var groupAvatarEventID int64
-
-	groupIsUploadAvatar, err := g.db.queryGroupAvatarIsUpload(groupNo)
-	if err != nil {
-		g.Error("查询群头像是否用户上传过失败！", zap.String("group_no", groupNo), zap.Error(err))
-	}
-
-	if memberCount < 9 && groupIsUploadAvatar != 1 {
-		oldMembers, err := g.db.QueryMembersFirstNine(groupNo)
-		if err != nil {
-			tx.Rollback()
-			g.Error("查询先存成员信息失败！", zap.String("group_no", groupNo), zap.Error(err))
-			httperr.ResponseErrorL(c, errcode.ErrGroupQueryFailed, nil, nil)
-			return
-		}
-		members := make([]string, 0, len(oldMembers)+1)
-		for _, oldMember := range oldMembers {
-			members = append(members, oldMember.UID)
-		}
-		members = append(members, scanerInfo.UID)
-
-		groupAvatarEventID, err = g.ctx.EventBegin(&wkevent.Data{
-			Event: event.GroupAvatarUpdate,
-			Type:  wkevent.CMD,
-			Data: &config.CMDGroupAvatarUpdateReq{
-				GroupNo: groupNo,
-				Members: members,
-			},
-		}, tx)
-		if err != nil {
-			tx.Rollback()
-			g.Error("开启群成员头像更新事件失败！", zap.Error(err))
-			httperr.ResponseErrorL(c, errcode.ErrGroupStoreFailed, nil, nil)
-			return
-		}
-	}
-
 	existDelete, err := g.db.ExistMemberDelete(scaner, groupNo)
 	if err != nil {
 		tx.Rollback()
@@ -2352,9 +2459,6 @@ func (g *Group) groupScanJoin(c *wkhttp.Context) {
 	g.addUsersToGroupThreads(groupNo, []string{scaner})
 
 	g.ctx.EventCommit(eventID)
-	if groupAvatarEventID != 0 {
-		g.ctx.EventCommit(groupAvatarEventID)
-	}
 
 	// YUJ-170 / dmwork-web#1100：scanjoin 成功响应直接回带群所属 Space 信息。
 	// 替换原 ResponseOK() 的空载，为 H5 join_group.html 提供 crossSpace 判定数据，
@@ -3024,11 +3128,6 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 			return
 		}
 	}
-	// 生成群头像更新事件（best-effort，不阻塞退群）
-	groupAvatarEventID, avatarErr := beginAvatarUpdateEvent(g.ctx, g.db, groupNo, nil, []string{loginUID}, tx)
-	if avatarErr != nil {
-		g.Error("开启群头像更新事件失败！", zap.Error(avatarErr))
-	}
 	if err := tx.Commit(); err != nil {
 		tx.RollbackUnlessCommitted()
 		g.Error("提交事务失败！", zap.Error(err))
@@ -3036,9 +3135,6 @@ func (g *Group) groupExit(c *wkhttp.Context) {
 		return
 	}
 	g.ctx.EventCommit(eventID)
-	if groupAvatarEventID != 0 {
-		g.ctx.EventCommit(groupAvatarEventID)
-	}
 
 	// 外部群标记发生变化时，通知成员刷新频道信息
 	if resetExternalGroup {
@@ -4110,10 +4206,12 @@ func (g *Group) fillSpaceRelatedFields(groupNo, groupSpaceID string, resps []mem
 }
 
 type groupReq struct {
-	Name       string   `json:"name"`        // 群名
-	Members    []string `json:"members"`     // 成员uid
-	SpaceID    string   `json:"space_id"`    // Space ID（可选）
-	CategoryID string   `json:"category_id"` // 群聊分组 ID（可选，需配合 space_id 使用）
+	Name        string   `json:"name"`         // 群名
+	Members     []string `json:"members"`      // 成员uid
+	SpaceID     string   `json:"space_id"`     // Space ID（可选）
+	CategoryID  string   `json:"category_id"`  // 群聊分组 ID（可选，需配合 space_id 使用）
+	AvatarText  string   `json:"avatar_text"`  // 自定义群头像文字（可选，最多 4 个中文/英文字符；空=按 is_named 回退：命名群群名/自动名群双人图标）
+	AvatarColor *int     `json:"avatar_color"` // 自定义群头像色板下标（可选，[0,palette)；不传=按 group_no 派生）
 }
 
 func (g groupReq) Check() error {
@@ -4121,6 +4219,23 @@ func (g groupReq) Check() error {
 		return errors.New("群成员不能为空！")
 	}
 	return nil
+}
+
+// checkAvatar 校验二次弹窗的自定义头像参数，返回越界字段名（供 Details.field）。
+// ok=true 表示合法。两者均为可选：avatar_text 空、avatar_color 不传即“未自定义”，
+// 渲染时分别回退到群名前 2 字 / ColorForSeed(group_no)。不静默截断，超限直接拒绝。
+//
+// 哨兵约定（创建 vs 改群刻意不对称）：创建无既有值可清除，故 avatar_color 仅接受
+// [0,palette)（-1 在此被拒）；改群额外接受 "-1" / "" 表示清除自定义色回退派生。
+// 客户端把已清除状态回灌到创建/克隆流程时需注意：传 -1 会被创建接口拒绝，应改为不传。
+func (g groupReq) checkAvatar() (field string, ok bool) {
+	if avatarrender.VisibleRuneCount(g.AvatarText) > 4 {
+		return "avatar_text", false
+	}
+	if g.AvatarColor != nil && (*g.AvatarColor < 0 || *g.AvatarColor >= avatarrender.PaletteSize()) {
+		return "avatar_color", false
+	}
+	return "", true
 }
 
 // 添加或移除黑名单

@@ -23,6 +23,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/source"
 	"github.com/Mininglamp-OSS/octo-server/pkg/avatarrender"
 	"github.com/Mininglamp-OSS/octo-server/pkg/avatarversion"
+	"github.com/Mininglamp-OSS/octo-server/pkg/metrics"
 	octoredis "github.com/Mininglamp-OSS/octo-server/pkg/redis"
 	spacepkg "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	rd "github.com/go-redis/redis"
@@ -160,9 +161,9 @@ func New(ctx *config.Context) *User {
 		spaceSettingDB:           NewSpaceSettingDB(ctx.DB()),
 		verificationDB:           newVerificationDB(ctx),
 		existingTokenSetter: redisExistingTokenSetter{
-			client: rd.NewClient(octoredis.MustBuildOptions(ctx.GetConfig(), func(o *rd.Options) {
+			client: octoredis.NewInstrumentedClient(ctx.GetConfig(), func(o *rd.Options) {
 				o.PoolSize = 10
-			})),
+			}),
 		},
 	}
 	// LanguageService 与 main.go 注入到 CacheTokenParser 的实例独立构造，但共享
@@ -192,10 +193,10 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 	rlCtx := context.Background()
 	// 限流状态存 Redis，多副本共享配额；生命周期跟随进程，与 main.go 的做法一致
 	// PoolSize 显式设 10：理由同 main.go——限流 Lua 脚本短事务，不需要大池。
-	rlRedis := rd.NewClient(octoredis.MustBuildOptions(u.ctx.GetConfig(), func(o *rd.Options) {
+	rlRedis := octoredis.NewInstrumentedClient(u.ctx.GetConfig(), func(o *rd.Options) {
 		o.MaxRetries = 1
 		o.PoolSize = 10
-	}))
+	})
 	// burst 取小值：人类正常重试容忍 + 不给攻击者初始白嫖窗口
 	// tag 用稳定字符串分离 keyspace；注意 register 和 sms 参数相同但语义不同，必须分开
 	loginLimit := r.StrictIPRateLimitMiddleware(rlCtx, rlRedis, "login", 10.0/60, 5)       // 10 req/min, burst 5
@@ -303,8 +304,9 @@ func (u *User) Route(r *wkhttp.WKHttp) {
 		v.POST("/user/login/check_phone", loginLimit, u.loginCheckPhone)           //登录验证设备手机号
 
 		// #################### Token / Bot 认证验证（供 Gateway 调用） ####################
-		v.POST("/auth/verify", verifyLimit, u.authVerifyToken)   // 验证用户 token
-		v.POST("/auth/verify-bot", verifyLimit, u.authVerifyBot) // 验证 Bot API Key
+		v.POST("/auth/verify", verifyLimit, u.authVerifyToken)          // 验证用户 token
+		v.POST("/auth/verify-bot", verifyLimit, u.authVerifyBot)        // 验证 Bot API Key
+		v.POST("/auth/verify-api-key", verifyLimit, u.authVerifyAPIKey) // 验证 daemon API Key (uk_)
 		// ↑ Verify endpoints are rate-limited (1000 req/min/IP). For production,
 		// restrict access at network level (nginx allow internal IPs only) or
 		// add X-Internal-Key header validation.
@@ -566,7 +568,7 @@ func (u *User) UserAvatar(c *wkhttp.Context) {
 			ph = fmt.Sprintf("/avatar/default/test (%d).jpg", avatarID)
 			downloadUrl = strings.ReplaceAll(u.ctx.GetConfig().Avatar.DefaultBaseURL, "{avatar}", fmt.Sprintf("%d", avatarID))
 		} else {
-			// 本地生成默认头像：固定色板按 uid 取色（改名不变色）+ 昵称后两字白字。
+			// 本地生成默认头像：固定色板按 uid 取色（改名不变色）+ 昵称取字（script 感知后 2）白字。
 			// 昵称为空、或截出的文字含本字体无字形的字符（典型是纯 emoji）时，回退到
 			// 基于 uid 的 ASCII 兜底图，保证不裂图、不出豆腐块。
 			//
@@ -588,20 +590,35 @@ func (u *User) UserAvatar(c *wkhttp.Context) {
 			text := avatarrender.IndividualText(userInfo.Name)
 			nameMode := avatarrender.Renderable(text)
 			// ETag 覆盖决定内容的因子：渲染模式版本 + uid(决定颜色) + 展示文字。
+			// 渲染**视觉/取字规则**改动(像素变但因子不变，如 #486 透明四角、本次取字改版)必须
+			// bump 版本段；ascii-v1 走 generateDefaultAvatar，本次未改其像素，故不 bump。
+			// name-v5: 昵称取字改为 script 感知(混排只取中文、纯英文首字母缩写)，原 v4 取后 2。
 			etag := avatarETag("ascii-v1", uid)
 			if nameMode {
-				etag = avatarETag("name-v3", uid, text)
+				etag = avatarETag("name-v5", uid, text)
 			}
 			setAvatarHeaders(etag)
 			if ifNoneMatchSatisfied(c.GetHeader("If-None-Match"), etag) {
+				metrics.ObserveAvatarNotModified()
 				c.Status(http.StatusNotModified)
 				return
 			}
 
+			// 非条件 GET（disable-cache / 首屏 / 共享缓存 miss）会绕过上面的 304 快路径，
+			// 落到这里真渲染。成员列表扇出下大量并发非条件 GET 会把 CPU 打满、饿死同机
+			// 其它请求（issue#480）。渲染统一走共享缓存：相同内容 key 命中复用字节、
+			// singleflight 合并并发冷渲染、渲染信号量限并发，确保一次扇出最多渲一张。
+			//
+			// 缓存 key 用 avatarCacheKey（完整原始因子），**不是**上面的 CRC32 ETag：
+			// ETag 是 32 位弱指纹，作共享缓存身份会碰撞→跨用户串图（PR#481 评审）。
+			// 两者覆盖同一组因子（渲染版本/uid→色/文字），仅 ETag 头继续用 CRC32。
 			if nameMode {
-				imageData, genErr := avatarrender.Render(avatarrender.Options{
-					Text: text,
-					Bg:   avatarrender.ColorForSeed(uid),
+				nameKey := avatarCacheKey("name-v5", uid, text)
+				imageData, genErr := avatarrender.GetOrRender(nameKey, func() ([]byte, error) {
+					return avatarrender.Render(avatarrender.Options{
+						Text: text,
+						Bg:   avatarrender.ColorForSeed(uid),
+					})
 				})
 				if genErr == nil {
 					c.Data(http.StatusOK, "image/png", imageData)
@@ -611,7 +628,10 @@ func (u *User) UserAvatar(c *wkhttp.Context) {
 				u.Error("生成昵称默认头像失败，回退兜底", zap.Error(genErr), zap.String("uid", uid))
 				c.Header("ETag", avatarETag("ascii-v1", uid))
 			}
-			imageData, genErr := generateDefaultAvatar(uid)
+			asciiKey := avatarCacheKey("ascii-v1", uid)
+			imageData, genErr := avatarrender.GetOrRender(asciiKey, func() ([]byte, error) {
+				return generateDefaultAvatar(uid)
+			})
 			if genErr != nil {
 				u.Error("生成默认头像失败", zap.Error(genErr))
 				c.Writer.WriteHeader(http.StatusInternalServerError)
@@ -3979,9 +3999,34 @@ type authVerifyTokenResp struct {
 	Name      string     `json:"name"`
 	Role      string     `json:"role"`
 	OwnedBots []ownedBot `json:"owned_bots"`
+
+	// v3 §4.5 (fleet fail-closed signal): explicit flag set true when
+	// the caller passed ?include=context AND server is v2-or-later.
+	// Lets fleet/matter distinguish "server returned empty spaces (caller
+	// truly belongs to zero spaces)" from "pre-v2 server omitted the field
+	// because it doesn't speak the contract" — without this, both shapes
+	// look identical after omitempty erases empty []. Fleet uses this to
+	// pick fail-closed (v2) vs fallback (pre-v2) for X-Space-Id checks.
+	ContextIncluded bool `json:"context_included,omitempty"`
+
+	// Populated only when ?include=context. Kept as separate fields so the
+	// default response shape (UID/Name/Role/OwnedBots) is byte-identical to
+	// the pre-v2 contract — old IM clients and admin tools rely on the
+	// existing schema. fleet/matter middleware passes ?include=context to
+	// get these extra fields and stops reading the legacy OwnedBots list
+	// (which lacks per-space grouping).
+	Spaces           []string            `json:"spaces,omitempty"`
+	OwnedBotsBySpace map[string][]string `json:"owned_bots_by_space,omitempty"`
 }
 
 // authVerifyToken validates a user token and returns identity + owned bots.
+//
+// Query params:
+//   - include=context : also return spaces (server-validated space membership
+//     list) and owned_bots_by_space (map keyed by space_id, listing bot_uids
+//     the user owns in each space). fleet/matter middleware passes this to
+//     enforce X-Space-Id membership and per-handler bot ownership; older
+//     callers (IM, admin) omit the param and keep the original schema.
 func (u *User) authVerifyToken(c *wkhttp.Context) {
 	var req authVerifyTokenReq
 	if err := c.BindJSON(&req); err != nil {
@@ -4015,6 +4060,22 @@ func (u *User) authVerifyToken(c *wkhttp.Context) {
 	}
 
 	// Query owned bots: robot.creator_uid = uid
+	//
+	// v3.3.5 — load OwnedBots UNCONDITIONALLY (revert v3.3.4 N1).
+	//
+	// v3.3.4 attempted to skip this load on the `?include=context` path
+	// as a "pure latency win" — assuming context callers only consume
+	// the new `owned_bots_by_space` map. That assumption was wrong:
+	// matter's `applyUserResult` (internal/auth/middleware.go) builds
+	// `related_uids` from top-level `OwnedBots` regardless of
+	// `ContextIncluded`, and `related_uids` feeds the matter-access gate
+	// (`canAccessMatter` → `isCreator`/`HasAccess` with `CallerUIDs IN ?`).
+	// Emptying OwnedBots on the context path fail-closed web user access
+	// to matters created by the user's own bots (yujiawei v3.3.4 P1).
+	//
+	// If we ever want to do this optimization, it must be a coordinated
+	// PR that first migrates matter's applyUserResult to read
+	// `OwnedBotsBySpace` (flatten map values). See plan §9.
 	type botRow struct {
 		RobotID string `db:"robot_id"`
 		Name    string `db:"name"`
@@ -4031,7 +4092,166 @@ func (u *User) authVerifyToken(c *wkhttp.Context) {
 		}
 	}
 
+	// Opt-in: fleet/matter ask for full context to drive per-request
+	// authorization (X-Space-Id check + bot ownership check). On failure
+	// we leave the new fields empty rather than 500 — middleware will
+	// reject downstream authz that depends on them, which is safer than
+	// masking the issue.
+	if c.Query("include") == "context" {
+		spaces, ownedByspace, ctxErr := u.queryUserSpaceContext(resp.UID)
+		if ctxErr != nil {
+			u.Warn("authVerifyToken include=context 查询失败",
+				zap.Error(ctxErr), zap.String("uid", resp.UID))
+			spaces = []string{}
+			ownedByspace = map[string][]string{}
+		}
+		resp.ContextIncluded = true
+		resp.Spaces = spaces
+		resp.OwnedBotsBySpace = ownedByspace
+	}
+
 	c.Response(resp)
+}
+
+// queryUserSpaceContext fetches (spaces, owned_bots_by_space) for a user
+// in one round trip — two SELECTs but no N+1. Used by authVerifyToken when
+// ?include=context is set.
+//
+// Note: owned_bots are grouped by space_id via the bot's space_member row
+// (bot is itself a user; robot table has no space_id). Mirrors the join
+// pattern in botfather/db.go queryRobotsByCreatorUIDAndSpaceID.
+func (u *User) queryUserSpaceContext(uid string) ([]string, map[string][]string, error) {
+	// (1) spaces the user is an active member of.
+	//
+	// v3.3.1 §A.1 (Jerry-Xin Critical 三审): INNER JOIN space ON s.status=1
+	// closes the gap where a soft-deleted space (s.status=0) with a lingering
+	// active space_member row would otherwise surface in `spaces` and
+	// downstream `owned_bots_by_space`. Symmetric with the api_key path
+	// (verify-api-key step 2 + resolve.go assertSpaceMember) which v3 §2.3
+	// already hardened; this is the token-path call site v3 missed in
+	// the same function.
+	//
+	// v3.3.1 §A.2 (yujiawei P1 三审): silent-truncation guard. The previous
+	// LIMIT 100 with no over-fetch + no warn matched the bots query's pre-v3.2
+	// shape; v3.2 had hardened bots with LIMIT 1001 + warn but the symmetric
+	// spaces cap was missed in the same function. spaces feeds the same
+	// derived authz cache (owned_bots_by_space is whitelisted through this
+	// list), so truncation at the spaces side cascades into bots silently.
+	// Over-fetch to LIMIT 101, slice + warn when len > 100. ORDER BY makes
+	// LIMIT deterministic across calls (was random per MySQL engine choice).
+	type spaceRow struct {
+		SpaceID string `db:"space_id"`
+	}
+	const userSpacesLimit = 100
+	var spaceRows []spaceRow
+	_, err := u.db.session.SelectBySql(
+		`SELECT sm.space_id FROM space_member sm
+		 INNER JOIN space s ON s.space_id=sm.space_id AND s.status=1
+		 WHERE sm.uid=? AND sm.status=1
+		 ORDER BY sm.space_id
+		 LIMIT 101`,
+		uid,
+	).Load(&spaceRows)
+	if err != nil {
+		return nil, nil, err
+	}
+	spaces := make([]string, 0, len(spaceRows))
+	for _, r := range spaceRows {
+		spaces = append(spaces, r.SpaceID)
+	}
+	if len(spaces) > userSpacesLimit {
+		u.Warn("queryUserSpaceContext spaces truncated at policy limit",
+			zap.String("uid", uid),
+			zap.Int("limit", userSpacesLimit),
+			zap.Int("returned", len(spaces)))
+		spaces = spaces[:userSpacesLimit]
+	}
+
+	// (2) bots the user created, joined with each bot's space membership.
+	//
+	// v3.2 silent-truncation guard: LIMIT 1001 (not 1000) + warn log when
+	// the result count hits 1001. owned_bots_by_space is fed to fleet/matter
+	// as an authz primitive — silently dropping bots past the limit could
+	// produce "this user owns bot X but the authz cache says they don't",
+	// a notoriously hard-to-diagnose authz hole. We don't raise the limit
+	// (1000 is still the policy cap for one user's bots) but we make the
+	// truncation observable so ops can spot the rare power user hitting it.
+	// v3.3.1 §A.2 yujiawei P2: ORDER BY r.robot_id makes the truncated
+	// window deterministic across calls — same root cause as the spaces
+	// query above.
+	type botSpaceRow struct {
+		RobotID string `db:"robot_id"`
+		SpaceID string `db:"space_id"`
+	}
+	// Policy ceiling on owned (bot, space) PAIRS per user.
+	//
+	// v3.3.6 §P2#2 (yujiawei R2): the SQL below is `SELECT r.robot_id,
+	// sm.space_id FROM robot r INNER JOIN space_member sm ON sm.uid=
+	// r.robot_id` with NO DISTINCT/GROUP BY — a bot in N spaces yields
+	// N rows. The 1000 cap therefore truncates (bot, space) PAIRS, not
+	// distinct bots: a user with 600 bots × avg 2 spaces = 1200 pairs
+	// hits the cap despite owning only 600 distinct bots. Authz stays
+	// fail-safe (truncated pairs fall through to owner_uid SQL filters),
+	// but the metric is pair-count, not bot-count — keep this in mind
+	// when raising the limit or alerting on the warn below.
+	//
+	// Documented in the "Heads-up #2" section of the v3 PR comment
+	// (server PR #290). Raising this requires (a) confirming consumer
+	// side (fleet/matter middleware) handles a larger owned_bots_by_space
+	// payload and (b) updating the warn log threshold below.
+	const ownedBotsLimit = 1000
+	var botRows []botSpaceRow
+	_, err = u.db.session.SelectBySql(
+		`SELECT r.robot_id, sm.space_id FROM robot r
+		 INNER JOIN space_member sm ON sm.uid=r.robot_id AND sm.status=1
+		 WHERE r.creator_uid=? AND r.status=1
+		 ORDER BY r.robot_id
+		 LIMIT 1001`,
+		uid,
+	).Load(&botRows)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(botRows) > ownedBotsLimit {
+		// >1000 means we hit the cap. Truncate to the policy limit so
+		// downstream consumers see a deterministic size, but emit a warn
+		// so ops can react. Authz remains fail-safe (extra bots get no
+		// access via owned_bots_by_space; they fall through to the
+		// pre-v2 related_uids / SQL owner_uid filters). v3.3.6 §P2#2:
+		// the limit is on (bot, space) pairs — a bot in N spaces counts
+		// as N — distinct-bot count may be lower.
+		u.Warn("queryUserSpaceContext owned_bots truncated at policy limit",
+			zap.String("uid", uid),
+			zap.Int("pair_limit", ownedBotsLimit),
+			zap.Int("pairs_returned", len(botRows)),
+			zap.String("note", "limit is (bot,space) pairs, not distinct bots"))
+		botRows = botRows[:ownedBotsLimit]
+	}
+
+	// Initialize map with one bucket per known space so callers always see
+	// a stable map shape (even when a space has no owned bots). v3 §2.4
+	// (Jerry-Xin Critical 2 / yujiawei P2): the bot rows are looked up by
+	// the *bot's* membership only, so a bot the caller owns that also
+	// lives in a space the caller is NOT a member of would otherwise leak
+	// a foreign space_id into owned_bots_by_space (which would then
+	// disagree with the `spaces` list, breaking consumers that use
+	// owned_bots as a derived authz cache). Filter through a whitelist of
+	// the caller's *active* spaces from query (1) so the two fields stay
+	// in lockstep — the sibling queryOwnedBotsBySpace (api_key path) does
+	// this correctly via SQL `AND sm.space_id=?`; token path mirrors here
+	// at the Go layer because it iterates over many spaces.
+	validSpaces := make(map[string]struct{}, len(spaces))
+	ownedByspace := make(map[string][]string, len(spaces))
+	for _, sid := range spaces {
+		validSpaces[sid] = struct{}{}
+		ownedByspace[sid] = []string{}
+	}
+	for _, b := range botRows {
+		if _, ok := validSpaces[b.SpaceID]; ok {
+			ownedByspace[b.SpaceID] = append(ownedByspace[b.SpaceID], b.RobotID)
+		}
+	}
+	return spaces, ownedByspace, nil
 }
 
 type authVerifyBotReq struct {
@@ -4104,4 +4324,160 @@ func (u *User) authVerifyBot(c *wkhttp.Context) {
 		OwnerName: ownerName,
 		SpaceID:   spaceID,
 	})
+}
+
+type authVerifyAPIKeyReq struct {
+	APIKey string `json:"api_key"`
+}
+
+type authVerifyAPIKeyResp struct {
+	UID     string `json:"uid"`
+	SpaceID string `json:"space_id"`
+
+	// v3 §4.5: same explicit signal as authVerifyTokenResp so fleet/matter
+	// pick fail-closed vs fallback consistently across token/api_key paths.
+	ContextIncluded bool                `json:"context_included,omitempty"`
+	OwnedBots       map[string][]string `json:"owned_bots,omitempty"` // populated only when ?include=context
+}
+
+// authVerifyAPIKey validates a daemon API key (uk_ prefix) and returns the
+// bound user + space. Used by fleet/matter AuthMiddleware to verify api_key
+// Bearer tokens (合并 plan §3).
+//
+// Query params:
+//   - include=context : also return owned_bots (single-space map keyed on the
+//     api_key's bound space). fleet/matter call with this; other callers do not.
+//     Absent param keeps the original {uid, space_id} schema for callers that
+//     do not need ownership data.
+func (u *User) authVerifyAPIKey(c *wkhttp.Context) {
+	var req authVerifyAPIKeyReq
+	if err := c.BindJSON(&req); err != nil {
+		u.Warn("authVerifyAPIKey 请求体格式错误", zap.Error(err))
+		respondUserRequestInvalid(c, "")
+		return
+	}
+	if req.APIKey == "" {
+		respondUserTokenRequired(c, "api_key")
+		return
+	}
+
+	// Step 1: lookup api_key, reject legacy space_id=''.
+	// status=1 / client_id='botfather' gate the post-main schema additions:
+	// status filters out revoked keys (status=0), and client_id restricts
+	// verify-api-key to native octo keys — integration-client keys
+	// (client_id != 'botfather') must not validate on the daemon path.
+	// Literals mirror user_api_key's active status + native client; the
+	// canonical botfather constants are unexported and the user package
+	// cannot import botfather (botfather -> user import cycle).
+	var keyInfo struct {
+		UID     string `db:"uid"`
+		SpaceID string `db:"space_id"`
+	}
+	_, err := u.db.session.Select("uid", "space_id").From("user_api_key").
+		Where("api_key=? AND space_id!='' AND status=? AND client_id=?", req.APIKey, 1, "botfather").
+		Load(&keyInfo)
+	if err != nil || keyInfo.UID == "" {
+		u.Warn("authVerifyAPIKey: api_key not resolvable", zap.Error(err))
+		respondUserAPIKeyInvalid(c)
+		return
+	}
+
+	// Step 2: assert owner still member of space (撤销 = 退 space, 同
+	// resolveAPIKey 现有语义). v3 §2.3 (Jerry-Xin Critical 1): also check
+	// space.status=1 — without this, an api_key whose space was disabled /
+	// soft-deleted (space.status=0) keeps verifying as long as the user's
+	// space_member row was left active. Mirrors modules/space/db.go's
+	// canonical membership pattern (s.status=1 + sm.status=1).
+	//
+	// v3.3.6 §P1 (yujiawei R2): also gate on user.status=1 to close the
+	// account-ban bypass. liftBanUser (api_manager.go:909) sets
+	// user.status=0 + ban IM channel + QuitUserDevice; the redis token
+	// cache clear handles session-token path, but daemon api_key sits
+	// behind no such cache — without this join, a globally banned user's
+	// daemon keeps a fully valid api_key. execLogin already gates
+	// userInfo.Status (api.go:1418); v3 verify-api-key sat behind no
+	// equivalent gate. assertSpaceMember (bot_provision/resolve.go) gets
+	// the symmetric fix to cover botToken + mintBot.
+	var n int
+	err = u.db.session.SelectBySql(
+		`SELECT COUNT(*) FROM space_member sm
+		 INNER JOIN space s ON s.space_id=sm.space_id AND s.status=1
+		 INNER JOIN `+"`user`"+` u ON u.uid=sm.uid AND u.status=1
+		 WHERE sm.space_id=? AND sm.uid=? AND sm.status=1`,
+		keyInfo.SpaceID, keyInfo.UID,
+	).LoadOne(&n)
+	if err != nil || n == 0 {
+		u.Warn("authVerifyAPIKey: api_key owner not a member of bound space", zap.Error(err))
+		respondUserAPIKeyInvalid(c)
+		return
+	}
+
+	resp := authVerifyAPIKeyResp{
+		UID:     keyInfo.UID,
+		SpaceID: keyInfo.SpaceID,
+	}
+
+	// Step 3 (opt-in): when ?include=context, fetch owned_bots for the bound
+	// space. Returned as a map for symmetry with /v1/auth/verify response,
+	// even though api_key is bound to exactly one space.
+	if c.Query("include") == "context" {
+		ownedBots, err := u.queryOwnedBotsBySpace(keyInfo.UID, keyInfo.SpaceID)
+		if err != nil {
+			u.Warn("authVerifyAPIKey owned_bots 查询失败", zap.Error(err), zap.String("uid", keyInfo.UID))
+			// Fail-secure: empty list rather than crash. Caller (fleet/matter
+			// middleware) will reject downstream ownership checks if expected
+			// bot is missing — better than masking the issue with a 500.
+			ownedBots = []string{}
+		}
+		resp.ContextIncluded = true
+		resp.OwnedBots = map[string][]string{
+			keyInfo.SpaceID: ownedBots,
+		}
+	}
+
+	c.Response(resp)
+}
+
+// queryOwnedBotsBySpace returns the bot_uids the user owns in the given
+// space. bot is itself a user, and its space membership lives in
+// space_member (robot table has no space_id). Mirrors the join pattern in
+// botfather/db.go queryRobotsByCreatorUIDAndSpaceID.
+//
+// v3.3.2 (yujiawei + Jerry-Xin R4 nit): same silent-truncation guard as
+// queryUserSpaceContext (v3.2 bots LIMIT 1001 + v3.3.1 §A.2 spaces
+// LIMIT 101). Over-fetch LIMIT 1001 + ORDER BY r.robot_id (deterministic
+// truncation window) + warn when len > 1000. Authz still fail-safe — a
+// truncated bot falls through to fleet/matter SQL owner_uid filters
+// downstream — but the warn surfaces the rare power user hitting the cap
+// instead of leaving the loss invisible.
+func (u *User) queryOwnedBotsBySpace(creatorUID, spaceID string) ([]string, error) {
+	type row struct {
+		RobotID string `db:"robot_id"`
+	}
+	const ownedBotsLimit = 1000
+	var rows []row
+	_, err := u.db.session.SelectBySql(
+		`SELECT r.robot_id FROM robot r
+		 INNER JOIN space_member sm ON sm.uid=r.robot_id AND sm.space_id=? AND sm.status=1
+		 WHERE r.creator_uid=? AND r.status=1
+		 ORDER BY r.robot_id
+		 LIMIT 1001`,
+		spaceID, creatorUID,
+	).Load(&rows)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.RobotID)
+	}
+	if len(out) > ownedBotsLimit {
+		u.Warn("queryOwnedBotsBySpace owned bots truncated at policy limit",
+			zap.String("uid", creatorUID),
+			zap.String("space_id", spaceID),
+			zap.Int("limit", ownedBotsLimit),
+			zap.Int("returned", len(out)))
+		out = out[:ownedBotsLimit]
+	}
+	return out, nil
 }

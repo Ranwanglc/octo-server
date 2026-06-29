@@ -3,6 +3,7 @@ package user
 import (
 	"fmt"
 	"hash/crc32"
+	"strconv"
 	"strings"
 )
 
@@ -27,6 +28,30 @@ func avatarETag(parts ...string) string {
 		_, _ = h.Write([]byte{0})
 	}
 	return fmt.Sprintf(`W/"%08x"`, h.Sum32())
+}
+
+// avatarCacheKey 为进程级共享渲染缓存（avatarrender.Cache）算 key。parts 与
+// avatarETag 取同一组决定图像内容的因子（渲染版本、uid→颜色、展示文字）。
+//
+// 关键：这里**不能**复用 avatarETag 的 CRC32 摘要。avatarETag 是 32 位 CRC32，
+// 作弱 ETag 没问题（HTTP 304 撞了顶多多渲一次，无害）；但缓存 key 是**跨所有用户
+// 的进程级 []byte 存储身份**，一旦碰撞就会把 A 用户已缓存的头像返回给 B 用户
+// （串图 / 轻度信息泄露）。而且 text=昵称末两字用户可控、CRC32 线性可构造，可被
+// 对抗性投毒。故 key 编码完整原始 parts 而非摘要。详见 PR#481 评审。
+//
+// 编码用**长度分帧**（每段 `<len>:<bytes>`）而非 NUL 分隔：后者对任意 parts 非
+// 单射（如 ["u","a\x00b"] 与 ["u\x00a","b"] 会撞）。今天的因子（uid 来自 HTTP path
+// 不含 NUL、text 经 IndividualText 已剥离控制字符）即便用 NUL 也安全，但长度分帧对
+// **任意**字节都单射，避免将来新增可能含 NUL 的因子（或 #478 群头像接入同一 key
+// 构造）时踩雷（PR#481 评审）。
+func avatarCacheKey(parts ...string) string {
+	var b strings.Builder
+	for _, p := range parts {
+		b.WriteString(strconv.Itoa(len(p)))
+		b.WriteByte(':')
+		b.WriteString(p)
+	}
+	return b.String()
 }
 
 // ifNoneMatchSatisfied 报告 If-None-Match 头是否匹配 etag（RFC 7232 §3.2 弱比较：
