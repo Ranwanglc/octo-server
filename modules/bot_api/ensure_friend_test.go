@@ -152,6 +152,14 @@ func TestEnsureFriend_E2E_SpaceMemberLanded(t *testing.T) {
 	).LoadOne(&count)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count, "target user's pre-existing space_member row must remain untouched")
+
+	// PR#483 Jerry-Xin 提的契约（B1）：space_member 落库后 isBotSpaceAuthorized
+	// 必须直接对 (summary_bot, space) 返回 true —— 这是 X-Space-ID 头被采纳的前置
+	// 条件，也是 send 路径"载 payload.space_id 之前要查的那一步"。
+	db := newBotAPIDB(ctx)
+	authorized, err := db.isBotSpaceAuthorized(efSummaryBotUID, efSpaceID)
+	require.NoError(t, err)
+	assert.True(t, authorized, "isBotSpaceAuthorized must return true for the summary bot after ensureFriend lands the space_member row (PR#483 B1 contract)")
 }
 
 // TestEnsureFriend_E2E_SpaceMemberIdempotent 重复 ensureFriend 不重复插入也不
