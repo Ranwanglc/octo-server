@@ -301,10 +301,11 @@ func (rb *Robot) Route(r *wkhttp.WKHttp) {
 		rb.Error("初始化系统机器人失败", zap.Error(err))
 	}
 
-	// OCT-5: 自举独立的"总结助手"账号（幂等；未配置 SUMMARY_BOT_* 时静默跳过）。
-	if err := rb.insertSummaryRobot(); err != nil {
-		rb.Error("初始化总结助手失败", zap.Error(err))
-	}
+	// OCT-5 / PR#483 第二轮 🟡 MAJOR：「总结助手」(summary_notification) 现在是固定
+	// 常量 + 迁移拥有的系统 bot（user 行 / robot 行 / 固定 bot_token 全由迁移
+	// modules/robot/sql/20260629000001_summary_notification_bot.sql 写死）。运行时
+	// 不再做 env 驱动的自举/reconcile —— 旧的 insertSummaryRobot() 会用 stale env
+	// 覆盖迁移写死的 token，破坏鉴权。故此处不再调用任何 summary bot 自举。
 }
 
 func (rb *Robot) streamStart(c *wkhttp.Context) {

@@ -15,6 +15,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
 	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
 	"github.com/Mininglamp-OSS/octo-server/pkg/i18n"
+	pkgspace "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/gin-gonic/gin"
 	"github.com/gocraft/dbr/v2"
 	"go.uber.org/zap"
@@ -288,6 +289,18 @@ func (ba *BotAPI) botSpaceMembers(c *wkhttp.Context) {
 	robotID := getRobotIDFromContext(c)
 	if robotID == "" {
 		ba.respondBotAPIIdentityMissing(c)
+		return
+	}
+
+	// PR#483 (OCT-5) 能力门 A — 显式排除系统 bot。SystemBots 静态过滤不覆盖这个
+	// 查 space_member 存在性的枚举门：下面按 robotID 的 space_member 行来获得枚举
+	// 权限，如果系统 bot 某天被插了 space_member 行（或历史遗留）就会越权枚举。
+	// 语义上：通知类系统 bot（如 summary_notification）不需要枚举 Space 成员，直接
+	// 返回空列表（不报错，与“未加入任何 Space”的现有语义一致）。用 IsSystemBot
+	// 作单一真源判定。
+	if pkgspace.IsSystemBot(robotID) {
+		ba.Warn("botSpaceMembers 系统 bot 枚举被拒（不给 Space 能力面）", zap.String("robot_id", robotID))
+		c.JSON(http.StatusOK, []struct{}{})
 		return
 	}
 

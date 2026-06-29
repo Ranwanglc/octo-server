@@ -14,15 +14,31 @@ import (
 //     哪怕用户在当前 Space 下尚未与 Bot 产生任何消息（首次进入 Space、
 //     本地缓存丢失等）。Web 端在前端做兜底，移动端没有，所以后端
 //     需要在 sync 响应中保底注入 SystemBot entry。
-//   - 目前系统 Bot 固定为 {botfather, u_10000, fileHelper}。未来加入
-//     BUILDER/ADMIN bot 时，只需在此 map 中追加，或改为从配置加载。
-//     对外接口通过 SystemBotList() 暴露，便于统一遍历。
+//   - 目前系统 Bot 固定为 {botfather, u_10000, fileHelper, notification,
+//     summary_notification}。未来加入 BUILDER/ADMIN bot 时，只需在此 map 中
+//     追加，或改为从配置加载。对外接口通过 SystemBotList() 暴露，便于统一遍历。
+//
+// PR#483 (OCT-5)：summary_notification 是「总结助手」的固定常量 UID（见
+// SummaryNotificationBotUID）。把它登记为系统 Bot 后，IsSystemBot /
+// SystemBotList 下游所有过滤（member_count 分析、sync 注入、@选择器、search
+// 等）自动覆盖；它从不应通过 space_member 存在性获得 Space 级能力（枚举成员 /
+// 建群），这两个查 space_member COUNT 的能力门额外用 IsSystemBot 单独排除
+// （见 modules/bot_api/groups.go 与 modules/group/service.go）。
 var SystemBots = map[string]bool{
-	"botfather":    true,
-	"u_10000":      true,
-	"fileHelper":   true,
-	"notification": true,
+	"botfather":            true,
+	"u_10000":              true,
+	"fileHelper":           true,
+	"notification":         true,
+	"summary_notification": true,
 }
+
+// SummaryNotificationBotUID 是「总结助手」的固定常量 UID（PR#483 / OCT-5）。
+//
+// Boss 定稿：summary bot 不再用 env 驱动的动态 UID，改为本固定常量（全小写下划线，
+// 注意拼写）。它同时被登记在 SystemBots 中，是 IsSystemBot 单一真源的一部分。
+// 自举走迁移文件 modules/robot/sql/20260629000001_summary_notification_bot.sql
+// （bot_token 写死），运行时不再依赖配置注入 UID。
+const SummaryNotificationBotUID = "summary_notification"
 
 // SystemBotList 以稳定顺序返回所有系统 Bot UID。
 //

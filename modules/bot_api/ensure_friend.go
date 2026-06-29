@@ -89,39 +89,28 @@ func (ba *BotAPI) ensureFriend(c *wkhttp.Context) {
 			return
 		}
 
-		// PR#483 review blocker (Jerry-Xin + OctoBoooot byte-confirmed) — Space
-		// attribution end-to-end gap：summary bot 落在 `robot` 表，没有
-		// `space_member` 行，也没有 `app_bot` 行；后续 `/v1/bot/sendMessage` 的
-		// `resolveBotActiveSpaceID` 三条路径（ctx scope=space / X-Space-ID
-		// validator → isBotSpaceAuthorized / fallback querySpaceIDsByRobotID）
-		// 全 miss → enrichBotPayloadWithSpaceID 把 client-supplied space_id
-		// strip 掉，DM 失去 Space 上下文。
+		// PR#483 Boss 定稿（step4，选择窄路径 —— 不再插 space_member 行）：
 		//
-		// 修复（方案 a）：target 通过 CheckMembership 后，幂等地给 summary bot
-		// 在**同一个 space_id** 落一行 space_member（role=0 普通成员，最小权限）。
-		// 这样后续 send 路径：
-		//   - query (1) `space_member` 命中 → `isBotSpaceAuthorized` 真，
-		//     X-Space-ID 头会被采纳；
-		//   - 无 X-Space-ID 头时 `querySpaceIDsByRobotID` 兜底也命中。
+		// 三个 reviewer 一致卡的 P1 是：给 summary bot 插真实 space_member 行会让
+		// bot 顺带获得 Space 级能力（枚举成员、建群）+ 污染 member_count / 名册 /
+		// @选择器。其中 member_count 是裸 `SELECT COUNT(*) FROM space_member ...`
+		// （见 modules/space/db.go:72/86, db_manager.go:163），**不走 SystemBots 过滤**，
+		// 所以只要还有 space_member 行，member_count 污染就无法根除。因此本次
+		// **不再为 summary bot 插 space_member 行**。
 		//
-		// 安全性约束：
-		//   - 只对**经过 CheckMembership 验证过 target 的 space_id** 落 summary
-		//     bot 的 space_member —— 攻击面被 target 的 membership 校验完全
-		//     约束在 "target 真实归属的 Space" 内；
-		//   - role=0 普通成员（最小权限），不是 admin/owner，没有管理权限提升；
-		//   - INSERT IGNORE 幂等，不强复活已被运维显式移除的行（status=0 不动）；
-		//   - target_uid（用户）不动，仅给 summary bot 自己落行。
+		// DM 的 Space 归属不靠 space_member 行，而是走 IsSystemBot 的窄路径：
+		//   - 发送路径（/v1/bot/sendMessage）带 X-Space-ID 头时，isBotSpaceAuthorized
+		//     对 IsSystemBot(robotID) 直接放行（系统 bot 在所有活跃 Space 可见，语义
+		//     同 platform App Bot）→ X-Space-ID 被采纳 → enrichBotPayloadWithSpaceID
+		//     注入权威 space_id，DM 不丢 Space 归属（详见 modules/bot_api/db.go
+		//     isBotSpaceAuthorized 的 IsSystemBot 分支）。smart-summary 的 send 姿势始终
+		//     携 X-Space-ID（SpaceID 来自 SummaryTask.SpaceID，与本端点 space_id 参数
+		//     同源），所以这是唯一生产 send 形状。
 		//
-		// 失败语义：不阻断好友建立。若 space_member 落库失败，DM 仍会按
-		// fail-closed strip 走（enrich_payload_space_id_empty 监控可见），friend
-		// / 白名单这条主链路对 smart-summary 仍是 best-effort 可用。
-		if _, smErr := ba.db.session.InsertBySql(
-			"INSERT IGNORE INTO space_member (space_id, uid, role, status, version, created_at, updated_at) VALUES (?, ?, 0, 1, 1, NOW(), NOW())",
-			spaceID, robotID,
-		).Exec(); smErr != nil {
-			ba.Warn("ensureFriend 落 summary bot space_member 失败（不阻断好友建立）",
-				zap.String("space_id", spaceID), zap.String("bot_uid", robotID), zap.Error(smErr))
-		}
+		// 结果：(a) DM 仍带正确 space_id（不回归 PR 之前的 DM-attribution bug）；
+		//       (b) bot 无 space_member 行 → 无 Space 能力面；(c) 不污染计数 / 名册。
+		// 本函数不再对 space_member 表做任何写入（friend 表 + IM 白名单仍是 DM 可达的
+		// 唯一依赖，见下文）。
 	}
 
 	// 1. friend 表双向（幂等 InsertOrUpdate）。

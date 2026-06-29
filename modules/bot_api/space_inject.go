@@ -67,7 +67,10 @@ import (
 type botSpaceQuerier interface {
 	querySpaceIDByRobotID(robotID string) (string, error)
 	querySpaceIDsByRobotID(robotID string) (string, []string, error)
-	isBotSpaceAuthorized(robotID, spaceID string) (bool, error)
+	// isBotSpaceAuthorized — PR#483 第二轮 BLOCKING: 增加 recipientUID +
+	// channelType，让系统 bot 的 person-channel(DM) 授权绑定接收人是否属于
+	// header 声称的 Space（CheckMembership），杜绝跨 Space DM 归属注入。
+	isBotSpaceAuthorized(robotID, spaceID, recipientUID string, channelType uint8) (bool, error)
 }
 
 // enrichBotPayloadWithSpaceID 在 PERSONAL DM 派发前用 Bot 的权威 SpaceID 覆盖
@@ -76,11 +79,13 @@ type botSpaceQuerier interface {
 // YUJ-660 R3 Finding A — 当 resolver 返回 "" 时 fail-closed strip：删除任何
 // client 上送的 payload["space_id"]，并发监控 warn。这是 bot_api 层独立的 strip
 // 语义，不能依赖 message 层的 senderSpaceID="" strip（bot_api 不走 sendMsg）。
-func (ba *BotAPI) enrichBotPayloadWithSpaceID(c *wkhttp.Context, robotID string, payload map[string]interface{}) map[string]interface{} {
+// PR#483 第二轮 BLOCKING: recipientUID + channelType 用于将系统 bot 的 DM
+// X-Space-ID 授权绑定到接收人（见 resolveBotActiveSpaceID / isBotSpaceAuthorized）。
+func (ba *BotAPI) enrichBotPayloadWithSpaceID(c *wkhttp.Context, robotID, recipientUID string, channelType uint8, payload map[string]interface{}) map[string]interface{} {
 	if payload == nil {
 		payload = make(map[string]interface{})
 	}
-	spaceID := ba.resolveBotActiveSpaceID(c, robotID)
+	spaceID := ba.resolveBotActiveSpaceID(c, robotID, recipientUID, channelType)
 	if spaceID != "" {
 		payload["space_id"] = spaceID
 		return payload
@@ -126,7 +131,11 @@ func (ba *BotAPI) enrichBotPayloadWithSpaceID(c *wkhttp.Context, robotID string,
 //     `multi_space_membership=true` warn 让运维定位需要走 Option B 的 Bot。
 //
 // querier 默认是 ba.db；测试可通过 ba.spaceQuerier 注入 stub。
-func (ba *BotAPI) resolveBotActiveSpaceID(c *wkhttp.Context, robotID string) string {
+// PR#483 第二轮 BLOCKING: recipientUID + channelType 下透到 isBotSpaceAuthorized，
+// 让系统 bot 的 person-channel(DM) X-Space-ID 采纳额外要求 CheckMembership(spaceID,
+// recipientUID)=true。接收人不在该 Space → header 不被采纳，fall through 到
+// deterministic DB query（系统 bot 无 space_member 行 → 返回 "" → 调用方 strip）。
+func (ba *BotAPI) resolveBotActiveSpaceID(c *wkhttp.Context, robotID, recipientUID string, channelType uint8) string {
 	// (1) authAppBot 写入的 CtxKeyAppBotSpaceID（仅 App Bot scope=space）
 	if scope, _ := c.Get(CtxKeyAppBotScope); scope == "space" {
 		if v, ok := c.Get(CtxKeyAppBotSpaceID); ok {
@@ -152,7 +161,7 @@ func (ba *BotAPI) resolveBotActiveSpaceID(c *wkhttp.Context, robotID string) str
 	// rejected as non-member and emitted noisy reject warns.
 	if c != nil && c.Request != nil {
 		if hint := strings.TrimSpace(c.GetHeader("X-Space-ID")); hint != "" {
-			isAuthorized, err := q.isBotSpaceAuthorized(robotID, hint)
+			isAuthorized, err := q.isBotSpaceAuthorized(robotID, hint, recipientUID, channelType)
 			if err != nil {
 				ba.Warn("isBotSpaceAuthorized 失败，回退到 deterministic DB 查询",
 					zap.String("robotID", robotID), zap.String("hint", hint), zap.Error(err))
