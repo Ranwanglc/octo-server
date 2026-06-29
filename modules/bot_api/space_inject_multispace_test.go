@@ -45,8 +45,8 @@ func TestResolveBotActiveSpaceID_MultiSpace_NoHeader_DeterministicPrimary(t *tes
 	ba := newTestBotAPI(q)
 	c := fakeWkContext()
 
-	first := ba.resolveBotActiveSpaceID(c, "user_bot_2_spaces")
-	second := ba.resolveBotActiveSpaceID(c, "user_bot_2_spaces")
+	first := ba.resolveBotActiveSpaceID(c, "user_bot_2_spaces", "", 0)
+	second := ba.resolveBotActiveSpaceID(c, "user_bot_2_spaces", "", 0)
 
 	assert.Equal(t, "space_A", first,
 		"deterministic primary = earliest joined Space A")
@@ -69,10 +69,10 @@ func TestResolveBotActiveSpaceID_MultiSpace_HeaderHit_HeaderWins(t *testing.T) {
 	ba := newTestBotAPI(q)
 	c := fakeWkContextWithHeader("X-Space-ID", "space_B")
 
-	got := ba.resolveBotActiveSpaceID(c, "user_bot_2_spaces")
+	got := ba.resolveBotActiveSpaceID(c, "user_bot_2_spaces", "", 0)
 	assert.Equal(t, "space_B", got,
 		"X-Space-ID header should be honored when Bot is a member of that Space")
-	assert.Equal(t, []memberCall{{"user_bot_2_spaces", "space_B"}}, q.authCalls,
+	assert.Equal(t, []memberCall{{robotID: "user_bot_2_spaces", spaceID: "space_B"}}, q.authCalls,
 		"isBotSpaceAuthorized must be called with the header value to validate it")
 	// DB fallback should NOT have been called when header wins.
 	assert.Empty(t, q.calls,
@@ -95,10 +95,10 @@ func TestResolveBotActiveSpaceID_MultiSpace_HeaderMiss_FallsThrough(t *testing.T
 	ba := newTestBotAPI(q)
 	c := fakeWkContextWithHeader("X-Space-ID", "space_C")
 
-	got := ba.resolveBotActiveSpaceID(c, "user_bot_2_spaces")
+	got := ba.resolveBotActiveSpaceID(c, "user_bot_2_spaces", "", 0)
 	assert.Equal(t, "space_A", got,
 		"non-member header → fall through to deterministic primary (Space A)")
-	assert.Equal(t, []memberCall{{"user_bot_2_spaces", "space_C"}}, q.authCalls,
+	assert.Equal(t, []memberCall{{robotID: "user_bot_2_spaces", spaceID: "space_C"}}, q.authCalls,
 		"isBotSpaceAuthorized must still be called once to make the non-member decision")
 	assert.Equal(t, []string{"user_bot_2_spaces"}, q.calls,
 		"querySpaceIDByRobotID must be invoked (via querySpaceIDsByRobotID) on miss")
@@ -114,7 +114,7 @@ func TestResolveBotActiveSpaceID_AppBotScopeSpace_OutranksHeader(t *testing.T) {
 	c.Set(CtxKeyAppBotScope, "space")
 	c.Set(CtxKeyAppBotSpaceID, "space_authoritative")
 
-	got := ba.resolveBotActiveSpaceID(c, "app_bot_scope_space")
+	got := ba.resolveBotActiveSpaceID(c, "app_bot_scope_space", "", 0)
 	assert.Equal(t, "space_authoritative", got,
 		"App Bot scope=space ctx must outrank X-Space-ID header")
 	assert.Empty(t, q.authCalls,
@@ -146,13 +146,13 @@ func TestResolveBotActiveSpaceID_AppBotScopePlatform_HeaderHit(t *testing.T) {
 	c := fakeWkContextWithHeader("X-Space-ID", "space_B")
 	c.Set(CtxKeyAppBotScope, "platform") // not "space" → ctx fast-path skipped
 
-	got := ba.resolveBotActiveSpaceID(c, "app_bot_platform")
+	got := ba.resolveBotActiveSpaceID(c, "app_bot_platform", "", 0)
 	assert.Equal(t, "space_B", got,
 		"published platform App Bot must be authorized in any active Space, "+
 			"even when no space_member row exists (PR#43 R1 fix)")
 	assert.Empty(t, q.calls,
 		"DB fallback must not be reached when header is honored")
-	assert.Equal(t, []memberCall{{"app_bot_platform", "space_B"}}, q.authCalls,
+	assert.Equal(t, []memberCall{{robotID: "app_bot_platform", spaceID: "space_B"}}, q.authCalls,
 		"isBotSpaceAuthorized must be called once with the header value")
 }
 
@@ -173,11 +173,11 @@ func TestResolveBotActiveSpaceID_AppBotScopePlatform_HeaderForInactiveSpace_Fall
 	c := fakeWkContextWithHeader("X-Space-ID", "space_disabled")
 	c.Set(CtxKeyAppBotScope, "platform")
 
-	got := ba.resolveBotActiveSpaceID(c, "app_bot_platform")
+	got := ba.resolveBotActiveSpaceID(c, "app_bot_platform", "", 0)
 	assert.Equal(t, "space_A", got,
 		"inactive target Space must be rejected even for platform App Bots; "+
 			"resolver falls through to deterministic DB primary")
-	assert.Equal(t, []memberCall{{"app_bot_platform", "space_disabled"}}, q.authCalls,
+	assert.Equal(t, []memberCall{{robotID: "app_bot_platform", spaceID: "space_disabled"}}, q.authCalls,
 		"isBotSpaceAuthorized must still be called and return false for inactive Space")
 }
 
@@ -197,7 +197,7 @@ func TestResolveBotActiveSpaceID_AppBotScopeSpace_OwnSpaceAuthorized(t *testing.
 	// this combination is rare (authAppBot would normally set the ctx) but
 	// the validator must still fail-closed-correctly.
 
-	got := ba.resolveBotActiveSpaceID(c, "app_bot_scope_space")
+	got := ba.resolveBotActiveSpaceID(c, "app_bot_scope_space", "", 0)
 	assert.Equal(t, "space_own", got,
 		"scope=space App Bot dispatching into its own Space is authorized")
 }
@@ -215,7 +215,7 @@ func TestResolveBotActiveSpaceID_AppBotScopeSpace_DifferentSpaceRejected(t *test
 	ba := newTestBotAPI(q)
 	c := fakeWkContextWithHeader("X-Space-ID", "space_other")
 
-	got := ba.resolveBotActiveSpaceID(c, "app_bot_scope_space")
+	got := ba.resolveBotActiveSpaceID(c, "app_bot_scope_space", "", 0)
 	assert.Equal(t, "space_A", got,
 		"scope=space App Bot must NOT be authorized in a Space other than its own; "+
 			"resolver falls through to deterministic DB primary")
@@ -234,10 +234,10 @@ func TestResolveBotActiveSpaceID_HeaderWhitespaceTrimmed(t *testing.T) {
 	ba := newTestBotAPI(q)
 	c := fakeWkContextWithHeader("X-Space-ID", "  space_B  \r")
 
-	got := ba.resolveBotActiveSpaceID(c, "user_bot_2_spaces")
+	got := ba.resolveBotActiveSpaceID(c, "user_bot_2_spaces", "", 0)
 	assert.Equal(t, "space_B", got,
 		"X-Space-ID header value must be TrimSpace'd before validation")
-	assert.Equal(t, []memberCall{{"user_bot_2_spaces", "space_B"}}, q.authCalls,
+	assert.Equal(t, []memberCall{{robotID: "user_bot_2_spaces", spaceID: "space_B"}}, q.authCalls,
 		"isBotSpaceAuthorized must receive the trimmed value, not the raw header")
 }
 
@@ -247,7 +247,7 @@ func TestResolveBotActiveSpaceID_HeaderAllWhitespace_TreatedAsAbsent(t *testing.
 	ba := newTestBotAPI(q)
 	c := fakeWkContextWithHeader("X-Space-ID", "   ")
 
-	got := ba.resolveBotActiveSpaceID(c, "user_bot_x")
+	got := ba.resolveBotActiveSpaceID(c, "user_bot_x", "", 0)
 	assert.Equal(t, "space_A", got)
 	assert.Empty(t, q.authCalls,
 		"all-whitespace header must skip the validator entirely (treated as absent)")
@@ -267,7 +267,7 @@ func TestEnrichBotPayloadWithSpaceID_MultiSpace_NoHeader_DeterministicOverride(t
 	c := fakeWkContext()
 	payload := map[string]interface{}{"content": "hi", "space_id": "space_attacker"}
 
-	got := ba.enrichBotPayloadWithSpaceID(c, "user_bot_2_spaces", payload)
+	got := ba.enrichBotPayloadWithSpaceID(c, "user_bot_2_spaces", "", 0, payload)
 	assert.Equal(t, "space_A", got["space_id"],
 		"client-supplied forged space_id must be overridden by deterministic primary")
 }
@@ -290,7 +290,7 @@ func TestEnrichBotPayloadWithSpaceID_MultiSpace_HeaderHit_HeaderOverridesPrimary
 	c := fakeWkContextWithHeader("X-Space-ID", "space_B")
 	payload := map[string]interface{}{"content": "hi", "space_id": "space_attacker"}
 
-	got := ba.enrichBotPayloadWithSpaceID(c, "user_bot_2_spaces", payload)
+	got := ba.enrichBotPayloadWithSpaceID(c, "user_bot_2_spaces", "", 0, payload)
 	assert.Equal(t, "space_B", got["space_id"],
 		"valid X-Space-ID header must drive payload.space_id, overriding both client forge and DB primary")
 }
@@ -317,7 +317,7 @@ func TestEnrichBotPayloadWithSpaceID_AppBotScopePlatform_NoSpaceMember_HeaderWin
 	c.Set(CtxKeyAppBotScope, "platform")
 	payload := map[string]interface{}{"content": "hi", "space_id": "space_forged"}
 
-	got := ba.enrichBotPayloadWithSpaceID(c, "app_bot_platform_prod", payload)
+	got := ba.enrichBotPayloadWithSpaceID(c, "app_bot_platform_prod", "", 0, payload)
 	assert.Equal(t, "space_target", got["space_id"],
 		"platform App Bot with valid X-Space-ID must end up with space_target in payload "+
 			"(regression: previous validator stripped it because the bot wasn't in space_member)")

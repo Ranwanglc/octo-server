@@ -34,6 +34,14 @@ type BotSendMessageReq struct {
 	// preserves legacy behavior (FromUID = robotID). See RFC §5.1 / §5.2.
 	OnBehalfOf string                 `json:"on_behalf_of,omitempty"`
 	Payload    map[string]interface{} `json:"payload"`
+	// SyncOnce — PR#483 (OCT-5) 「PC 看不到」修复。默认 bot 消息 MsgHeader.SyncOnce=0
+	// （读扩散），PC / 多端 / 离线看不到。可选透传：请求显式带 sync_once 时用
+	// 请求值，否则保持现状默认（SyncOnce=0）。语义（引用 octo-lib config/msg.go
+	// MsgHeader）：sync_once=1=写扩散（多端可见），sync_once=0=读扩散。用指针
+	// 区分“未传”与“显式传 0”：nil 保持默认，不改变其它 bot 的默认行为。
+	// 只有显式传 1 才写扩散。worker 侧传 sync_once=1 是 #113（另一个仓）的事，本
+	// 任务不动 worker。
+	SyncOnce *int `json:"sync_once,omitempty"`
 }
 
 // sendMessage handles POST /v1/bot/sendMessage.
@@ -184,7 +192,10 @@ func (ba *BotAPI) sendMessage(c *wkhttp.Context) {
 	// 是部署时确定的，与 grantor 的 Space 归属解耦。
 	payload := req.Payload
 	if req.ChannelType == common.ChannelTypePerson.Uint8() {
-		payload = ba.enrichBotPayloadWithSpaceID(c, robotID, payload)
+		// PR#483 第二轮 BLOCKING: person channel 的 channel_id 就是接收人 uid。
+		// 传给 enrich 后系统 bot 的 X-Space-ID 采纳会额外要求 CheckMembership(
+		// space, 接收人)，杜绝跨 Space DM 归属注入。
+		payload = ba.enrichBotPayloadWithSpaceID(c, robotID, req.ChannelID, req.ChannelType, payload)
 	}
 
 	// YUJ-202 / Mininglamp-OSS#94 / #142 — mention pass-through
@@ -250,6 +261,14 @@ func (ba *BotAPI) sendMessage(c *wkhttp.Context) {
 		ChannelType: req.ChannelType,
 		FromUID:     fromUID,
 		Payload:     []byte(util.ToJson(wirePayload)),
+	}
+	// PR#483 (OCT-5) 「PC 看不到」修复 — header.sync_once 透传。根因：bot 消息
+	// MsgHeader.SyncOnce=0（读扩散），PC / 多端 / 离线看不到。若请求显式带
+	// sync_once（指针非 nil）则采用请求值；否则保持上面默认（SyncOnce=0）。
+	// **绝不改变其它 bot 的默认行为** — 默认仍 0，只有显式传 1 才写扩散。
+	// sync_once=1=写扩散（多端可见），语义参见 octo-lib config/msg.go MsgHeader。
+	if req.SyncOnce != nil {
+		msgReq.Header.SyncOnce = *req.SyncOnce
 	}
 	result, err := ba.dispatchMsgSendReq(msgReq)
 	if err != nil {

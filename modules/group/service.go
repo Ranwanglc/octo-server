@@ -1037,6 +1037,14 @@ func (s *Service) CreateGroup(req *CreateGroupServiceReq) (*CreateGroupServiceRe
 	if len(req.Members) == 0 {
 		return nil, errors.New("members is required")
 	}
+	// PR#483 (OCT-5) 能力门 B（顶层兜底）— 系统 bot（如 summary_notification）不能
+	// 作为建群 bot。这里不依赖 req.SpaceID 是否为空：无论是否带 Space，都拒绝
+	// 把系统 bot 加为新群的 bot_admin。与下方 Space 分支里的 CheckMembership 门形成
+	// 双保险，避免单 Space / 无 Space 部署下绕过。
+	if req.BotUID != "" && spacepkg.IsSystemBot(req.BotUID) {
+		s.Warn("系统 bot 建群被拒（顶层兜底）", zap.String("bot_uid", req.BotUID))
+		return nil, errors.New("system bot is not allowed to create groups")
+	}
 
 	var skippedMembers []string
 	// 跨 Space 外部成员标识：key=uid, value=source_space_id（uid 的默认 Space）
@@ -1048,6 +1056,14 @@ func (s *Service) CreateGroup(req *CreateGroupServiceReq) (*CreateGroupServiceRe
 	if req.SpaceID != "" {
 		// 校验 Bot 是否属于目标 Space
 		if req.BotUID != "" {
+			// PR#483 (OCT-5) 能力门 B — 显式排除系统 bot 建群。即使系统 bot（如
+			// summary_notification）因历史遗留或误操作而拥有 space_member 行，也不能
+			// 据此通过 CheckMembership 获得建群能力。通知类系统 bot 根本不应走建群
+			// 路径。用 spacepkg.IsSystemBot 作单一真源判定（与 groups.go 能力门 A 对称）。
+			if spacepkg.IsSystemBot(req.BotUID) {
+				s.Warn("系统 bot 建群被拒（不给 Space 建群能力面）", zap.String("bot_uid", req.BotUID))
+				return nil, errors.New("system bot is not allowed to create groups")
+			}
 			botOk, err := spacepkg.CheckMembership(s.ctx.DB(), req.SpaceID, req.BotUID)
 			if err != nil {
 				s.Error("check bot space membership failed", zap.Error(err))

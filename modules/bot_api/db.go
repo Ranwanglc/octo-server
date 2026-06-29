@@ -1,8 +1,12 @@
 package bot_api
 
 import (
+	"strings"
+
+	"github.com/Mininglamp-OSS/octo-lib/common"
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/db"
+	pkgspace "github.com/Mininglamp-OSS/octo-server/pkg/space"
 	"github.com/gocraft/dbr/v2"
 )
 
@@ -163,8 +167,54 @@ func (d *botAPIDB) querySpaceIDsByRobotID(robotID string) (string, []string, err
 // single round trip. A single combined query was rejected because OR-of-
 // EXISTS in MySQL with parameter reuse forces the planner to materialize
 // both branches even when the first short-circuits.
-func (d *botAPIDB) isBotSpaceAuthorized(robotID, spaceID string) (bool, error) {
+func (d *botAPIDB) isBotSpaceAuthorized(robotID, spaceID, recipientUID string, channelType uint8) (bool, error) {
 	if robotID == "" || spaceID == "" {
+		return false, nil
+	}
+	// PR#483 (OCT-5) step3/step4 + 第二轮 BLOCKING 修复 — system bot path.
+	//
+	// 系统 bot（如 summary_notification）不依赖 space_member 行获得 Space 归属
+	// （说明见 modules/bot_api/ensure_friend.go step4 注释）。语义参照 platform App
+	// Bot：系统 bot 在所有**活跃** Space 可见。但**纯靠目标 Space active** 来采纳
+	// X-Space-ID 头是一个跨 Space 归属注入漏洞（reviewer 🔴 BLOCKING）：
+	// summary_notification 与 userA（属 spaceA）建立的是**全局**好友关系，send.go 的
+	// DM 鉴权只校验全局好友/OBO，不绑定接收人是否属于 header 声称的 Space。于是
+	// 只要 spaceB active，带 X-Space-ID=spaceB 发给 userA 的 DM 会被错误地归属到
+	// spaceB —— 把 spaceA 用户的私信注入了 spaceB。
+	//
+	// 修复：对 **person channel（DM）** 的系统 bot 发送，X-Space-ID 仅当**接收人确实
+	// 是该 Space 的活跃成员**（pkgspace.CheckMembership(spaceID, recipientUID)=true）
+	// 才采纳；否则不授权（调用方 fall through / strip，绝不跨 Space 注入）。这样把
+	// header 归属严格绑定到 (接收人, Space)，而非仅 (bot, Space active)。
+	//
+	// 非 person channel（群 / thread）：群 / thread 自身已携带 Space 上下文，且这条
+	// header 校验路径在生产里只服务 DM 注入；为不放宽群/thread 的既有语义，维持原
+	// 「目标 Space active 即授权」（系统 bot 在所有活跃 Space 可见）。
+	//
+	// 注意：本分支只影响**发送时的 space_id 解析授权**，不赋予枚举 / 建群能力（那两
+	// 个能力门在 groups.go / service.go 用 IsSystemBot 显式排除）。也不会给 bot 留
+	// 任何 space_member 行。
+	if pkgspace.IsSystemBot(robotID) {
+		if channelType == common.ChannelTypePerson.Uint8() {
+			// DM：必须把 header 声称的 Space 绑定到接收人。接收人不属于该 Space →
+			// 拒绝采纳 header（杜绝跨 Space DM 归属注入）。CheckMembership 自身已
+			// 校验 Space active，无需再单独查 space.status。
+			if strings.TrimSpace(recipientUID) == "" {
+				return false, nil
+			}
+			return pkgspace.CheckMembership(d.session, spaceID, recipientUID)
+		}
+		// 非 DM：维持原 active 校验。
+		var sysCount int
+		if err := d.session.SelectBySql(
+			"SELECT COUNT(*) FROM space s WHERE s.space_id=? AND s.status=1",
+			spaceID,
+		).LoadOne(&sysCount); err != nil {
+			return false, err
+		}
+		if sysCount > 0 {
+			return true, nil
+		}
 		return false, nil
 	}
 	// (1) space_member path: active member row in the target active Space.

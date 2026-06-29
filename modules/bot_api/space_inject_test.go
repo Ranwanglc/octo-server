@@ -51,12 +51,12 @@ type fakeSpaceQuerier struct {
 	//       `activeSpaces[spaceID] != false` → scope=space App Bot in own Space
 	// `activeSpaces` defaults to true for any spaceID not explicitly set to
 	// false, so tests that don't care about Space status can omit it.
-	memberships   map[string]map[string]bool
-	authCalls     []memberCall
-	authDefault   bool
-	authErr       error
-	appBots       map[string]appBotShape
-	activeSpaces  map[string]bool
+	memberships  map[string]map[string]bool
+	authCalls    []memberCall
+	authDefault  bool
+	authErr      error
+	appBots      map[string]appBotShape
+	activeSpaces map[string]bool
 }
 
 type appBotShape struct {
@@ -66,8 +66,10 @@ type appBotShape struct {
 }
 
 type memberCall struct {
-	robotID string
-	spaceID string
+	robotID      string
+	spaceID      string
+	recipientUID string
+	channelType  uint8
 }
 
 func (f *fakeSpaceQuerier) querySpaceIDByRobotID(robotID string) (string, error) {
@@ -100,8 +102,8 @@ func (f *fakeSpaceQuerier) querySpaceIDsByRobotID(robotID string) (string, []str
 // isBotSpaceAuthorized mirrors the production OR-of-three rule. Tests pick the
 // branch they want by populating `memberships` (User Bot path) or `appBots`
 // (App Bot platform / scope=space path). `activeSpaces` defaults to active.
-func (f *fakeSpaceQuerier) isBotSpaceAuthorized(robotID, spaceID string) (bool, error) {
-	f.authCalls = append(f.authCalls, memberCall{robotID: robotID, spaceID: spaceID})
+func (f *fakeSpaceQuerier) isBotSpaceAuthorized(robotID, spaceID, recipientUID string, channelType uint8) (bool, error) {
+	f.authCalls = append(f.authCalls, memberCall{robotID: robotID, spaceID: spaceID, recipientUID: recipientUID, channelType: channelType})
 	if f.authErr != nil {
 		return false, f.authErr
 	}
@@ -172,7 +174,7 @@ func TestResolveBotActiveSpaceID_AppBotScopeSpace_UsesCtxValue(t *testing.T) {
 	c := fakeWkContext()
 	c.Set(CtxKeyAppBotScope, "space")
 	c.Set(CtxKeyAppBotSpaceID, "spaceA")
-	got := ba.resolveBotActiveSpaceID(c, "bot_robot_1")
+	got := ba.resolveBotActiveSpaceID(c, "bot_robot_1", "", 0)
 	assert.Equal(t, "spaceA", got, "App Bot scope=space 应直接使用 ctx 写入的 SpaceID（无 DB）")
 }
 
@@ -184,7 +186,7 @@ func TestResolveBotActiveSpaceID_AppBotScopeSpace_MissingValueFallsBackToDB(t *t
 	c := fakeWkContext()
 	c.Set(CtxKeyAppBotScope, "space")
 	// CtxKeyAppBotSpaceID 故意不写入 → 必须 fallback 到 DB
-	got := ba.resolveBotActiveSpaceID(c, "bot_robot_2")
+	got := ba.resolveBotActiveSpaceID(c, "bot_robot_2", "", 0)
 	assert.Equal(t, "spaceFromDB", got)
 	assert.Equal(t, []string{"bot_robot_2"}, q.calls,
 		"scope=space 缺 SpaceID 时必须以 robotID fallback 调 querySpaceIDByRobotID")
@@ -195,7 +197,7 @@ func TestResolveBotActiveSpaceID_NonAppScope_UsesDB(t *testing.T) {
 	ba := newTestBotAPI(q)
 	c := fakeWkContext()
 	// scope 不是 "space"（User Bot 或 App Bot scope=platform）
-	got := ba.resolveBotActiveSpaceID(c, "user_bot_1")
+	got := ba.resolveBotActiveSpaceID(c, "user_bot_1", "", 0)
 	assert.Equal(t, "spaceUserBot", got)
 	assert.Equal(t, []string{"user_bot_1"}, q.calls)
 }
@@ -207,7 +209,7 @@ func TestResolveBotActiveSpaceID_DBErrNotFound_NoWarnNoSpace(t *testing.T) {
 	q := &fakeSpaceQuerier{defaultErr: dbr.ErrNotFound}
 	ba := newTestBotAPI(q)
 	c := fakeWkContext()
-	got := ba.resolveBotActiveSpaceID(c, "orphan_bot")
+	got := ba.resolveBotActiveSpaceID(c, "orphan_bot", "", 0)
 	assert.Equal(t, "", got, "ErrNotFound → 空 SpaceID")
 }
 
@@ -215,7 +217,7 @@ func TestResolveBotActiveSpaceID_DBRealError_ReturnsEmpty(t *testing.T) {
 	q := &fakeSpaceQuerier{defaultErr: errors.New("connection refused")}
 	ba := newTestBotAPI(q)
 	c := fakeWkContext()
-	got := ba.resolveBotActiveSpaceID(c, "bot_with_db_error")
+	got := ba.resolveBotActiveSpaceID(c, "bot_with_db_error", "", 0)
 	assert.Equal(t, "", got, "真实 DB 错误也返回 ''，让上层走 fail-open 不阻断发送")
 }
 
@@ -225,7 +227,7 @@ func TestEnrichBotPayloadWithSpaceID_AppBotScopeSpace_OverridesClient(t *testing
 	c.Set(CtxKeyAppBotScope, "space")
 	c.Set(CtxKeyAppBotSpaceID, "spaceAuth")
 	payload := map[string]interface{}{"content": "hi", "space_id": "spaceForged"}
-	got := ba.enrichBotPayloadWithSpaceID(c, "bot_robot_1", payload)
+	got := ba.enrichBotPayloadWithSpaceID(c, "bot_robot_1", "", 0, payload)
 	assert.Equal(t, "spaceAuth", got["space_id"], "PERSONAL 必须用服务端权威 SpaceID 覆盖客户端伪造值")
 }
 
@@ -234,7 +236,7 @@ func TestEnrichBotPayloadWithSpaceID_DBPathOverridesClient(t *testing.T) {
 	ba := newTestBotAPI(q)
 	c := fakeWkContext()
 	payload := map[string]interface{}{"content": "hi", "space_id": "spaceForged"}
-	got := ba.enrichBotPayloadWithSpaceID(c, "user_bot_1", payload)
+	got := ba.enrichBotPayloadWithSpaceID(c, "user_bot_1", "", 0, payload)
 	assert.Equal(t, "spaceDB", got["space_id"])
 }
 
@@ -247,7 +249,7 @@ func TestEnrichBotPayloadWithSpaceID_ErrNotFound_StripsClientSpaceID(t *testing.
 	ba := newTestBotAPI(q)
 	c := fakeWkContext()
 	payload := map[string]interface{}{"content": "hi", "space_id": "spaceForged"}
-	got := ba.enrichBotPayloadWithSpaceID(c, "orphan_bot", payload)
+	got := ba.enrichBotPayloadWithSpaceID(c, "orphan_bot", "", 0, payload)
 	_, ok := got["space_id"]
 	assert.False(t, ok,
 		"ErrNotFound + forged client space_id：bot_api 必须 strip，否则跨 Space 派发")
@@ -259,7 +261,7 @@ func TestEnrichBotPayloadWithSpaceID_OrphanBot_NoForgedClient_NoSpaceInjected(t 
 	ba := newTestBotAPI(q)
 	c := fakeWkContext()
 	payload := map[string]interface{}{"content": "hi"}
-	got := ba.enrichBotPayloadWithSpaceID(c, "orphan_bot", payload)
+	got := ba.enrichBotPayloadWithSpaceID(c, "orphan_bot", "", 0, payload)
 	_, ok := got["space_id"]
 	assert.False(t, ok)
 }
@@ -272,7 +274,7 @@ func TestEnrichBotPayloadWithSpaceID_RealDBError_StripsClientSpaceID(t *testing.
 	ba := newTestBotAPI(q)
 	c := fakeWkContext()
 	payload := map[string]interface{}{"content": "hi", "space_id": "spaceVictim"}
-	got := ba.enrichBotPayloadWithSpaceID(c, "bot_with_db_error", payload)
+	got := ba.enrichBotPayloadWithSpaceID(c, "bot_with_db_error", "", 0, payload)
 	_, ok := got["space_id"]
 	assert.False(t, ok,
 		"DB 错误 + forged client space_id：bot_api 必须 strip，否则攻击者借 DB blip 跨 Space 派发")
@@ -283,7 +285,7 @@ func TestEnrichBotPayloadWithSpaceID_NilPayloadInitialized(t *testing.T) {
 	c := fakeWkContext()
 	c.Set(CtxKeyAppBotScope, "space")
 	c.Set(CtxKeyAppBotSpaceID, "spaceAuth")
-	got := ba.enrichBotPayloadWithSpaceID(c, "bot_robot_1", nil)
+	got := ba.enrichBotPayloadWithSpaceID(c, "bot_robot_1", "", 0, nil)
 	assert.NotNil(t, got)
 	assert.Equal(t, "spaceAuth", got["space_id"])
 }
