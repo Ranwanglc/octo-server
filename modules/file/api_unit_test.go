@@ -23,6 +23,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/testutil"
 	"github.com/Mininglamp-OSS/octo-server/pkg/stickersig"
 	"github.com/gin-gonic/gin"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -559,6 +560,38 @@ func TestGetUploadCredentials_FallbackWithoutFilename(t *testing.T) {
 	_, hasCD := resp["contentDisposition"]
 	assert.False(t, hasCD, "response should not contain contentDisposition without filename")
 	assert.Equal(t, "", mockSvc.lastContentDisp)
+}
+
+func TestStickerOnlyLimiterScopesToStickerUploads(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var hits int
+	limiter := func(c *wkhttp.Context) {
+		hits++
+		c.Header("X-Test-Limiter", "hit")
+		c.Next()
+	}
+	terminal := func(c *wkhttp.Context) {
+		c.Response(map[string]bool{"ok": true})
+	}
+	r := wkhttp.New()
+	r.POST("/v1/file/upload", stickerOnlyLimiter(limiter), terminal)
+
+	nonSticker := httptest.NewRecorder()
+	req, err := http.NewRequest(http.MethodPost, "/v1/file/upload?type=chat", nil)
+	require.NoError(t, err)
+	r.ServeHTTP(nonSticker, req)
+	require.Equal(t, http.StatusOK, nonSticker.Code)
+	assert.Equal(t, 0, hits)
+	assert.Empty(t, nonSticker.Header().Get("X-Test-Limiter"))
+
+	sticker := httptest.NewRecorder()
+	req, err = http.NewRequest(http.MethodPost, "/v1/file/upload?type=sticker", nil)
+	require.NoError(t, err)
+	r.ServeHTTP(sticker, req)
+	require.Equal(t, http.StatusOK, sticker.Code)
+	assert.Equal(t, 1, hits)
+	assert.Equal(t, "hit", sticker.Header().Get("X-Test-Limiter"))
 }
 
 func TestBuildContentDisposition_UsesInline(t *testing.T) {
@@ -1334,6 +1367,8 @@ func TestUploadFile_StickerHandleMinted(t *testing.T) {
 	// A real, small PNG so both ValidateMagicNumber and the dimension guard
 	// (image.DecodeConfig) pass.
 	body, contentType := newMultipartFile(t, "abc.png", pngOfSize(t, 64, 64))
+	beforeUpload := promtestutil.ToFloat64(metricStickerUploadTotal.WithLabelValues("success"))
+	beforeHandle := promtestutil.ToFloat64(metricStickerUploadHandleTotal.WithLabelValues("issued"))
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -1356,6 +1391,8 @@ func TestUploadFile_StickerHandleMinted(t *testing.T) {
 		"minted handle must verify for (uid, returned path) — the tuple sticker.add checks")
 	// And it must NOT verify for a different uid (the handle binds the uploader).
 	require.False(t, stickersig.Verify("99999", path, handle))
+	assert.Equal(t, beforeUpload+1, promtestutil.ToFloat64(metricStickerUploadTotal.WithLabelValues("success")))
+	assert.Equal(t, beforeHandle+1, promtestutil.ToFloat64(metricStickerUploadHandleTotal.WithLabelValues("issued")))
 }
 
 // TestUploadFile_NonStickerNoHandle: non-sticker uploads must not carry a
@@ -1458,6 +1495,7 @@ func TestUploadFile_StickerRejectsOversizeDimensions(t *testing.T) {
 		{"width over only", 600, 10},
 		{"height over only", 10, 600},
 	}
+	beforeRejected := promtestutil.ToFloat64(metricStickerUploadTotal.WithLabelValues("dimension_rejected"))
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			mockSvc := &mockService{downloadURL: "https://cdn.example.com/dm/sticker/10000/x.png"}
@@ -1476,6 +1514,7 @@ func TestUploadFile_StickerRejectsOversizeDimensions(t *testing.T) {
 				"%dx%d sticker must be rejected; body: %s", tc.w, tc.h, rec.Body.String())
 		})
 	}
+	assert.Equal(t, beforeRejected+float64(len(cases)), promtestutil.ToFloat64(metricStickerUploadTotal.WithLabelValues("dimension_rejected")))
 }
 
 // TestUploadFile_StickerRejectsPathExtMismatch is the format-integrity guard: a
