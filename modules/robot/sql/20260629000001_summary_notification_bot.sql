@@ -6,8 +6,14 @@
 -- 三个 reviewer 一致卡 🔴 P1：动态 UID + ensureFriend 插真实 space_member 行会让 bot
 -- 顺带获得 Space 级能力、并污染 member_count / 名册 / @选择器。Boss 定稿方案改为：
 --   - 固定常量 UID = summary_notification（写进 pkg/space.SystemBots 静态常量）；
---   - bot_token 写死进本迁移（不走 env 注入），命中 bot_api/auth.go 的 User Bot 分支
---     （db.go queryRobotByBotToken 要求 bot_token!='' AND status=1）；
+--   - bot_token **不再写死进本迁移**（公开仓库明文凭据风险，reviewer 卡 🔴）。本迁移
+--     只插入 user/robot 身份行，bot_token 留空串（''）。token 由 server 启动时
+--     **自动生成强随机值写回**（见 modules/robot/api.go ensureSummaryBotToken）：
+--     首启检测空 token → crypto/rand 生成 bf_ 前缀 token → 带空值条件 UPDATE 写库，
+--     幂等且并发安全。每部署唯一、源码零明文、运维零准备。
+--     smart-summary（共享同一 IM 库）启动时 SELECT 该 token 用于鉴权（方案 D）。
+--     命中 bot_api/auth.go 的 User Bot 分支（db.go queryRobotByBotToken 要求
+--     bot_token!='' AND status=1）—— 故空 token 时鉴权天然失败直到 server 写回。
 --   - 不再依赖 space_member 行做能力/归属（见 ensure_friend.go 注释与 PR 报告 step4）。
 --
 -- 幂等：INSERT IGNORE，重复执行不报错（uid / robot_id 唯一索引命中即跳过）。
@@ -37,13 +43,14 @@ VALUES
    0, 0, 0, 0, 0, 0,
    0, 1);
 
--- robot 行：bot_token 写死（bf_ 前缀，固定常量）；status=1 启用；username=uid。
--- 其余列（app_id / description / im_token_cache / bot_commands / auto_approve / placeholder
--- 等）走列默认值。
+-- robot 行：bot_token 留**空串 ''**（不写死明文凭据）；status=1 启用；username=uid。
+-- token 由 server 启动时 ensureSummaryBotToken() 自动生成强随机值并 UPDATE 写回
+-- （见 modules/robot/api.go）。其余列（app_id / description / im_token_cache /
+-- bot_commands / auto_approve / placeholder 等）走列默认值。
 INSERT IGNORE INTO `robot`
   (robot_id, token, bot_token, username, status, `version`, creator_uid, description)
 VALUES
-  ('summary_notification', 'summary_notification', 'bf_7c7314e3734b17dfe6988b1d9031ea52',
+  ('summary_notification', 'summary_notification', '',
    'summary_notification', 1, 1, '', '智能总结通知助手（系统 bot，固定 UID）');
 
 -- +migrate Down

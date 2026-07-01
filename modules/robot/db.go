@@ -131,6 +131,27 @@ func (d *robotDB) queryRobotByBotToken(botToken string) (*robot, error) {
 	return m, err
 }
 
+// queryBotTokenByRobotID 读取指定机器人的 bot_token（可能为空串）。
+// 用于 server 启动时的 ensureSummaryBotToken 自举判定（OCT-5 / 方案 D）。
+func (d *robotDB) queryBotTokenByRobotID(robotID string) (string, error) {
+	var botToken string
+	err := d.session.Select("IFNULL(bot_token,'')").From("robot").Where("robot_id=?", robotID).LoadOne(&botToken)
+	return botToken, err
+}
+
+// updateRobotBotTokenIfEmpty 仅当 bot_token 为空（'' 或 NULL）时写入 newToken。
+// WHERE 的空值条件让多实例并发启动时只有一个 UPDATE 生效（幂等、防覆盖已生成的
+// 非空 token）。返回受影响行数：1=本实例写入成功，0=已有非空 token（被他人抢先或本就有）。
+func (d *robotDB) updateRobotBotTokenIfEmpty(robotID string, newToken string) (int64, error) {
+	res, err := d.session.Update("robot").SetMap(map[string]interface{}{
+		"bot_token": newToken,
+	}).Where("robot_id=? AND (bot_token='' OR bot_token IS NULL)", robotID).Exec()
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // updateRobotBotToken 重置机器人的Bot Token
 func (d *robotDB) updateRobotBotToken(robotID string, newToken string) error {
 	_, err := d.session.Update("robot").SetMap(map[string]interface{}{

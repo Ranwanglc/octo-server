@@ -301,11 +301,18 @@ func (rb *Robot) Route(r *wkhttp.WKHttp) {
 		rb.Error("初始化系统机器人失败", zap.Error(err))
 	}
 
-	// OCT-5 / PR#483 第二轮 🟡 MAJOR：「总结助手」(summary_notification) 现在是固定
-	// 常量 + 迁移拥有的系统 bot（user 行 / robot 行 / 固定 bot_token 全由迁移
-	// modules/robot/sql/20260629000001_summary_notification_bot.sql 写死）。运行时
-	// 不再做 env 驱动的自举/reconcile —— 旧的 insertSummaryRobot() 会用 stale env
-	// 覆盖迁移写死的 token，破坏鉴权。故此处不再调用任何 summary bot 自举。
+	// OCT-5 / PR#483 方案 D（共享 DB + 启动自动生成 token）：「总结助手」
+	// (summary_notification) 是固定 UID 的系统 bot，user 行 / robot 行 由迁移
+	// modules/robot/sql/20260629000001_summary_notification_bot.sql 插入，但
+	// bot_token 不写死在迁移里（避免公开仓库明文凭据）。运行时不再做 env
+	// 驱动的自举/reconcile（旧的 insertSummaryRobot() 会用 stale env 覆盖 token，
+	// 破坏鉴权）。故此处不再调用任何 env 驱动的 summary bot 自举。
+
+	// OCT-5 / 方案 D（共享 DB）：迁移不写死明文 bot_token（避免公开仓库明文
+	// 凭据）；改为 server 首次启动时自动生成强随机 token 写回 robot 表，smart-summary
+	// 在投递时从共享 IM 库 lazy SELECT 该 token 鉴权。幂等且并发安全（见
+	// ensureSummaryBotToken 注释）；失败只 log 不 panic，不阻断启动。
+	rb.ensureSummaryBotToken()
 }
 
 func (rb *Robot) streamStart(c *wkhttp.Context) {

@@ -36,8 +36,10 @@ var SystemBots = map[string]bool{
 //
 // Boss 定稿：summary bot 不再用 env 驱动的动态 UID，改为本固定常量（全小写下划线，
 // 注意拼写）。它同时被登记在 SystemBots 中，是 IsSystemBot 单一真源的一部分。
-// 自举走迁移文件 modules/robot/sql/20260629000001_summary_notification_bot.sql
-// （bot_token 写死），运行时不再依赖配置注入 UID。
+// 身份行（user/robot）由迁移文件 modules/robot/sql/20260629000001_summary_notification_bot.sql
+// 插入（bot_token 留空、不写死明文凭据）；bot_token 由 server 首次启动时
+// ensureSummaryBotToken() 自动生成强随机值并写回 robot 表（方案 D）。运行时不再
+// 依赖配置注入 UID。
 const SummaryNotificationBotUID = "summary_notification"
 
 // SystemBotList 以稳定顺序返回所有系统 Bot UID。
