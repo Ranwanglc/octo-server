@@ -73,6 +73,23 @@ func setStickerQuota(t *testing.T, ctx *config.Context, n int) {
 	require.NoError(t, commonmod.EnsureSystemSettings(ctx).Reload())
 }
 
+// setStickerHandleRequired upserts the admin-tunable enforcement policy
+// (system_setting sticker.handle_required) and reloads the shared snapshot so the
+// handler sees it immediately. Enforcement now lives in system_setting (DB), not
+// an env var, so tests write the row rather than t.Setenv.
+func setStickerHandleRequired(t *testing.T, ctx *config.Context, required bool) {
+	t.Helper()
+	v := "0"
+	if required {
+		v = "1"
+	}
+	_, err := ctx.DB().InsertInto("system_setting").
+		Columns("category", "key_name", "value", "value_type").
+		Values("sticker", "handle_required", v, "bool").Exec()
+	require.NoError(t, err)
+	require.NoError(t, commonmod.EnsureSystemSettings(ctx).Reload())
+}
+
 // validStickerPath builds an object key shaped like the multipart uploader's
 // output for the test login user (sticker/{uid}/<name>), so add() accepts it.
 // add() validates that req.Path names THIS user's sticker upload, so test
@@ -359,8 +376,14 @@ func TestSticker_AddConcurrentQuota(t *testing.T) {
 // raster-only sticker upload contract. The handle closes it: the client cannot
 // mint a valid handle for an object it didn't upload via type=sticker, so the
 // registration is refused even though the shape passes.
+//
+// NOTE: this strong guarantee holds only under enforcement (required=true). In
+// compatibility mode (required=false) a missing handle is allowed through (see
+// TestSticker_CompatModeAllowsMissingHandle), so the cross-type bypass defense
+// degrades during the rollout window — that is the intended, reversible trade-off.
 func TestSticker_AddRejectsForgedTailMatchPath(t *testing.T) {
-	route, _, _ := setupSticker(t)
+	route, ctx, _ := setupSticker(t)
+	setStickerHandleRequired(t, ctx, true)
 
 	forged := "file/preview/chat/sticker/" + testutil.UID + "/x.gif"
 	// Sanity: the forged path DOES pass the shape check (the residual)...
@@ -374,10 +397,12 @@ func TestSticker_AddRejectsForgedTailMatchPath(t *testing.T) {
 	assertStickerErrorCode(t, w, "err.server.sticker.request_invalid")
 }
 
-// TestSticker_AddRejectsMissingHandle: a perfectly shaped sticker path is still
-// refused when no handle accompanies it (handle signing is active in tests).
+// TestSticker_AddRejectsMissingHandle: under enforcement (required=true) a
+// perfectly shaped sticker path is still refused when no handle accompanies it
+// (handle signing is active in tests).
 func TestSticker_AddRejectsMissingHandle(t *testing.T) {
-	route, _, _ := setupSticker(t)
+	route, ctx, _ := setupSticker(t)
+	setStickerHandleRequired(t, ctx, true)
 
 	w := doRequest(t, route, "POST", "/v1/sticker/user", map[string]string{
 		"path": validStickerPath("nohandle.png"), "format": "png",
@@ -385,15 +410,61 @@ func TestSticker_AddRejectsMissingHandle(t *testing.T) {
 	assertStickerErrorCode(t, w, "err.server.sticker.request_invalid")
 }
 
-// TestSticker_AddRejectsTamperedHandle: a handle minted for a DIFFERENT object
-// must not authorize this path (the HMAC binds uid+path).
-func TestSticker_AddRejectsTamperedHandle(t *testing.T) {
+// TestSticker_CompatModeAllowsMissingHandle: in compatibility mode (the default,
+// required=false) a shape-valid path with NO handle is allowed through so older
+// clients keep working during the rollout. The missing handle is recorded
+// (compat_missing metric); behavior here is the allow + persisted-sticker outcome.
+func TestSticker_CompatModeAllowsMissingHandle(t *testing.T) {
+	// Default posture: setupSticker cleans system_setting, so
+	// sticker.handle_required is absent → StickerHandleRequired() is false.
 	route, _, _ := setupSticker(t)
 
 	w := doRequest(t, route, "POST", "/v1/sticker/user", map[string]string{
-		"path":   validStickerPath("real.png"),
-		"format": "png",
-		"handle": validStickerHandle(t, validStickerPath("other.png")),
+		"path": validStickerPath("legacy.png"), "format": "png",
+	})
+	require.Equal(t, http.StatusOK, w.Code, "compat mode must allow a missing handle: %s", w.Body.String())
+	body := parseJSON(t, w)
+	assert.NotEmpty(t, body["sticker_id"], "allowed registration must return the new sticker")
+}
+
+// TestSticker_AddRejectsTamperedHandle: a tampered/forged handle (non-empty but
+// not verifiable — here, one minted for a DIFFERENT object) is rejected
+// regardless of the required policy — invalid handles are never compat-allowed.
+// Asserted under BOTH modes.
+func TestSticker_AddRejectsTamperedHandle(t *testing.T) {
+	for _, required := range []bool{false, true} {
+		t.Run(fmt.Sprintf("required=%v", required), func(t *testing.T) {
+			route, ctx, _ := setupSticker(t)
+			setStickerHandleRequired(t, ctx, required)
+
+			w := doRequest(t, route, "POST", "/v1/sticker/user", map[string]string{
+				"path":   validStickerPath("real.png"),
+				"format": "png",
+				"handle": validStickerHandle(t, validStickerPath("other.png")),
+			})
+			assertStickerErrorCode(t, w, "err.server.sticker.request_invalid")
+		})
+	}
+}
+
+// TestSticker_RequiredWithoutCapability_FailsClosed pins the config-conflict
+// contract (brief acceptance): when the policy demands a handle
+// (sticker.handle_required=true) but the server has NO signing capability
+// (OCTO_MASTER_KEY absent), registration must be REJECTED (fail-closed), not
+// silently allowed on the path-shape check. The server boots with a key (common
+// setup needs it to encrypt the IM private key); stickersig reads the env live,
+// so unsetting it here makes Enabled() false at request time — exactly the
+// misconfig: enforcement on, capability gone.
+func TestSticker_RequiredWithoutCapability_FailsClosed(t *testing.T) {
+	route, ctx, _ := setupSticker(t)
+	setStickerHandleRequired(t, ctx, true)
+	t.Setenv("OCTO_MASTER_KEY", "") // drop the signing capability at request time
+	require.False(t, stickersig.Enabled(), "precondition: no signing capability")
+
+	// A shape-valid path (here without a handle; a handle would be equally
+	// unverifiable) must be refused rather than allowed through.
+	w := doRequest(t, route, "POST", "/v1/sticker/user", map[string]string{
+		"path": validStickerPath("nokey.png"), "format": "png",
 	})
 	assertStickerErrorCode(t, w, "err.server.sticker.request_invalid")
 }

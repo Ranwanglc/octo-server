@@ -32,6 +32,35 @@
 // reports false) and callers fall back to the non-cryptographic path-shape check
 // — the same posture as before handles existed, so deployments without a master
 // key are not regressed.
+//
+// # Capability vs enforcement policy
+//
+// Enabled() reports the server CAPABILITY to mint/verify handles (i.e. whether a
+// usable OCTO_MASTER_KEY is present). It must NOT be conflated with the
+// enforcement POLICY of whether sticker registration REQUIRES a handle — because
+// OCTO_MASTER_KEY is a mandatory production contract (modules/common also needs
+// it to encrypt the IM RSA private key at rest), so Enabled() is effectively
+// always true in production. Tying enforcement to Enabled() would silently flip
+// the sticker-registration protocol the moment a master key exists and break
+// older clients that do not yet send a handle.
+//
+// The enforcement policy is therefore a SEPARATE, independent switch that lives
+// OUTSIDE this leaf package: the DB-backed system_setting `sticker.handle_required`
+// (modules/common SystemSettings.StickerHandleRequired, default false), so it can
+// be toggled and rolled back from the admin console without a redeploy. This
+// package only exposes the capability (Enabled) and the sign/verify primitives;
+// the two are deliberately orthogonal and are never derived from one another.
+//
+// # Two-step client flow
+//
+//  1. Upload the image: POST /v1/file/upload?type=sticker → response carries
+//     `path` and (when Enabled) `sticker_handle`.
+//  2. Register the sticker: POST /v1/sticker/user with `path` and pass the
+//     `sticker_handle` value as the `handle` field.
+//
+// Stickers do NOT support presigned uploads: the handle can only be minted at the
+// point modules/file has both the authenticated uploader and the content-validated
+// bytes, so the image must transit the multipart upload endpoint.
 package stickersig
 
 import (

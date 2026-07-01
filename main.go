@@ -213,6 +213,13 @@ func runAPI(ctx *config.Context) {
 	// singleflight 合并 / 304。由 modules/user 的 avatarCache 经包级 Observe 函数灌入;
 	// 此处注册即可,未注册前这些 Observe 为 no-op,不影响已构造的 cache。
 	metrics.NewAvatarMetrics(prometheus.DefaultRegisterer)
+	// 自定义贴纸 handle 上线观测指标(P0: Sticker Handle Enforcement Rollout):上传签发
+	// handle 次数 / 注册结果分布 / 部署姿态 gauge。由 modules/file(签发) 与
+	// modules/sticker(注册) 经包级 Observe 函数灌入;此处注册即可,未注册前为 no-op。
+	// 部署姿态 gauge(能力=OCTO_MASTER_KEY / 策略=system_setting sticker.handle_required)
+	// 由 sticker 模块在 New() 时落值——策略源在 system_setting(common 模块),故不在此组合根
+	// 设置,避免反向依赖 modules/sticker。
+	metrics.NewStickerMetrics(prometheus.DefaultRegisterer)
 	// 构造进程级共享头像渲染缓存,并把观测 hooks 接到上面注册的头像指标。所有头像端点
 	// (user 的 UserAvatar;群组头像渲染合并后亦然——#478)经 avatarrender.GetOrRender
 	// 共用这一个实例:共享 LRU + 同一个渲染信号量(后者唯一,才是真正的进程级渲染并发
