@@ -20,14 +20,14 @@ const (
 // Model 对应 doc_binding 表；字段顺序与 SQL 列一致，方便和 sql/ 对读。
 // gocraft/dbr AttrToUnderscore 依据字段名自动映射列（Id→id, CreatorUID→creator_uid ...）。
 type Model struct {
-	Id              int64
-	Slug            string
-	MountType       string
-	GroupNo         string
-	ThreadId        string
-	SpaceId         string
-	CreatorUID      string
-	AllowShareCode  int
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	Id             int64
+	Slug           string
+	MountType      string
+	GroupNo        string
+	ThreadId       string
+	SpaceId        string
+	CreatorUID     string
+	AllowShareCode int
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
 	"github.com/Mininglamp-OSS/octo-server/modules/space"
+	"github.com/Mininglamp-OSS/octo-server/modules/thread"
 	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
 	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
 	"go.uber.org/zap"
@@ -40,24 +41,49 @@ type spaceAuth interface {
 	MemberRole(spaceId, uid string) (role int, found bool, err error)
 }
 
+// threadAuth 只暴露一个校验：thread(short_id) 是不是真的挂在给定 group 下。
+// 抽出来的原因是 create 路径必须先确认 (group_no, thread_id) 归属一致，防止
+// caller 借"我是 A 群管"越权把 A 的 slug 绑到属于 B 群的 thread（数据串挂 +
+// 之后所有读写都会按错的父群 ACL 走）。
+type threadAuth interface {
+	ExistInGroup(groupNo, threadId string) (bool, error)
+}
+
 // DocBinding 是 doc_binding module 的 HTTP handler。
 type DocBinding struct {
 	ctx        *config.Context
 	db         store
 	groupAuth  groupAuth
 	spaceAuth  spaceAuth
+	threadAuth threadAuth
 	log.Log
 }
 
 // New 生成 DocBinding handler；被 1module.go 里的 SetupAPI 调用。
 func New(ctx *config.Context) *DocBinding {
 	return &DocBinding{
-		ctx:       ctx,
-		db:        newDB(ctx),
-		groupAuth: group.NewService(ctx),
-		spaceAuth: newRealSpaceAuth(ctx),
-		Log:       log.NewTLog("DocBinding"),
+		ctx:        ctx,
+		db:         newDB(ctx),
+		groupAuth:  group.NewService(ctx),
+		spaceAuth:  newRealSpaceAuth(ctx),
+		threadAuth: newRealThreadAuth(ctx),
+		Log:        log.NewTLog("DocBinding"),
 	}
+}
+
+// realThreadAuth 落到 thread 模块的 ExistByGroupNoAndShortID：thread_id 即 short_id
+// （thread.BuildChannelID(groupNo, shortID) 的 shortID），thread 表 UNIQUE(group_no, short_id)
+// 一次索引命中即可判定归属。
+type realThreadAuth struct {
+	db *thread.DB
+}
+
+func newRealThreadAuth(ctx *config.Context) *realThreadAuth {
+	return &realThreadAuth{db: thread.NewDB(ctx)}
+}
+
+func (r *realThreadAuth) ExistInGroup(groupNo, threadId string) (bool, error) {
+	return r.db.ExistByGroupNoAndShortID(groupNo, threadId)
 }
 
 // realSpaceAuth 用 space.DB.IsMember + 直查 space_member.role 来落地 spaceAuth；
@@ -100,13 +126,13 @@ func (h *DocBinding) Route(r *wkhttp.WKHttp) {
 // ---- request/response DTO -------------------------------------------------
 
 type createReq struct {
-	Slug            string `json:"slug"`
-	MountType       string `json:"mount_type"`
-	GroupNo         string `json:"group_no,omitempty"`
-	ThreadId        string `json:"thread_id,omitempty"`
-	SpaceId         string `json:"space_id,omitempty"`
+	Slug      string `json:"slug"`
+	MountType string `json:"mount_type"`
+	GroupNo   string `json:"group_no,omitempty"`
+	ThreadId  string `json:"thread_id,omitempty"`
+	SpaceId   string `json:"space_id,omitempty"`
 	// 指针区分 "未传" 与 "显式 false"；未传时按默认 false（不开分享码）落库。
-	AllowShareCode  *bool  `json:"allow_share_code,omitempty"`
+	AllowShareCode *bool `json:"allow_share_code,omitempty"`
 }
 
 type updateReq struct {
@@ -114,13 +140,13 @@ type updateReq struct {
 }
 
 type bindingResp struct {
-	Slug            string `json:"slug"`
-	MountType       string `json:"mount_type"`
-	GroupNo         string `json:"group_no,omitempty"`
-	ThreadId        string `json:"thread_id,omitempty"`
-	SpaceId         string `json:"space_id,omitempty"`
-	CreatorUID      string `json:"creator_uid"`
-	AllowShareCode  bool   `json:"allow_share_code"`
+	Slug           string `json:"slug"`
+	MountType      string `json:"mount_type"`
+	GroupNo        string `json:"group_no,omitempty"`
+	ThreadId       string `json:"thread_id,omitempty"`
+	SpaceId        string `json:"space_id,omitempty"`
+	CreatorUID     string `json:"creator_uid"`
+	AllowShareCode bool   `json:"allow_share_code"`
 }
 
 func toResp(m *Model) *bindingResp {
@@ -171,6 +197,22 @@ func (h *DocBinding) create(c *wkhttp.Context) {
 	default:
 		httperr.ResponseErrorL(c, errcode.ErrDocBindingRequestInvalid, nil, map[string]interface{}{"field": "mount_type"})
 		return
+	}
+
+	// thread 挂载额外硬校验：thread_id 必须真的挂在 req.GroupNo 下。仅靠 canWrite（父群管理员）
+	// 不够——A 群管理员可能拿到 B 群的 thread_id 就想把 slug 绑过去，如果不校验归属，
+	// binding 会落成 (group_no=A, thread_id=belongs_to_B)，之后按 GroupNo=A 判 ACL 就是错的。
+	if req.MountType == MountTypeThread {
+		if ok, err := h.threadAuth.ExistInGroup(req.GroupNo, req.ThreadId); err != nil {
+			h.Error("校验 thread 归属失败", zap.Error(err))
+			httperr.ResponseErrorL(c, errcode.ErrDocBindingStoreFailed, nil, nil)
+			return
+		} else if !ok {
+			// 归属不上的 thread_id：按 field 报 400，不是 hidden-404——POST 场景 caller 自报的
+			// 是无效引用，不涉及"这个 thread 是否存在"的信息泄漏（他本来就没资格查 B 群的 thread）。
+			httperr.ResponseErrorL(c, errcode.ErrDocBindingRequestInvalid, nil, map[string]interface{}{"field": "thread_id"})
+			return
+		}
 	}
 
 	// 写权限：按挂载类型判定；不通过一律 403（因为 caller 是主动 POST，泄不泄漏这个挂载点存在都不重要）。
