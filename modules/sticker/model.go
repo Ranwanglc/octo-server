@@ -1,7 +1,10 @@
 package sticker
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -24,7 +27,12 @@ type StickerModel struct {
 	Sort        int
 	Shortcode   string
 	Keywords    string
-	Status      int
+	SourcePath  string
+	// SourcePathHash is set only for "collect from message" records. Direct
+	// upload registrations keep it empty so the collect-only unique key does not
+	// affect existing custom-sticker creation.
+	SourcePathHash string
+	Status         int
 	db.BaseModel
 }
 
@@ -159,6 +167,88 @@ func validateStickerPath(path, loginUID, format string) bool {
 	return ext == format && isAllowedStickerFormat(ext)
 }
 
+type collectStickerSource struct {
+	SourceKey   string
+	DisplayPath string
+	Format      string
+}
+
+var (
+	stickerSourceObjectKeyExactRe = regexp.MustCompile(`^sticker/([^/]+)/([^/]+)\.([A-Za-z0-9]+)$`)
+	stickerSourceObjectKeyTailRe  = regexp.MustCompile(`(?:^|/)sticker/([^/]+)/([^/]+)\.([A-Za-z0-9]+)$`)
+)
+
+func parseCollectStickerSourcePath(raw string) (collectStickerSource, bool) {
+	pathValue := strings.TrimSpace(raw)
+	if pathValue == "" {
+		return collectStickerSource{}, false
+	}
+	if i := strings.IndexAny(pathValue, "?#"); i >= 0 {
+		pathValue = pathValue[:i]
+	}
+
+	candidate := pathValue
+	if u, err := url.Parse(pathValue); err == nil && u.Scheme != "" && u.Host != "" {
+		candidate = u.Path
+	}
+	candidate = strings.TrimPrefix(candidate, "/")
+
+	if strings.HasPrefix(candidate, "file/preview/") {
+		return parseCollectStickerObjectKey(strings.TrimPrefix(candidate, "file/preview/"), stickerSourceObjectKeyExactRe)
+	}
+	if strings.HasPrefix(candidate, "sticker/") {
+		return parseCollectStickerObjectKey(candidate, stickerSourceObjectKeyExactRe)
+	}
+	return parseCollectStickerObjectKey(candidate, stickerSourceObjectKeyTailRe)
+}
+
+func parseCollectStickerObjectKey(candidate string, re *regexp.Regexp) (collectStickerSource, bool) {
+	m := re.FindStringSubmatch(candidate)
+	if m == nil {
+		return collectStickerSource{}, false
+	}
+	format := normalizeStickerFormat(m[3])
+	if !isAllowedStickerFormat(format) {
+		return collectStickerSource{}, false
+	}
+	sourceKey := "sticker/" + m[1] + "/" + m[2] + "." + m[3]
+	// Reject path-traversal / relative segments before the key is ever stored.
+	// The regex's `[^/]+` matches "." and "..", so `sticker/../a.png` parses to
+	// SourceKey "sticker/../a.png". That key is later resolved by renderablePath
+	// via DownloadURL → url.JoinPath, which RESOLVES "..", collapsing the
+	// "sticker/" prefix and escaping the sticker keyspace to the bucket root
+	// (e.g. "<base>/bucket/a.png"). Confining at ingress keeps traversal keys out
+	// of the DB and out of every downstream consumer (this one and file/preview).
+	if hasUnsafeSegment(sourceKey) {
+		return collectStickerSource{}, false
+	}
+	return collectStickerSource{
+		SourceKey:   sourceKey,
+		DisplayPath: "file/preview/" + sourceKey,
+		Format:      format,
+	}, true
+}
+
+// hasUnsafeSegment reports whether key contains a "." or ".." path segment. A
+// ".." segment lets url.JoinPath (used by every storage backend's DownloadURL)
+// escape the object key's intended prefix; "." is normalized away and never
+// legitimate in a generated sticker key. Percent-encoded forms ("%2e%2e") are
+// intentionally NOT decoded here: url.JoinPath leaves them literal (verified),
+// so they cannot traverse — only literal segments can.
+func hasUnsafeSegment(key string) bool {
+	for _, seg := range strings.Split(key, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func stickerSourcePathHash(sourceKey string) string {
+	sum := sha256.Sum256([]byte(sourceKey))
+	return hex.EncodeToString(sum[:])
+}
+
 // ---------- Request ----------
 
 type addStickerReq struct {
@@ -177,6 +267,14 @@ type addStickerReq struct {
 	// always rejected; a missing handle is rejected only when the policy is on. See
 	// classifyStickerPath.
 	Handle string `json:"handle"`
+}
+
+type collectStickerReq struct {
+	Path        string   `json:"path"`
+	Placeholder string   `json:"placeholder"`
+	Sort        int      `json:"sort"`
+	Shortcode   string   `json:"shortcode"`
+	Keywords    []string `json:"keywords"`
 }
 
 type updateStickerReq struct {

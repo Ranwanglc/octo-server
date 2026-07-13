@@ -28,6 +28,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-server/modules/group"
 	"github.com/Mininglamp-OSS/octo-server/modules/robot"
 	"github.com/Mininglamp-OSS/octo-server/modules/thread"
+	"github.com/Mininglamp-OSS/octo-server/pkg/cardmsg"
 	"github.com/Mininglamp-OSS/octo-server/pkg/i18n"
 	"github.com/Mininglamp-OSS/octo-server/pkg/mentionrewrite"
 	octoredis "github.com/Mininglamp-OSS/octo-server/pkg/redis"
@@ -384,20 +385,10 @@ func generateWebhookID() string {
 	return webhookIDPrefix + hex.EncodeToString(buf)
 }
 
-// memberWebhookNamePrefix 是非管理员（成员/bot）所设 webhook 展示名的强制前缀：
-// 成员可以自定义名称，但名称必须以 "Webhook-" 开头（缺省自动命名本就是该形态），
-// 防止成员把 webhook 命名成"HR 公告"或他人姓名冒充真实发送者（PR #340 review，
-// yujiawei P2）。管理员命名不受限（历史行为，管理员本就可信）。
-const memberWebhookNamePrefix = "Webhook-"
-
-// prefixedWebhookName 给非管理员提交的名称补强制前缀；已带前缀则原样返回（幂等，
-// 避免成员保存自己 webhook 时被二次加前缀）。
-func prefixedWebhookName(name string) string {
-	if strings.HasPrefix(name, memberWebhookNamePrefix) {
-		return name
-	}
-	return memberWebhookNamePrefix + name
-}
+// autoWebhookNamePrefix 是创建时未提供名称时，服务端自动生成的默认展示名前缀
+// （形如 "Webhook-xxxxxx"）。仅用于默认命名；成员/bot 自定义名称不再被强制加此
+// 前缀（历史上曾强制加前缀防冒充，PR #340 review yujiawei P2，产品决定移除）。
+const autoWebhookNamePrefix = "Webhook-"
 
 // autoWebhookName 在创建时未提供名称的情况下生成服务端默认名：
 // 前缀 + webhook_id 随机段前 6 位 hex。确定性、可与 webhook_id 对账，
@@ -407,7 +398,7 @@ func autoWebhookName(webhookID string) string {
 	if len(suffix) > 6 {
 		suffix = suffix[:6]
 	}
-	return memberWebhookNamePrefix + suffix
+	return autoWebhookNamePrefix + suffix
 }
 
 func toResp(m *incomingWebhookModel) webhookResp {
@@ -694,15 +685,8 @@ func (w *IncomingWebhook) create(c *wkhttp.Context) {
 		return
 	}
 	req.Name = strings.TrimSpace(req.Name)
-	// 成员/bot 自定义名称强制带 "Webhook-" 前缀（先补前缀再做长度校验，上限对
-	// 最终落库值生效）；管理员命名不受限。恰好等于裸前缀（无有效内容）视同未填，
-	// 走下方的自动命名（PR #340 review，yujiawei P2#9）。
-	if !actor.isAdmin && req.Name != "" {
-		req.Name = prefixedWebhookName(req.Name)
-		if req.Name == memberWebhookNamePrefix {
-			req.Name = ""
-		}
-	}
+	// 成员/bot 可自定义名称，与管理员同口径，不再强制前缀（产品决定移除
+	// PR #340 引入的 "Webhook-" 强制前缀）。
 	if len(req.Name) > 64 {
 		mgmtRequestInvalid(c, "name")
 		return
@@ -903,16 +887,7 @@ func (w *IncomingWebhook) update(c *wkhttp.Context) {
 			mgmtRequestInvalid(c, "name")
 			return
 		}
-		// 与 create 同口径：成员/bot 改名强制带前缀（幂等），长度校验对最终值生效；
-		// 裸前缀（无有效内容）按空名拒绝——update 没有自动命名回退（既有名字是已
-		// 确立的身份，静默换成自动名会让调用方意外）。
-		if !actor.isAdmin {
-			name = prefixedWebhookName(name)
-			if name == memberWebhookNamePrefix {
-				mgmtRequestInvalid(c, "name")
-				return
-			}
-		}
+		// 与 create 同口径：成员/bot 改名不再强制带前缀，长度校验对最终值生效。
 		if len(name) > 64 {
 			mgmtRequestInvalid(c, "name")
 			return
@@ -1394,7 +1369,7 @@ func (w *IncomingWebhook) handlePush(c *wkhttp.Context, ad pushAdapter) {
 	//
 	// creatorIsAdmin 顺带取自同一查询：决定 push 请求的 username/avatar_url 展示覆盖
 	// 是否生效（见 resolveFromIdentity——创建者当前是管理员才允许覆盖，堵住成员经
-	// push 路径绕过管理面前缀/头像限制的冒充旁路，PR #340 review，yujiawei P1）。
+	// push 路径绕过管理面头像锁/已落库名称的冒充旁路，PR #340 review，yujiawei P1）。
 	creatorIsMember, creatorIsAdmin, err := w.cachedCreatorMembership(m.GroupNo, m.CreatorUID)
 	if err != nil {
 		// 服务端故障：拒绝但不禁用（fail closed on push, no destructive write）。
@@ -1499,6 +1474,26 @@ func (w *IncomingWebhook) handlePush(c *wkhttp.Context, ad pushAdapter) {
 			return
 		}
 		payload = p
+	case msgTypeCard:
+		// card-message-protocol P1：标准 AC JSON → type-17 信封（服务端钉
+		// octo/v1 profile），cardmsg.Validate/Finalize 与 bot ingress 同权威。
+		// 8KB body cap 不变（Decision 3：树上限/512KiB 由 cardmsg 层执行）。
+		p, err := buildCardPayload(m, req, creatorIsAdmin)
+		if err != nil {
+			if errors.Is(err, cardmsg.ErrCardPayloadTooLarge) {
+				w.submitFailure(m, len(body), ip, ad.name, "too_large", http.StatusRequestEntityTooLarge)
+				pushPayloadTooLarge(c)
+				return
+			}
+			reason := "card"
+			if errors.Is(err, errCardDisabled) {
+				reason = "card_disabled"
+			}
+			w.submitFailure(m, len(body), ip, ad.name, reason, http.StatusBadRequest)
+			pushPayloadInvalid(c, reason)
+			return
+		}
+		payload = p
 	default:
 		w.submitFailure(m, len(body), ip, ad.name, "msg_type", http.StatusBadRequest)
 		pushPayloadInvalid(c, "msg_type")
@@ -1519,6 +1514,18 @@ func (w *IncomingWebhook) handlePush(c *wkhttp.Context, ad pushAdapter) {
 	// 创建的 webhook 的广播位立即剥离；管理员建的不受影响。定向 @uid 不走此闸（不是广播、风险低）。
 	broadcastPermitted := w.settings.IncomingWebhookMemberCanBroadcast() || creatorIsAdmin
 	payload, mentionIgnored := w.assemblePushPayload(m, req, payload, broadcastPermitted)
+
+	// card-message-protocol P1 Decision 3a：assemblePushPayload 内的
+	// ExpandAisToBotUIDs 是 Finalize 之后唯一增大 payload 的 mutation（@所有 AI
+	// 展开把群 bot 成员 UID 追加进 mention 子表）。与 bot_api(send.go)/robot(api.go)
+	// 出站口径对称：对真实出站 payload 复检 512KiB —— 三个 type-17 producer 的
+	// 「最后一次 mutation 后复检」不变量在此闭合（PR#543 review：webhook 是第三条
+	// 对称路径，此前遗漏）。非 type-17 为 no-op。
+	if err := cardmsg.RecheckPayloadSize(payload); err != nil {
+		w.submitFailure(m, len(body), ip, ad.name, "too_large", http.StatusRequestEntityTooLarge)
+		pushPayloadTooLarge(c)
+		return
+	}
 
 	// 投递目标由行派生：群 webhook → (group_no, 群)；子区 webhook → (group_no____short_id,
 	// 子区)。这是 URL/body 之外唯一随绑定变化的东西——推送方零适配（见 targetChannel()）。
@@ -1638,10 +1645,10 @@ func buildPayload(m *incomingWebhookModel, req *pushPayloadReq, allowOverride bo
 //   - true（管理员创建/持有）：覆盖优先，否则回落到 webhook 自身配置——历史的
 //     Slack/GitHub 兼容行为，管理员可信；
 //   - false（成员/bot 的 webhook）：覆盖一律【忽略】，固定用存量 Name/Avatar。
-//     没有这道闸，管理面的 Webhook- 前缀与头像锁就会被 push 路径整体绕过——成员拿着
-//     自己 webhook 的 token 即可以"HR 公告"+任意头像发声（PR #340 review，yujiawei
-//     P1：don't ship a half-control）。存量 Name 必然已带前缀（create/update 强制），
-//     无需在此重复加工。
+//     没有这道闸，管理面的头像锁（及 create/update 走鉴权、留存修改记录的 Name）
+//     就会被 push 路径整体绕过——成员拿着自己 webhook 的 token 即可在每次推送时
+//     临时冒充任意名称/头像，而不必经过有身份校验、留痕的管理端点（PR #340
+//     review，yujiawei P1：don't ship a half-control）。
 //
 // 两者都裁剪到与 create 侧一致的字节上限，防止 push 路径成为绕过列长度约束的旁路。
 // 文本与富文本两条路径共用此函数，保证 from.* 渲染口径一致。

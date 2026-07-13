@@ -25,11 +25,14 @@
 package sticker
 
 import (
+	"strings"
+
 	"github.com/Mininglamp-OSS/octo-lib/config"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/log"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/util"
 	"github.com/Mininglamp-OSS/octo-lib/pkg/wkhttp"
 	commonmod "github.com/Mininglamp-OSS/octo-server/modules/common"
+	filemod "github.com/Mininglamp-OSS/octo-server/modules/file"
 	"github.com/Mininglamp-OSS/octo-server/pkg/errcode"
 	"github.com/Mininglamp-OSS/octo-server/pkg/httperr"
 	"github.com/Mininglamp-OSS/octo-server/pkg/metrics"
@@ -43,11 +46,21 @@ import (
 // oversized value gets a clean 400 instead of a DB truncation/error.
 const (
 	maxStickerPathLen        = 512
+	maxStickerCollectPathLen = 2048
 	maxStickerPlaceholderLen = 100
 	// defaultStickerPlaceholder is stored when the client sends no placeholder,
 	// so conversation digests / push notifications have a sensible fallback.
 	defaultStickerPlaceholder = "[表情]"
 )
+
+// stickerURLResolver resolves a stored sticker object key into a directly
+// renderable, anonymous-GET download URL. It is the single capability the
+// sticker module needs from modules/file; kept as a 1-method interface so tests
+// inject a deterministic fake instead of a real storage backend. Satisfied by
+// file.IService (modules/file).
+type stickerURLResolver interface {
+	DownloadURL(path string, filename string) (string, error)
+}
 
 // Sticker 用户自定义贴纸 API。
 type Sticker struct {
@@ -55,6 +68,10 @@ type Sticker struct {
 	log.Log
 	db       *stickerDB
 	settings *commonmod.SystemSettings
+	// fileURL resolves a stored path into a client-renderable URL. See
+	// renderablePath — this is what lets GET /v1/sticker/user return one uniform
+	// renderable `path` for both self-uploaded and collected stickers.
+	fileURL stickerURLResolver
 }
 
 // New 创建 Sticker 实例。settings 走进程内共享单例，配额变更（管理端写
@@ -65,6 +82,7 @@ func New(ctx *config.Context) *Sticker {
 		Log:      log.NewTLog("Sticker"),
 		db:       newStickerDB(ctx),
 		settings: commonmod.EnsureSystemSettings(ctx),
+		fileURL:  filemod.NewService(ctx),
 	}
 	// 运营可见性：签发/校验 handle 的「能力」由 OCTO_MASTER_KEY 决定（stickersig.Enabled，
 	// 部署级 env），「是否强制客户端必须带 handle」的「策略」由 system_setting
@@ -98,9 +116,66 @@ func (s *Sticker) Route(r *wkhttp.WKHttp) {
 	{
 		auth.GET("/user", s.list)
 		auth.POST("/user", s.add)
+		auth.POST("/user/collect", s.collect)
 		auth.PUT("/user/:sticker_id", s.update)
 		auth.DELETE("/user/:sticker_id", s.delete)
 	}
+}
+
+// renderablePath normalizes a stored sticker path into a value the client can
+// drop straight into an <img src> — no per-client "absolute vs relative" branch.
+//
+// Two shapes reach the DB:
+//   - self-uploaded stickers store the /v1/file/upload response `path`, which is
+//     already an absolute anonymous-GET download/CDN URL → passed through as-is.
+//   - collected stickers (and any relative object key) store the object key. The
+//     authenticated /v1/file/preview/<key> endpoint cannot be used directly in an
+//     <img> because AuthMiddleware only reads the token from a header, so we
+//     resolve the key through the file service's DownloadURL — the same permanent
+//     public/CDN URL /v1/file/preview redirects to.
+//
+// Any leading "file/preview/" is stripped before resolving so legacy collected
+// rows (which stored the preview path) normalize identically to new rows (which
+// store the bare key). On resolve failure the stored value is returned unchanged
+// — no worse than the pre-normalization behavior.
+func (s *Sticker) renderablePath(stored string) string {
+	if stored == "" {
+		return stored
+	}
+	if strings.HasPrefix(stored, "http://") || strings.HasPrefix(stored, "https://") {
+		return stored
+	}
+	if s.fileURL == nil {
+		return stored
+	}
+	key := strings.TrimPrefix(stored, "file/preview/")
+	// Defense-in-depth against keyspace escape: never hand a "."/".." segment to
+	// DownloadURL (url.JoinPath resolves "..", escaping the sticker/ prefix). The
+	// collect ingress already rejects such keys, but this also confines any
+	// legacy row or the self-upload path. A traversal key falls back to the
+	// stored value (a broken but non-escaping render), matching pre-change
+	// behavior where /v1/file/preview rejected "..".
+	if hasUnsafeSegment(key) {
+		return stored
+	}
+	url, err := s.fileURL.DownloadURL(key, "")
+	if err != nil || url == "" {
+		// Fail open, but make silent degradation observable: on a misconfigured
+		// backend every list item would quietly return its raw stored value.
+		// Low-cardinality — the error, never the per-user path, is logged.
+		s.Warn("解析贴纸渲染 URL 失败，回退到存储原值", zap.Error(err))
+		return stored
+	}
+	return url
+}
+
+// toResp maps a model to the wire shape with a client-renderable path. Every
+// endpoint that returns a sticker funnels through here so the `path` contract is
+// uniform across list/add/collect/update.
+func (s *Sticker) toResp(m *StickerModel) stickerResp {
+	r := toStickerResp(m)
+	r.Path = s.renderablePath(r.Path)
+	return r
 }
 
 // list 返回当前用户的自定义贴纸（扁平列表，最新在前）。空集合返回
@@ -117,7 +192,7 @@ func (s *Sticker) list(ctx *wkhttp.Context) {
 
 	list := make([]stickerResp, 0, len(models))
 	for _, m := range models {
-		list = append(list, toStickerResp(m))
+		list = append(list, s.toResp(m))
 	}
 	ctx.Response(listStickerResp{List: list})
 }
@@ -329,7 +404,181 @@ func (s *Sticker) add(ctx *wkhttp.Context) {
 		zap.Bool("handle_required", stickersig.Enabled()),
 		zap.Bool("shortcode_set", shortcode != ""),
 		zap.Int("keyword_count", len(decodeStickerKeywords(keywordsStore))))
-	ctx.Response(toStickerResp(m))
+	ctx.Response(s.toResp(m))
+}
+
+// collect adds a sticker sent by another user into the caller's personal
+// sticker list. Unlike add(), the source path is not required to belong to the
+// caller; it must still point at the reserved sticker object keyspace. The
+// stored path is the bare source object key; the response (and later list)
+// resolve it to a client-renderable URL via toResp → renderablePath.
+// SourcePathHash makes repeat taps idempotent without charging quota again.
+//
+// collect intentionally does not require the upload handle even when
+// sticker.handle_required=true: the endpoint is for a sticker URL already
+// carried in a message, and the only accepted source is the reserved sticker/
+// keyspace that file upload protects from non-sticker writes. With the current
+// path-only contract this is a collect-specific trust boundary, not a general
+// replacement for add()'s same-user upload-handle proof.
+func (s *Sticker) collect(ctx *wkhttp.Context) {
+	loginUID := ctx.GetLoginUID()
+
+	var req collectStickerReq
+	if err := ctx.BindJSON(&req); err != nil {
+		observeStickerCollect("validation_failed")
+		respondStickerRequestInvalid(ctx, "")
+		return
+	}
+	if req.Path == "" {
+		observeStickerCollect("path_invalid")
+		respondStickerRequestInvalid(ctx, "path")
+		return
+	}
+	if len(req.Path) > maxStickerCollectPathLen {
+		observeStickerCollect("path_invalid")
+		respondStickerRequestInvalid(ctx, "path")
+		return
+	}
+	source, ok := parseCollectStickerSourcePath(req.Path)
+	if !ok {
+		observeStickerCollect("path_invalid")
+		respondStickerRequestInvalid(ctx, "path")
+		return
+	}
+	if len(source.DisplayPath) > maxStickerPathLen || len(source.SourceKey) > maxStickerPathLen {
+		observeStickerCollect("path_invalid")
+		respondStickerRequestInvalid(ctx, "path")
+		return
+	}
+	placeholder := req.Placeholder
+	if placeholder == "" {
+		placeholder = defaultStickerPlaceholder
+	}
+	if len([]rune(placeholder)) > maxStickerPlaceholderLen {
+		observeStickerCollect("validation_failed")
+		respondStickerRequestInvalid(ctx, "placeholder")
+		return
+	}
+	if req.Sort < 0 {
+		observeStickerCollect("validation_failed")
+		respondStickerRequestInvalid(ctx, "sort")
+		return
+	}
+	shortcode, ok := normalizeStickerShortcode(req.Shortcode)
+	if !ok {
+		observeStickerCollect("validation_failed")
+		respondStickerShortcodeInvalid(ctx)
+		return
+	}
+	keywordsStore, _, ok := normalizeStickerKeywords(req.Keywords)
+	if !ok {
+		observeStickerCollect("validation_failed")
+		respondStickerKeywordsInvalid(ctx)
+		return
+	}
+
+	sourceHash := stickerSourcePathHash(source.SourceKey)
+	max := s.settings.StickerUserMaxCount()
+
+	tx, err := s.ctx.DB().Begin()
+	if err != nil {
+		s.Error("开启事务失败", zap.Error(err))
+		observeStickerCollect("store_failed")
+		httperr.ResponseErrorL(ctx, errcode.ErrStickerStoreFailed, nil, nil)
+		return
+	}
+	defer tx.RollbackUnlessCommitted()
+
+	if err := s.db.lockUserRowTx(tx, loginUID); err != nil {
+		s.Error("锁定用户行失败", zap.Error(err))
+		observeStickerCollect("store_failed")
+		httperr.ResponseErrorL(ctx, errcode.ErrStickerStoreFailed, nil, nil)
+		return
+	}
+
+	existing, err := s.db.queryByUIDAndSourcePathHashTx(tx, loginUID, sourceHash)
+	if err != nil {
+		s.Error("查询已收藏贴纸失败", zap.Error(err), zap.String("uid", loginUID))
+		observeStickerCollect("query_failed")
+		httperr.ResponseErrorL(ctx, errcode.ErrStickerQueryFailed, nil, nil)
+		return
+	}
+	if existing != nil {
+		if err := tx.Commit(); err != nil {
+			s.Error("提交事务失败", zap.Error(err))
+			observeStickerCollect("store_failed")
+			httperr.ResponseErrorL(ctx, errcode.ErrStickerStoreFailed, nil, nil)
+			return
+		}
+		observeStickerCollect("idempotent_hit")
+		ctx.Response(s.toResp(existing))
+		return
+	}
+
+	count, err := s.db.countByUIDTx(tx, loginUID)
+	if err != nil {
+		s.Error("查询贴纸数量失败", zap.Error(err))
+		observeStickerCollect("query_failed")
+		httperr.ResponseErrorL(ctx, errcode.ErrStickerQueryFailed, nil, nil)
+		return
+	}
+	if count >= max {
+		observeStickerCollect("quota_exceeded")
+		respondStickerQuotaExceeded(ctx, max)
+		return
+	}
+	conflict, err := s.db.shortcodeExistsTx(tx, loginUID, shortcode, "")
+	if err != nil {
+		s.Error("查询贴纸 shortcode 冲突失败", zap.Error(err), zap.String("uid", loginUID))
+		observeStickerCollect("query_failed")
+		httperr.ResponseErrorL(ctx, errcode.ErrStickerQueryFailed, nil, nil)
+		return
+	}
+	if conflict {
+		observeStickerCollect("shortcode_conflict")
+		respondStickerShortcodeConflict(ctx)
+		return
+	}
+
+	m := &StickerModel{
+		StickerID: util.GenerUUID(),
+		UID:       loginUID,
+		// Store the bare object key, not the auth-gated file/preview/ path. The
+		// list/collect responses resolve it to a renderable URL via toResp →
+		// renderablePath; storing the key keeps the DB backend-agnostic (a CDN /
+		// download-host change re-resolves correctly instead of stranding a
+		// baked-in preview path).
+		Path:           source.SourceKey,
+		Placeholder:    placeholder,
+		Format:         source.Format,
+		Sort:           req.Sort,
+		Shortcode:      shortcode,
+		Keywords:       keywordsStore,
+		SourcePath:     source.SourceKey,
+		SourcePathHash: sourceHash,
+		Status:         1,
+	}
+	if err := s.db.insertTx(tx, m); err != nil {
+		s.Error("收藏贴纸失败", zap.Error(err), zap.String("uid", loginUID), zap.String("source_path", source.SourceKey))
+		observeStickerCollect("store_failed")
+		httperr.ResponseErrorL(ctx, errcode.ErrStickerStoreFailed, nil, nil)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		s.Error("提交事务失败", zap.Error(err))
+		observeStickerCollect("store_failed")
+		httperr.ResponseErrorL(ctx, errcode.ErrStickerStoreFailed, nil, nil)
+		return
+	}
+
+	observeStickerCollect("success")
+	s.Info("贴纸收藏成功",
+		zap.String("uid", loginUID),
+		zap.String("source_path", source.SourceKey),
+		zap.String("format", source.Format),
+		zap.Bool("shortcode_set", shortcode != ""),
+		zap.Int("keyword_count", len(decodeStickerKeywords(keywordsStore))))
+	ctx.Response(s.toResp(m))
 }
 
 // update partially updates the current user's sticker metadata. Missing fields
@@ -426,7 +675,7 @@ func (s *Sticker) update(ctx *wkhttp.Context) {
 		return
 	}
 
-	ctx.Response(toStickerResp(m))
+	ctx.Response(s.toResp(m))
 }
 
 // stickerPathClass is the outcome of authorizing a client-supplied sticker
