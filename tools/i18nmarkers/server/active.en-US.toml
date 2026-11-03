@@ -6,6 +6,18 @@
 #
 # CI rejects PRs that change codes.Register input without re-running extract.
 
+["err.server.agent_memory.context_auth_failed"]
+other = "Agent memory authentication failed."
+
+["err.server.agent_memory.context_forbidden"]
+other = "Agent memory access is forbidden."
+
+["err.server.agent_memory.governance_scope"]
+other = "The governance scope or policy is not available for this run."
+
+["err.server.agent_memory.version_conflict"]
+other = "The Agent memory resource was modified by another request."
+
 ["err.server.app_bot.id_conflict"]
 other = "The bot id is already in use."
 

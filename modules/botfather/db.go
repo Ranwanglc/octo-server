@@ -128,10 +128,17 @@ func (d *botfatherDB) updateRobotIMTokenCache(robotID string, imToken string) er
 
 // updateRobotBotToken 重置机器人的Bot Token
 func (d *botfatherDB) updateRobotBotToken(robotID string, newToken string) error {
-	_, err := d.session.Update("robot").SetMap(map[string]interface{}{
-		"bot_token": newToken,
-	}).Where("robot_id=?", robotID).Exec()
-	return err
+	tx, err := d.session.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.RollbackUnlessCommitted()
+	if _, err = tx.Update("robot").SetMap(map[string]interface{}{
+		"bot_token": newToken, "credential_epoch": dbr.Expr("credential_epoch + 1"),
+	}).Where("robot_id=?", robotID).Exec(); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // updateRobotName 更新机器人名称（需要同时更新user表）
@@ -154,11 +161,17 @@ func (d *botfatherDB) updateRobotAgentInfo(robotID, agentPlatform, agentVersion,
 
 // deleteRobot 软删除机器人（status=0）并清除 username 以释放标识符供复用。
 func (d *botfatherDB) deleteRobot(robotID string) error {
-	_, err := d.session.Update("robot").SetMap(map[string]interface{}{
-		"status":   0,
-		"username": "",
-	}).Where("robot_id=?", robotID).Exec()
-	return err
+	tx, err := d.session.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.RollbackUnlessCommitted()
+	if _, err = tx.Update("robot").SetMap(map[string]interface{}{
+		"status": 0, "username": "", "credential_epoch": dbr.Expr("credential_epoch + 1"),
+	}).Where("robot_id=?", robotID).Exec(); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // queryRobotList 分页查询机器人列表（后台管理用）

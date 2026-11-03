@@ -39,6 +39,18 @@ other = "资源不存在。"
 ["err.shared.internal"]
 other = "服务器内部错误。"
 
+["err.server.agent_memory.version_conflict"]
+other = "Agent 记忆资源已被其他请求修改。"
+
+["err.server.agent_memory.context_auth_failed"]
+other = "Agent 记忆身份验证失败。"
+
+["err.server.agent_memory.context_forbidden"]
+other = "禁止访问 Agent 记忆。"
+
+["err.server.agent_memory.governance_scope"]
+other = "当前治理范围或策略不可用于本次运行。"
+
 ["err.server.notify.card_not_allowed"]
 other = "内部通知接口不允许发送卡片消息。"
 

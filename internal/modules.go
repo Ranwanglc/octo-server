@@ -64,6 +64,7 @@ import (
 	// before app_bot（历史顺序，非 load-bearing —— Go init() 顺序由依赖图决定）.
 	_ "github.com/Mininglamp-OSS/octo-server/modules/bot_api"
 
+	_ "github.com/Mininglamp-OSS/octo-server/modules/agent_memory"
 	_ "github.com/Mininglamp-OSS/octo-server/modules/app_bot"
 	// PR-A: cross-service JWT issuer + bot endpoints (mint / token lookup).
 	_ "github.com/Mininglamp-OSS/octo-server/modules/bot_provision"

@@ -86,11 +86,14 @@ func (d *robotDB) updateRobotTx(m *robot, tx *dbr.Tx) error {
 	return err
 }
 func (d *robotDB) updateRobot(m *robot) error {
-	_, err := d.session.Update("robot").SetMap(map[string]interface{}{
-		"version": m.Version,
-		"status":  m.Status,
-	}).Where("robot_id=?", m.RobotID).Exec()
-	return err
+	return d.withTx(func(tx *dbr.Tx) error {
+		fields := map[string]interface{}{"version": m.Version, "status": m.Status}
+		if m.Status != 1 {
+			fields["credential_epoch"] = dbr.Expr("credential_epoch + 1")
+		}
+		_, err := tx.Update("robot").SetMap(fields).Where("robot_id=?", m.RobotID).Exec()
+		return err
+	})
 }
 func (d *robotDB) queryMenusWithRobotID(robotID string) ([]*menu, error) {
 	var menus []*menu
@@ -133,16 +136,23 @@ func (d *robotDB) queryRobotByBotToken(botToken string) (*robot, error) {
 
 // updateRobotBotToken 重置机器人的Bot Token
 func (d *robotDB) updateRobotBotToken(robotID string, newToken string) error {
-	_, err := d.session.Update("robot").SetMap(map[string]interface{}{
-		"bot_token": newToken,
-	}).Where("robot_id=?", robotID).Exec()
-	return err
+	return d.withTx(func(tx *dbr.Tx) error {
+		_, err := tx.Update("robot").SetMap(map[string]interface{}{
+			"bot_token": newToken, "credential_epoch": dbr.Expr("credential_epoch + 1"),
+		}).Where("robot_id=?", robotID).Exec()
+		return err
+	})
 }
 
 // updateRobotInfo 更新机器人信息（管理后台用）
 func (d *robotDB) updateRobotInfo(robotID string, fields map[string]interface{}) error {
-	_, err := d.session.Update("robot").SetMap(fields).Where("robot_id=?", robotID).Exec()
-	return err
+	return d.withTx(func(tx *dbr.Tx) error {
+		if status, ok := fields["status"]; ok && status != 1 {
+			fields["credential_epoch"] = dbr.Expr("credential_epoch + 1")
+		}
+		_, err := tx.Update("robot").SetMap(fields).Where("robot_id=?", robotID).Exec()
+		return err
+	})
 }
 
 // updateRobotIMTokenCache 更新机器人的IM Token缓存
@@ -155,10 +165,24 @@ func (d *robotDB) updateRobotIMTokenCache(robotID string, imToken string) error 
 
 // deleteRobotSoft 软删除机器人
 func (d *robotDB) deleteRobotSoft(robotID string) error {
-	_, err := d.session.Update("robot").SetMap(map[string]interface{}{
-		"status": 0,
-	}).Where("robot_id=?", robotID).Exec()
-	return err
+	return d.withTx(func(tx *dbr.Tx) error {
+		_, err := tx.Update("robot").SetMap(map[string]interface{}{
+			"status": 0, "credential_epoch": dbr.Expr("credential_epoch + 1"),
+		}).Where("robot_id=?", robotID).Exec()
+		return err
+	})
+}
+
+func (d *robotDB) withTx(fn func(*dbr.Tx) error) error {
+	tx, err := d.session.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.RollbackUnlessCommitted()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 type menu struct {
@@ -169,19 +193,21 @@ type menu struct {
 	db.BaseModel
 }
 type robot struct {
-	AppID        string
-	RobotID      string // 机器人唯一ID
-	Username     string // 机器人用户名
-	InlineOn     int    // 是否开启行内搜索
-	Placeholder  string // 输入框占位符，开启行内搜索有效
-	Token        string
-	Version      int64
-	Status       int
-	CreatorUID   string // 创建者UID
-	Description  string // 机器人描述
-	BotToken     string // Bot认证Token
-	IMTokenCache string // 缓存的IM Token
-	BotCommands  string // 机器人命令列表JSON
+	AppID           string
+	RobotID         string // 机器人唯一ID
+	Username        string // 机器人用户名
+	InlineOn        int    // 是否开启行内搜索
+	Placeholder     string // 输入框占位符，开启行内搜索有效
+	Token           string
+	Version         int64
+	Status          int
+	CreatorUID      string // 创建者UID
+	Description     string // 机器人描述
+	BotToken        string // Bot认证Token
+	SpaceID         *string
+	CredentialEpoch int64
+	IMTokenCache    string // 缓存的IM Token
+	BotCommands     string // 机器人命令列表JSON
 	db.BaseModel
 }
 
