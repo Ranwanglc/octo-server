@@ -335,6 +335,7 @@ func (w *Webhook) handleMessageNotify(messages []MsgResp) ([]string, error) {
 				zap.String("fakeChannelID", p.fakeChannelID), zap.String("spaceID", p.spaceID))
 		}
 	}
+	w.autopostWriteGateMessages(messages)
 	return messageIDs, nil
 }
 
